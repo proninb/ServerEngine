@@ -1,7 +1,6 @@
 #include "config/server_configuration_loader.hpp"
 #include "diagnostics/diagnostic_registry.hpp"
-#include "project/project_configuration_loader.hpp"
-#include "project/project_context.hpp"
+#include "project/project_manager.hpp"
 
 #include <filesystem>
 #include <iostream>
@@ -38,18 +37,28 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    project_configuration project;
-    if (!load_project_configuration_file(
-            server.project.path, operation_id{2}, diagnostics, project).ok()) {
+    project_manager projects;
+    project_build_result build;
+    if (!projects.load(
+            server.project.path, operation_id{2}, diagnostics, build).ok()) {
         print_diagnostics(diagnostics);
         return 2;
     }
 
-    project_context context{std::move(project)};
+    project_read_guard read;
+    if (!projects.read(read).ok() || !read)
+        return 3;
 
-    std::cout << "Server Engine foundation initialized\n";
-    std::cout << "Project: " << context.configuration().name << '\n';
-    std::cout << "Project items: " << context.configuration().project.size() << '\n';
-    std::cout << "Semantic identities: " << context.identity_count() << " (root only)\n";
+    const auto& graph = read->compiled_graph();
+    std::cout << "Server Engine project loaded\n";
+    std::cout << "Project: " << read->configuration().name << '\n';
+    std::cout << "Project items: " << read->configuration().project.size() << '\n';
+    std::cout << "Semantic identities: " << read->identity_count() << '\n';
+    std::cout << "Types: " << graph.type_count() << '\n';
+    std::cout << "Objects: " << graph.object_count() << '\n';
+    std::cout << "Links: " << graph.link_count() << '\n';
+
+    read = {};
+    projects.unload();
     return 0;
 }

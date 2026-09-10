@@ -7,6 +7,7 @@
 #include <limits>
 #include <new>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 
 namespace cw::server {
@@ -72,26 +73,6 @@ template<class T>
     return true;
 }
 
-[[nodiscard]] status append_name(
-    const source_facts& facts,
-    source_span span,
-    std::vector<char>& names,
-    std::size_t base,
-    source_contribution_name_ref& output) {
-
-    const auto text = facts.text(span);
-    if (text.size() > (std::numeric_limits<std::uint32_t>::max)() ||
-        names.size() > (std::numeric_limits<std::size_t>::max)() - text.size()) {
-        return {status_code::not_available};
-    }
-
-    if (!absolute_u32(base, names.size(), output.offset))
-        return {status_code::not_available};
-    output.length = static_cast<std::uint32_t>(text.size());
-    names.insert(names.end(), text.begin(), text.end());
-    return {};
-}
-
 [[nodiscard]] std::size_t patch_capacity(std::size_t count) noexcept {
     if (count == 0)
         return 0;
@@ -154,9 +135,47 @@ void source_contribution_cache::storage::swap(storage& other) noexcept {
     members.swap(other.members);
     modifiers.swap(other.modifiers);
     enum_values.swap(other.enum_values);
-    names.swap(other.names);
+    objects.swap(other.objects);
+    links.swap(other.links);
     construction.swap(other.construction);
     std::swap(statistics, other.statistics);
+}
+
+source_contribution_storage_usage source_contribution_cache::storage_usage() const noexcept {
+    source_contribution_storage_usage output;
+
+    const auto add_vector = [&](const auto& values) noexcept {
+        using value_type = typename std::remove_reference_t<decltype(values)>::value_type;
+        output.retained_bytes += values.capacity() * sizeof(value_type);
+        output.reserve_bytes += (values.capacity() - values.size()) * sizeof(value_type);
+    };
+
+    add_vector(committed.sources);
+    add_vector(committed.types);
+    add_vector(committed.members);
+    add_vector(committed.modifiers);
+    add_vector(committed.enum_values);
+    add_vector(committed.objects);
+    add_vector(committed.links);
+    add_vector(committed.construction);
+
+    const auto stale_count = [](std::size_t physical, std::size_t live) noexcept {
+        return physical > live ? physical - live : std::size_t{0};
+    };
+
+    const auto source_slots = committed.sources.empty() ? 0 : committed.sources.size() - 1;
+    output.construction_slots = committed.construction.empty() ? 0 : committed.construction.size() - 1;
+    output.stale_bytes += stale_count(source_slots, statistics_value.sources) * sizeof(source_contribution_state);
+    output.stale_bytes += stale_count(committed.types.size(), statistics_value.type_declarations) * sizeof(source_contribution_type);
+    output.stale_bytes += stale_count(committed.members.size(), statistics_value.members) * sizeof(source_contribution_member);
+    output.stale_bytes += stale_count(committed.modifiers.size(), statistics_value.modifiers) * sizeof(source_type_modifier);
+    output.stale_bytes += stale_count(committed.enum_values.size(), statistics_value.enum_values) * sizeof(source_contribution_enum_value);
+    output.stale_bytes += stale_count(committed.objects.size(), statistics_value.objects) * sizeof(source_contribution_object);
+    output.stale_bytes += stale_count(committed.links.size(), statistics_value.links) * sizeof(source_contribution_link);
+
+    // Construction slots track historical type handles. Their stale portion is
+    // accounted by Project-level pressure where current Graph live type count is known.
+    return output;
 }
 
 source_contribution_cache_update source_contribution_cache::begin_rebuild() noexcept {
@@ -192,12 +211,16 @@ std::span<const source_contribution_enum_value> source_contribution_cache::enum_
     return checked_span(committed.enum_values, range);
 }
 
-std::string_view source_contribution_cache::name(source_contribution_name_ref value) const noexcept {
-    const auto offset = static_cast<std::size_t>(value.offset);
-    const auto length = static_cast<std::size_t>(value.length);
-    if (offset > committed.names.size() || length > committed.names.size() - offset)
-        return {};
-    return {committed.names.data() + offset, length};
+std::span<const source_contribution_object> source_contribution_cache::objects(source_id source) const noexcept {
+    const auto* value = state(source);
+    return value == nullptr ? std::span<const source_contribution_object>{} :
+        checked_span(committed.objects, value->objects);
+}
+
+std::span<const source_contribution_link> source_contribution_cache::links(source_id source) const noexcept {
+    const auto* value = state(source);
+    return value == nullptr ? std::span<const source_contribution_link>{} :
+        checked_span(committed.links, value->links);
 }
 
 bool source_contribution_cache::equivalent(const source_facts& facts) const noexcept {
@@ -209,10 +232,14 @@ bool source_contribution_cache::equivalent(const source_facts& facts) const noex
     const auto cached_members = members(source_state->members);
     const auto cached_modifiers = modifiers(source_state->modifiers);
     const auto cached_enum_values = enum_values(source_state->enum_values);
+    const auto cached_objects = objects(facts.source());
+    const auto cached_links = links(facts.source());
 
     if (cached_members.size() != facts.members().size() ||
         cached_modifiers.size() != facts.modifiers().size() ||
-        cached_enum_values.size() != facts.enum_values().size()) {
+        cached_enum_values.size() != facts.enum_values().size() ||
+        cached_objects.size() != facts.objects().size() ||
+        cached_links.size() != facts.links().size()) {
         return false;
     }
 
@@ -230,7 +257,7 @@ bool source_contribution_cache::equivalent(const source_facts& facts) const noex
             cached.type.intrinsic != current.type.intrinsic ||
             cached.type.modifiers.count != current.type.modifiers.count ||
             cached.access != current.access ||
-            name(cached.name) != facts.text(current.name)) {
+            cached.name != current.name) {
             return false;
         }
         if (cached.type.modifiers.begin < source_state->modifiers.begin ||
@@ -244,7 +271,31 @@ bool source_contribution_cache::equivalent(const source_facts& facts) const noex
         const auto& current = facts.enum_values()[index];
         if (cached.value.intrinsic != current.value.intrinsic ||
             cached.value.bits != current.value.bits ||
-            name(cached.name) != facts.text(current.name)) {
+            cached.name != current.name) {
+            return false;
+        }
+    }
+
+    for (std::size_t index = 0; index < cached_objects.size(); ++index) {
+        const auto& cached = cached_objects[index];
+        const auto& current = facts.objects()[index];
+        if (cached.identity != current.identity ||
+            cached.type.identity != current.type.identity ||
+            cached.type.intrinsic != current.type.intrinsic ||
+            cached.type.modifiers.count != current.type.modifiers.count ||
+            cached.type.modifiers.begin < source_state->modifiers.begin ||
+            cached.type.modifiers.begin - source_state->modifiers.begin != current.type.modifiers.begin) {
+            return false;
+        }
+    }
+
+    for (std::size_t index = 0; index < cached_links.size(); ++index) {
+        const auto& cached = cached_links[index];
+        const auto& current = facts.links()[index];
+        if (cached.source.object != current.source.object ||
+            cached.source.member != current.source.member ||
+            cached.target.object != current.target.object ||
+            cached.target.member != current.target.member) {
             return false;
         }
     }
@@ -300,6 +351,14 @@ bool source_contribution_cache::equivalent(const source_facts& facts) const noex
                     !compare_enum(facts.enums()[declaration.index]))
                     return false;
                 break;
+            case source_declaration_kind::object:
+                if (declaration.index >= facts.objects().size())
+                    return false;
+                break;
+            case source_declaration_kind::link:
+                if (declaration.index >= facts.links().size())
+                    return false;
+                break;
             }
         }
     } else {
@@ -328,7 +387,8 @@ status source_contribution_cache_update::reserve_rebuild(
     std::size_t member_count,
     std::size_t modifier_count,
     std::size_t enum_value_count,
-    std::size_t name_bytes) noexcept {
+    std::size_t object_count,
+    std::size_t link_count) noexcept {
 
     if (!failure.ok())
         return failure;
@@ -340,7 +400,8 @@ status source_contribution_cache_update::reserve_rebuild(
         member_count >= (std::numeric_limits<std::uint32_t>::max)() ||
         modifier_count >= (std::numeric_limits<std::uint32_t>::max)() ||
         enum_value_count >= (std::numeric_limits<std::uint32_t>::max)() ||
-        name_bytes > (std::numeric_limits<std::uint32_t>::max)()) {
+        object_count >= (std::numeric_limits<std::uint32_t>::max)() ||
+        link_count >= (std::numeric_limits<std::uint32_t>::max)()) {
         failure = {status_code::not_available};
         return failure;
     }
@@ -358,7 +419,9 @@ status source_contribution_cache_update::reserve_rebuild(
         if (!result.ok()) return result;
         result = reserve_with_headroom(candidate.enum_values, enum_value_count);
         if (!result.ok()) return result;
-        result = reserve_with_headroom(candidate.names, name_bytes);
+        result = reserve_with_headroom(candidate.objects, object_count);
+        if (!result.ok()) return result;
+        result = reserve_with_headroom(candidate.links, link_count);
         if (!result.ok()) return result;
         result = reserve_with_headroom(candidate.construction, type_declarations + 1);
         if (!result.ok()) return result;
@@ -423,7 +486,9 @@ status source_contribution_cache_update::replace(
         if (candidate.types.size() > (std::numeric_limits<std::uint32_t>::max)() ||
             candidate.members.size() > (std::numeric_limits<std::uint32_t>::max)() ||
             candidate.modifiers.size() > (std::numeric_limits<std::uint32_t>::max)() ||
-            candidate.enum_values.size() > (std::numeric_limits<std::uint32_t>::max)()) {
+            candidate.enum_values.size() > (std::numeric_limits<std::uint32_t>::max)() ||
+            candidate.objects.size() > (std::numeric_limits<std::uint32_t>::max)() ||
+            candidate.links.size() > (std::numeric_limits<std::uint32_t>::max)()) {
             failure = {status_code::not_available};
             return failure;
         }
@@ -432,6 +497,8 @@ status source_contribution_cache_update::replace(
         const auto member_begin = candidate.members.size();
         const auto modifier_begin = candidate.modifiers.size();
         const auto enum_value_begin = candidate.enum_values.size();
+        const auto object_begin = candidate.objects.size();
+        const auto link_begin = candidate.links.size();
 
         candidate.modifiers.insert(
             candidate.modifiers.end(), facts.modifiers().begin(), facts.modifiers().end());
@@ -445,25 +512,33 @@ status source_contribution_cache_update::replace(
                 failure = {status_code::not_available};
                 return failure;
             }
-            auto result = append_name(facts, item.name, candidate.names, 0, value.name);
-            if (!result.ok()) {
-                failure = result;
-                return failure;
-            }
+            value.name = item.name;
             value.access = item.access;
             candidate.members.push_back(value);
         }
 
         for (const auto& item : facts.enum_values()) {
             source_contribution_enum_value value;
-            auto result = append_name(facts, item.name, candidate.names, 0, value.name);
-            if (!result.ok()) {
-                failure = result;
-                return failure;
-            }
+            value.name = item.name;
             value.value = item.value;
             candidate.enum_values.push_back(value);
         }
+
+        for (const auto& item : facts.objects()) {
+            source_contribution_object value;
+            value.identity = item.identity;
+            value.type.identity = item.type.identity;
+            value.type.intrinsic = item.type.intrinsic;
+            value.type.modifiers.count = item.type.modifiers.count;
+            if (!add_u32(modifier_begin, item.type.modifiers.begin, value.type.modifiers.begin)) {
+                failure = {status_code::not_available};
+                return failure;
+            }
+            candidate.objects.push_back(value);
+        }
+
+        for (const auto& item : facts.links())
+            candidate.links.push_back({item.source, item.target});
 
         const auto append_record = [&](std::uint32_t index) -> status {
             if (index >= facts.records().size())
@@ -511,6 +586,12 @@ status source_contribution_cache_update::replace(
                 case source_declaration_kind::enum_type:
                     result = append_enum(declaration.index);
                     break;
+                case source_declaration_kind::object:
+                    result = declaration.index < facts.objects().size() ? status{} : status{status_code::invalid_argument};
+                    break;
+                case source_declaration_kind::link:
+                    result = declaration.index < facts.links().size() ? status{} : status{status_code::invalid_argument};
+                    break;
                 }
                 if (!result.ok()) {
                     failure = result;
@@ -537,7 +618,9 @@ status source_contribution_cache_update::replace(
         if (candidate.types.size() - type_begin > (std::numeric_limits<std::uint32_t>::max)() ||
             candidate.members.size() - member_begin > (std::numeric_limits<std::uint32_t>::max)() ||
             candidate.modifiers.size() - modifier_begin > (std::numeric_limits<std::uint32_t>::max)() ||
-            candidate.enum_values.size() - enum_value_begin > (std::numeric_limits<std::uint32_t>::max)()) {
+            candidate.enum_values.size() - enum_value_begin > (std::numeric_limits<std::uint32_t>::max)() ||
+            candidate.objects.size() - object_begin > (std::numeric_limits<std::uint32_t>::max)() ||
+            candidate.links.size() - link_begin > (std::numeric_limits<std::uint32_t>::max)()) {
             failure = {status_code::not_available};
             return failure;
         }
@@ -556,6 +639,12 @@ status source_contribution_cache_update::replace(
         state_value.enum_values = {
             static_cast<std::uint32_t>(enum_value_begin),
             static_cast<std::uint32_t>(candidate.enum_values.size() - enum_value_begin)};
+        state_value.objects = {
+            static_cast<std::uint32_t>(object_begin),
+            static_cast<std::uint32_t>(candidate.objects.size() - object_begin)};
+        state_value.links = {
+            static_cast<std::uint32_t>(link_begin),
+            static_cast<std::uint32_t>(candidate.links.size() - link_begin)};
 
         candidate.sources[source_index] = state_value;
         replaced[source_index] = 1;
@@ -564,7 +653,8 @@ status source_contribution_cache_update::replace(
         candidate.statistics.members = candidate.members.size();
         candidate.statistics.modifiers = candidate.modifiers.size();
         candidate.statistics.enum_values = candidate.enum_values.size();
-        candidate.statistics.name_bytes = candidate.names.size();
+        candidate.statistics.objects = candidate.objects.size();
+        candidate.statistics.links = candidate.links.size();
         return {};
     } catch (const std::bad_alloc&) {
         failure = {status_code::initialization_failed};
@@ -603,7 +693,8 @@ source_contribution_sparse_update::source_contribution_sparse_update(
       member_base(cache.committed.members.size()),
       modifier_base(cache.committed.modifiers.size()),
       enum_value_base(cache.committed.enum_values.size()),
-      name_base(cache.committed.names.size()) {
+      object_base(cache.committed.objects.size()),
+      link_base(cache.committed.links.size()) {
 }
 
 status source_contribution_sparse_update::reserve_incremental(
@@ -613,7 +704,8 @@ status source_contribution_sparse_update::reserve_incremental(
     std::size_t member_count,
     std::size_t modifier_count,
     std::size_t enum_value_count,
-    std::size_t name_bytes) noexcept {
+    std::size_t object_count,
+    std::size_t link_count) noexcept {
 
     if (!failure.ok())
         return failure;
@@ -626,7 +718,8 @@ status source_contribution_sparse_update::reserve_incremental(
         member_count > (std::numeric_limits<std::uint32_t>::max)() - member_base ||
         modifier_count > (std::numeric_limits<std::uint32_t>::max)() - modifier_base ||
         enum_value_count > (std::numeric_limits<std::uint32_t>::max)() - enum_value_base ||
-        name_bytes > (std::numeric_limits<std::uint32_t>::max)() - name_base) {
+        object_count > (std::numeric_limits<std::uint32_t>::max)() - object_base ||
+        link_count > (std::numeric_limits<std::uint32_t>::max)() - link_base) {
         failure = {status_code::not_available};
         return failure;
     }
@@ -644,7 +737,8 @@ status source_contribution_sparse_update::reserve_incremental(
         candidate.members.reserve(member_count);
         candidate.modifiers.reserve(modifier_count);
         candidate.enum_values.reserve(enum_value_count);
-        candidate.names.reserve(name_bytes);
+        candidate.objects.reserve(object_count);
+        candidate.links.reserve(link_count);
         source_patches.reserve(source_changes);
         construction_patches.reserve(touched_type_upper_bound);
         changed_source_ids.reserve(source_changes);
@@ -811,6 +905,8 @@ status source_contribution_sparse_update::replace(
         const auto member_local_begin = candidate.members.size();
         const auto modifier_local_begin = candidate.modifiers.size();
         const auto enum_value_local_begin = candidate.enum_values.size();
+        const auto object_local_begin = candidate.objects.size();
+        const auto link_local_begin = candidate.links.size();
 
         candidate.modifiers.insert(
             candidate.modifiers.end(), facts.modifiers().begin(), facts.modifiers().end());
@@ -826,30 +922,44 @@ status source_contribution_sparse_update::replace(
                 failure = {status_code::not_available};
                 return failure;
             }
-            result = append_name(facts, item.name, candidate.names, name_base, value.name);
-            if (!result.ok()) {
-                failure = result;
-                return failure;
-            }
+            value.name = item.name;
             value.access = item.access;
             candidate.members.push_back(value);
         }
 
         for (const auto& item : facts.enum_values()) {
             source_contribution_enum_value value;
-            result = append_name(facts, item.name, candidate.names, name_base, value.name);
-            if (!result.ok()) {
-                failure = result;
-                return failure;
-            }
+            value.name = item.name;
             value.value = item.value;
             candidate.enum_values.push_back(value);
         }
 
+        for (const auto& item : facts.objects()) {
+            source_contribution_object value;
+            value.identity = item.identity;
+            value.type.identity = item.type.identity;
+            value.type.intrinsic = item.type.intrinsic;
+            value.type.modifiers.count = item.type.modifiers.count;
+            std::uint32_t global_modifier_base = 0;
+            if (!absolute_u32(modifier_base, modifier_local_begin, global_modifier_base) ||
+                !add_u32(global_modifier_base, item.type.modifiers.begin, value.type.modifiers.begin)) {
+                failure = {status_code::not_available};
+                return failure;
+            }
+            candidate.objects.push_back(value);
+        }
+
+        for (const auto& item : facts.links())
+            candidate.links.push_back({item.source, item.target});
+
         std::uint32_t global_member_base = 0;
         std::uint32_t global_enum_base = 0;
+        std::uint32_t global_object_base = 0;
+        std::uint32_t global_link_base = 0;
         if (!absolute_u32(member_base, member_local_begin, global_member_base) ||
-            !absolute_u32(enum_value_base, enum_value_local_begin, global_enum_base)) {
+            !absolute_u32(enum_value_base, enum_value_local_begin, global_enum_base) ||
+            !absolute_u32(object_base, object_local_begin, global_object_base) ||
+            !absolute_u32(link_base, link_local_begin, global_link_base)) {
             failure = {status_code::not_available};
             return failure;
         }
@@ -899,6 +1009,12 @@ status source_contribution_sparse_update::replace(
                 case source_declaration_kind::enum_type:
                     result = append_enum(declaration.index);
                     break;
+                case source_declaration_kind::object:
+                    result = declaration.index < facts.objects().size() ? status{} : status{status_code::invalid_argument};
+                    break;
+                case source_declaration_kind::link:
+                    result = declaration.index < facts.links().size() ? status{} : status{status_code::invalid_argument};
+                    break;
                 }
                 if (!result.ok()) {
                     failure = result;
@@ -926,10 +1042,14 @@ status source_contribution_sparse_update::replace(
         const auto member_count = candidate.members.size() - member_local_begin;
         const auto modifier_count = candidate.modifiers.size() - modifier_local_begin;
         const auto enum_count = candidate.enum_values.size() - enum_value_local_begin;
+        const auto object_count = candidate.objects.size() - object_local_begin;
+        const auto link_count = candidate.links.size() - link_local_begin;
         if (type_count > (std::numeric_limits<std::uint32_t>::max)() ||
             member_count > (std::numeric_limits<std::uint32_t>::max)() ||
             modifier_count > (std::numeric_limits<std::uint32_t>::max)() ||
-            enum_count > (std::numeric_limits<std::uint32_t>::max)()) {
+            enum_count > (std::numeric_limits<std::uint32_t>::max)() ||
+            object_count > (std::numeric_limits<std::uint32_t>::max)() ||
+            link_count > (std::numeric_limits<std::uint32_t>::max)()) {
             failure = {status_code::not_available};
             return failure;
         }
@@ -947,6 +1067,8 @@ status source_contribution_sparse_update::replace(
             static_cast<std::uint32_t>(modifier_base + modifier_local_begin),
             static_cast<std::uint32_t>(modifier_count)};
         patch->state.enum_values = {global_enum_base, static_cast<std::uint32_t>(enum_count)};
+        patch->state.objects = {global_object_base, static_cast<std::uint32_t>(object_count)};
+        patch->state.links = {global_link_base, static_cast<std::uint32_t>(link_count)};
         patch->present = true;
         return {};
     } catch (const std::bad_alloc&) {
@@ -1028,22 +1150,28 @@ std::span<const source_contribution_enum_value> source_contribution_sparse_updat
         combined_span(owner->committed.enum_values, candidate.enum_values, enum_value_base, range);
 }
 
-std::string_view source_contribution_sparse_update::name(source_contribution_name_ref value) const noexcept {
-    if (owner == nullptr)
-        return {};
-    const auto offset = static_cast<std::size_t>(value.offset);
-    const auto length = static_cast<std::size_t>(value.length);
-    if (offset < name_base) {
-        if (offset > owner->committed.names.size() || length > owner->committed.names.size() - offset ||
-            offset + length > name_base) {
-            return {};
-        }
-        return {owner->committed.names.data() + offset, length};
-    }
-    const auto local = offset - name_base;
-    if (local > candidate.names.size() || length > candidate.names.size() - local)
-        return {};
-    return {candidate.names.data() + local, length};
+std::span<const source_contribution_object> source_contribution_sparse_update::previous_objects(
+    source_id source) const noexcept {
+    return owner == nullptr ? std::span<const source_contribution_object>{} : owner->objects(source);
+}
+
+std::span<const source_contribution_object> source_contribution_sparse_update::replacement_objects(
+    source_id source) const noexcept {
+    const auto* state_value = replacement_state(source);
+    return state_value == nullptr || owner == nullptr ? std::span<const source_contribution_object>{} :
+        combined_span(owner->committed.objects, candidate.objects, object_base, state_value->objects);
+}
+
+std::span<const source_contribution_link> source_contribution_sparse_update::previous_links(
+    source_id source) const noexcept {
+    return owner == nullptr ? std::span<const source_contribution_link>{} : owner->links(source);
+}
+
+std::span<const source_contribution_link> source_contribution_sparse_update::replacement_links(
+    source_id source) const noexcept {
+    const auto* state_value = replacement_state(source);
+    return state_value == nullptr || owner == nullptr ? std::span<const source_contribution_link>{} :
+        combined_span(owner->committed.links, candidate.links, link_base, state_value->links);
 }
 
 const source_construction_state* source_contribution_sparse_update::construction(type_handle handle) const noexcept {
@@ -1089,7 +1217,9 @@ status source_contribution_sparse_update::prepare_publish() noexcept {
                     !subtract_count(prepared_statistics.type_declarations, old->types.count) ||
                     !subtract_count(prepared_statistics.members, old->members.count) ||
                     !subtract_count(prepared_statistics.modifiers, old->modifiers.count) ||
-                    !subtract_count(prepared_statistics.enum_values, old->enum_values.count)) {
+                    !subtract_count(prepared_statistics.enum_values, old->enum_values.count) ||
+                    !subtract_count(prepared_statistics.objects, old->objects.count) ||
+                    !subtract_count(prepared_statistics.links, old->links.count)) {
                     return {status_code::invalid_argument};
                 }
                 --prepared_statistics.sources;
@@ -1100,6 +1230,8 @@ status source_contribution_sparse_update::prepare_publish() noexcept {
                 prepared_statistics.members += patch.state.members.count;
                 prepared_statistics.modifiers += patch.state.modifiers.count;
                 prepared_statistics.enum_values += patch.state.enum_values.count;
+                prepared_statistics.objects += patch.state.objects.count;
+                prepared_statistics.links += patch.state.links.count;
             }
         }
         for (const auto& patch : construction_patches)
@@ -1118,10 +1250,10 @@ status source_contribution_sparse_update::prepare_publish() noexcept {
             member_base + candidate.members.size() > owner->committed.members.capacity() ||
             modifier_base + candidate.modifiers.size() > owner->committed.modifiers.capacity() ||
             enum_value_base + candidate.enum_values.size() > owner->committed.enum_values.capacity() ||
-            name_base + candidate.names.size() > owner->committed.names.capacity()) {
-            return {status_code::not_available};
+            object_base + candidate.objects.size() > owner->committed.objects.capacity() ||
+            link_base + candidate.links.size() > owner->committed.links.capacity()) {
+            return {status_code::rebuild_required};
         }
-        prepared_statistics.name_bytes = name_base + candidate.names.size();
         prepared = true;
         return {};
     } catch (const std::bad_alloc&) {
@@ -1145,7 +1277,8 @@ void source_contribution_sparse_update::publish_prepared() noexcept {
     append_prepared(owner->committed.members, candidate.members);
     append_prepared(owner->committed.modifiers, candidate.modifiers);
     append_prepared(owner->committed.enum_values, candidate.enum_values);
-    append_prepared(owner->committed.names, candidate.names);
+    append_prepared(owner->committed.objects, candidate.objects);
+    append_prepared(owner->committed.links, candidate.links);
 
     for (const auto& patch : source_patches) {
         auto& target = owner->committed.sources[patch.source.value()];

@@ -1,6 +1,9 @@
 #pragma once
 
 #include "type_handle.hpp"
+#include "object_handle.hpp"
+#include "link_handle.hpp"
+#include "../../member_index.hpp"
 #include "type_ref.hpp"
 #include "../frontend/source_facts.hpp"
 #include "../identity/identity_node.hpp"
@@ -9,7 +12,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
-#include <string_view>
 #include <type_traits>
 #include <vector>
 
@@ -19,11 +21,6 @@ class generation_builder;
 
 inline constexpr std::size_t graph_intrinsic_type_count =
     static_cast<std::size_t>(intrinsic_type::nullptr_type) + 1;
-
-struct graph_name_ref final {
-    std::uint32_t offset = 0;
-    std::uint32_t length = 0;
-};
 
 struct definition_range final {
     std::uint32_t begin = 0;
@@ -55,23 +52,71 @@ struct type_entry final {
 
 static_assert(sizeof(type_entry) == 12);
 
-// Generation-local non-static instance member. Names live in the Graph name
-// arena; TypeRef is interpreted only in this same Graph.
+// Graph-local non-static instance member. string_id names are Project-lifetime
+// textual atoms; TypeRef is interpreted only in this same Graph.
 struct member_record final {
-    graph_name_ref name{};
+    string_id name{};
     TypeRef type{};
     source_member_access access = source_member_access::public_access;
 };
 
-static_assert(sizeof(member_record) == 16);
+static_assert(sizeof(member_record) == 12);
 
 struct enum_value_record final {
     std::uint64_t bits = 0;
-    graph_name_ref name{};
+    string_id name{};
     intrinsic_type intrinsic = intrinsic_type::signed_int;
 };
 
-static_assert(sizeof(enum_value_record) == 24);
+static_assert(sizeof(enum_value_record) == 16);
+
+// Graph-local static Project object. The type is already resolved to a Graph
+// handle; identity/name remain outside the hot record.
+struct object_entry final {
+    TypeRef type{};
+    std::uint32_t flags = 0;
+
+    [[nodiscard]] constexpr bool live() const noexcept { return (flags & 0x80000000u) != 0; }
+};
+
+static_assert(sizeof(object_entry) == 8);
+
+struct object_endpoint final {
+    object_handle object{};
+    member_index member{};
+
+    friend constexpr bool operator==(
+        const object_endpoint&, const object_endpoint&) noexcept = default;
+};
+
+static_assert(sizeof(object_endpoint) == 8);
+
+// Directed static Project connection. target identifies the unique binding
+// destination; Runtime later materializes this semantic edge into an address.
+struct link_record final {
+    object_endpoint source{};
+    object_endpoint target{};
+
+    [[nodiscard]] constexpr bool live() const noexcept {
+        return static_cast<bool>(source.object) && static_cast<bool>(target.object);
+    }
+};
+
+static_assert(sizeof(link_record) == 16);
+
+struct graph_object_identity_index_slot final {
+    std::uint32_t fingerprint = 0;
+    std::uint32_t handle = 0;
+};
+
+static_assert(sizeof(graph_object_identity_index_slot) == 8);
+
+struct graph_link_index_slot final {
+    std::uint32_t fingerprint = 0;
+    std::uint32_t handle = 0;
+};
+
+static_assert(sizeof(graph_link_index_slot) == 8);
 
 // Eight-byte acceleration slots retained by Graph so incremental Builder can
 // map already-resolved identity_ref directly to a historical type_handle.
@@ -88,6 +133,12 @@ struct graph_derived_index_slot final {
 };
 
 static_assert(sizeof(graph_derived_index_slot) == 8);
+
+struct graph_storage_usage final {
+    std::size_t retained_bytes = 0;
+    std::size_t reserve_bytes = 0;
+    std::size_t stale_bytes = 0;
+};
 
 // Append-only reverse dependency edge. owner_version makes prior outgoing edges
 // stale in O(1) when a type definition changes; G0 reclaims stale history.
@@ -126,10 +177,14 @@ private:
     std::vector<identity_ref> identities;
     std::vector<member_record> members;
     std::vector<enum_value_record> enum_values;
-    std::vector<char> names;
+    std::vector<object_entry> objects;
+    std::vector<identity_ref> object_identities;
+    std::vector<link_record> links;
     std::vector<graph_canonical_type_record> canonical_types;
 
     std::vector<graph_identity_index_slot> identity_index;
+    std::vector<graph_object_identity_index_slot> object_identity_index;
+    std::vector<graph_link_index_slot> link_index;
     std::array<TypeRef, graph_intrinsic_type_count> intrinsic_refs{};
     std::vector<TypeRef> named_refs;
     std::vector<graph_derived_index_slot> derived_index;
@@ -140,6 +195,8 @@ private:
     std::vector<graph_dependency_edge> dependency_edges;
 
     std::size_t live_type_count = 0;
+    std::size_t live_object_count = 0;
+    std::size_t live_link_count = 0;
 
     friend class graph;
     friend class generation_builder;
@@ -178,13 +235,28 @@ private:
         std::uint32_t owner_version = 0;
     };
 
+    struct object_patch final {
+        std::uint32_t handle = 0;
+        object_entry value{};
+    };
+
+    struct link_patch final {
+        std::uint32_t handle = 0;
+        link_record value{};
+    };
+
     std::vector<type_patch> type_patches;
     std::vector<type_entry> new_types;
     std::vector<identity_ref> new_identities;
 
+    std::vector<object_patch> object_patches;
+    std::vector<object_entry> new_objects;
+    std::vector<identity_ref> new_object_identities;
+    std::vector<link_patch> link_patches;
+    std::vector<link_record> new_links;
+
     std::vector<member_record> members;
     std::vector<enum_value_record> enum_values;
-    std::vector<char> names;
     std::vector<graph_canonical_type_record> canonical_types;
 
     std::array<TypeRef, graph_intrinsic_type_count> intrinsic_refs{};
@@ -194,11 +266,17 @@ private:
     std::vector<pending_dependency_edge> dependency_edges;
 
     std::vector<graph_identity_index_slot> rebuilt_identity_index;
+    std::vector<graph_object_identity_index_slot> rebuilt_object_identity_index;
+    std::vector<graph_link_index_slot> rebuilt_link_index;
     std::vector<graph_derived_index_slot> rebuilt_derived_index;
     std::size_t derived_index_entries = 0;
 
     std::size_t live_type_count = 0;
+    std::size_t live_object_count = 0;
+    std::size_t live_link_count = 0;
     bool replace_identity_index = false;
+    bool replace_object_identity_index = false;
+    bool replace_link_index = false;
     bool replace_derived_index = false;
 
     friend class graph;
@@ -221,29 +299,47 @@ public:
     [[nodiscard]] std::size_t type_slot_count() const noexcept { return types.size(); }
     [[nodiscard]] std::size_t member_record_count() const noexcept { return member_records.size(); }
     [[nodiscard]] std::size_t enum_value_record_count() const noexcept { return enum_value_records.size(); }
+    [[nodiscard]] std::size_t object_count() const noexcept { return live_object_count; }
+    [[nodiscard]] std::size_t object_slot_count() const noexcept { return object_entries.size(); }
+    [[nodiscard]] std::size_t link_count() const noexcept { return live_link_count; }
+    [[nodiscard]] std::size_t link_slot_count() const noexcept { return link_records.size(); }
     [[nodiscard]] std::size_t canonical_type_count() const noexcept {
         return canonical_types.empty() ? 0 : canonical_types.size() - 1;
     }
-    [[nodiscard]] std::size_t name_bytes() const noexcept { return names.size(); }
 
     [[nodiscard]] type_handle type_at(std::size_t index) const noexcept;
     [[nodiscard]] const type_entry* find(type_handle handle) const noexcept;
     [[nodiscard]] identity_ref identity(type_handle handle) const noexcept;
+    [[nodiscard]] type_handle find_type(identity_ref identity) const noexcept;
 
     [[nodiscard]] std::span<const member_record> members(type_handle handle) const noexcept;
     [[nodiscard]] std::span<const enum_value_record> enum_values(type_handle handle) const noexcept;
-    [[nodiscard]] std::string_view name(graph_name_ref value) const noexcept;
+    [[nodiscard]] member_index find_member(type_handle handle, string_id name) const noexcept;
+
+    [[nodiscard]] object_handle object_at(std::size_t index) const noexcept;
+    [[nodiscard]] const object_entry* find(object_handle handle) const noexcept;
+    [[nodiscard]] identity_ref identity(object_handle handle) const noexcept;
+    [[nodiscard]] object_handle find_object(identity_ref identity) const noexcept;
+
+    [[nodiscard]] const link_record* find(link_handle handle) const noexcept;
+    [[nodiscard]] link_handle find_link(object_endpoint target) const noexcept;
 
     [[nodiscard]] canonical_type_kind kind(TypeRef type) const noexcept;
     [[nodiscard]] bool intrinsic(TypeRef type, intrinsic_type& output) const noexcept;
     [[nodiscard]] bool named(TypeRef type, type_handle& output) const noexcept;
     [[nodiscard]] bool derived(TypeRef type, derived_type_record& output) const noexcept;
 
+    [[nodiscard]] graph_storage_usage storage_usage(
+        std::size_t live_members,
+        std::size_t live_enum_values) const noexcept;
+
 private:
     void publish_prepared(prepared_graph_generation& prepared) noexcept;
     void publish_prepared(prepared_graph_update& prepared) noexcept;
 
     [[nodiscard]] type_handle find_identity(identity_ref identity) const noexcept;
+    [[nodiscard]] object_handle find_object_identity(identity_ref identity) const noexcept;
+    [[nodiscard]] link_handle find_link_raw(object_endpoint target) const noexcept;
     [[nodiscard]] identity_ref identity_raw(type_handle handle) const noexcept;
     [[nodiscard]] const type_entry* find_raw(type_handle handle) const noexcept;
     [[nodiscard]] bool named_raw(TypeRef type, type_handle& output) const noexcept;
@@ -252,10 +348,14 @@ private:
     std::vector<identity_ref> identities;
     std::vector<member_record> member_records;
     std::vector<enum_value_record> enum_value_records;
-    std::vector<char> names;
+    std::vector<object_entry> object_entries;
+    std::vector<identity_ref> object_identities;
+    std::vector<link_record> link_records;
     std::vector<graph_canonical_type_record> canonical_types;
 
     std::vector<graph_identity_index_slot> identity_index;
+    std::vector<graph_object_identity_index_slot> object_identity_index;
+    std::vector<graph_link_index_slot> link_index;
     std::array<TypeRef, graph_intrinsic_type_count> intrinsic_refs{};
     std::vector<TypeRef> named_refs;
     std::vector<graph_derived_index_slot> derived_index;
@@ -266,11 +366,12 @@ private:
     std::vector<graph_dependency_edge> dependency_edges;
 
     std::size_t live_type_count = 0;
+    std::size_t live_object_count = 0;
+    std::size_t live_link_count = 0;
 
     friend class generation_builder;
 };
 
-static_assert(std::is_trivially_copyable_v<graph_name_ref>);
 static_assert(std::is_trivially_copyable_v<definition_range>);
 
 } // namespace cw::server

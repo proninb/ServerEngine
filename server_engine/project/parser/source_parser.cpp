@@ -26,14 +26,10 @@ namespace {
     return value;
 }
 
-[[nodiscard]] std::uint64_t binding_hash(identity_ref parent, std::string_view name) noexcept {
-    std::uint64_t hash = 1469598103934665603ULL;
-    for (const char character : name) {
-        const auto byte = static_cast<unsigned char>(character);
-        hash ^= byte;
-        hash *= 1099511628211ULL;
-    }
-    return mix64(hash ^ mix64(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(parent))));
+[[nodiscard]] std::uint64_t binding_hash(identity_ref parent, string_id name) noexcept {
+    return mix64(
+        static_cast<std::uint64_t>(name.value()) ^
+        mix64(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(parent))));
 }
 
 // Per-parse local declaration index. It is the source-language scope lookup state,
@@ -76,7 +72,7 @@ public:
         return insert_into(slots, identity, count);
     }
 
-    [[nodiscard]] identity_ref find(identity_ref parent, std::string_view name) const noexcept {
+    [[nodiscard]] identity_ref find(identity_ref parent, string_id name) const noexcept {
         if (slots.empty())
             return nullptr;
         const auto mask = slots.size() - 1;
@@ -85,7 +81,7 @@ public:
             const auto identity = slots[position];
             if (identity == nullptr)
                 return nullptr;
-            if (identity->parent() == parent && identity->name().view() == name)
+            if (identity->parent() == parent && identity->name() == name)
                 return identity;
             position = (position + 1) & mask;
         }
@@ -99,7 +95,7 @@ private:
         std::size_t& target_count) noexcept {
 
         const auto mask = target.size() - 1;
-        const auto name = identity->name().view();
+        const auto name = identity->name();
         auto position = static_cast<std::size_t>(binding_hash(identity->parent(), name)) & mask;
         for (std::size_t probe = 0; probe < target.size(); ++probe) {
             const auto existing = target[position];
@@ -108,7 +104,7 @@ private:
                 ++target_count;
                 return {};
             }
-            if (existing->parent() == identity->parent() && existing->name().view() == name)
+            if (existing->parent() == identity->parent() && existing->name() == name)
                 return existing == identity ? status{} : status{status_code::semantic_conflict};
             position = (position + 1) & mask;
         }
@@ -141,6 +137,232 @@ private:
     std::size_t count = 0;
 };
 
+class object_binding_index final {
+public:
+    [[nodiscard]] status reserve(std::size_t expected) noexcept {
+        try {
+            std::size_t capacity = 16;
+            const auto target = expected > (std::numeric_limits<std::size_t>::max)() / 2
+                ? (std::numeric_limits<std::size_t>::max)()
+                : expected * 2 + 1;
+            while (capacity < target) {
+                if (capacity > (std::numeric_limits<std::size_t>::max)() / 2)
+                    return {status_code::not_available};
+                capacity *= 2;
+            }
+            slots.assign(capacity, {});
+            count = 0;
+            return {};
+        }
+        catch (...) {
+            return {status_code::not_available};
+        }
+    }
+
+    [[nodiscard]] status insert(identity_ref identity, identity_ref named_type) noexcept {
+        if (identity == nullptr || identity->kind() != identity_kind::object ||
+            identity->parent() == nullptr || !identity->name()) {
+            return {status_code::invalid_argument};
+        }
+        if (slots.empty()) {
+            const auto result = reserve(16);
+            if (!result.ok())
+                return result;
+        }
+        if ((count + 1) * 10 >= slots.size() * 7) {
+            const auto result = grow();
+            if (!result.ok())
+                return result;
+        }
+        return insert_into(slots, identity, named_type, count);
+    }
+
+    [[nodiscard]] source_interface_object find(identity_ref parent, string_id name) const noexcept {
+        if (slots.empty() || parent == nullptr || !name)
+            return {};
+        const auto mask = slots.size() - 1;
+        auto position = static_cast<std::size_t>(binding_hash(parent, name)) & mask;
+        for (std::size_t probe = 0; probe < slots.size(); ++probe) {
+            const auto& entry = slots[position];
+            if (entry.identity == nullptr)
+                return {};
+            if (entry.identity->parent() == parent && entry.identity->name() == name)
+                return {entry.identity, entry.named_type};
+            position = (position + 1) & mask;
+        }
+        return {};
+    }
+
+private:
+    struct slot final {
+        identity_ref identity = nullptr;
+        identity_ref named_type = nullptr;
+    };
+
+    [[nodiscard]] static status insert_into(
+        std::vector<slot>& target,
+        identity_ref identity,
+        identity_ref named_type,
+        std::size_t& target_count) noexcept {
+
+        const auto mask = target.size() - 1;
+        auto position = static_cast<std::size_t>(binding_hash(identity->parent(), identity->name())) & mask;
+        for (std::size_t probe = 0; probe < target.size(); ++probe) {
+            auto& current = target[position];
+            if (current.identity == nullptr) {
+                current = {identity, named_type};
+                ++target_count;
+                return {};
+            }
+            if (current.identity->parent() == identity->parent() &&
+                current.identity->name() == identity->name()) {
+                return current.identity == identity && current.named_type == named_type
+                    ? status{status_code::semantic_conflict}
+                    : status{status_code::semantic_conflict};
+            }
+            position = (position + 1) & mask;
+        }
+        return {status_code::not_available};
+    }
+
+    [[nodiscard]] status grow() noexcept {
+        try {
+            if (slots.size() > (std::numeric_limits<std::size_t>::max)() / 2)
+                return {status_code::not_available};
+            std::vector<slot> replacement(slots.size() * 2);
+            std::size_t replacement_count = 0;
+            for (const auto& current : slots) {
+                if (current.identity == nullptr)
+                    continue;
+                const auto result = insert_into(
+                    replacement, current.identity, current.named_type, replacement_count);
+                if (!result.ok())
+                    return result;
+            }
+            slots.swap(replacement);
+            count = replacement_count;
+            return {};
+        }
+        catch (...) {
+            return {status_code::not_available};
+        }
+    }
+
+    std::vector<slot> slots;
+    std::size_t count = 0;
+};
+
+class member_binding_index final {
+public:
+    [[nodiscard]] status reserve(std::size_t expected) noexcept {
+        try {
+            std::size_t capacity = 16;
+            const auto target = expected > (std::numeric_limits<std::size_t>::max)() / 2
+                ? (std::numeric_limits<std::size_t>::max)()
+                : expected * 2 + 1;
+            while (capacity < target) {
+                if (capacity > (std::numeric_limits<std::size_t>::max)() / 2)
+                    return {status_code::not_available};
+                capacity *= 2;
+            }
+            slots.assign(capacity, {});
+            count = 0;
+            return {};
+        }
+        catch (...) {
+            return {status_code::not_available};
+        }
+    }
+
+    [[nodiscard]] status insert(identity_ref type, string_id name, member_index index) noexcept {
+        if (type == nullptr || type->kind() != identity_kind::type || !name || !index)
+            return {status_code::invalid_argument};
+        if (slots.empty()) {
+            const auto result = reserve(16);
+            if (!result.ok())
+                return result;
+        }
+        if ((count + 1) * 10 >= slots.size() * 7) {
+            const auto result = grow();
+            if (!result.ok())
+                return result;
+        }
+        return insert_into(slots, type, name, index, count);
+    }
+
+    [[nodiscard]] member_index find(identity_ref type, string_id name) const noexcept {
+        if (slots.empty() || type == nullptr || !name)
+            return {};
+        const auto mask = slots.size() - 1;
+        auto position = static_cast<std::size_t>(binding_hash(type, name)) & mask;
+        for (std::size_t probe = 0; probe < slots.size(); ++probe) {
+            const auto& entry = slots[position];
+            if (entry.type == nullptr)
+                return {};
+            if (entry.type == type && entry.name == name)
+                return entry.index;
+            position = (position + 1) & mask;
+        }
+        return {};
+    }
+
+private:
+    struct slot final {
+        identity_ref type = nullptr;
+        string_id name{};
+        member_index index{};
+    };
+
+    [[nodiscard]] static status insert_into(
+        std::vector<slot>& target,
+        identity_ref type,
+        string_id name,
+        member_index index,
+        std::size_t& target_count) noexcept {
+
+        const auto mask = target.size() - 1;
+        auto position = static_cast<std::size_t>(binding_hash(type, name)) & mask;
+        for (std::size_t probe = 0; probe < target.size(); ++probe) {
+            auto& current = target[position];
+            if (current.type == nullptr) {
+                current = {type, name, index};
+                ++target_count;
+                return {};
+            }
+            if (current.type == type && current.name == name)
+                return {status_code::semantic_conflict};
+            position = (position + 1) & mask;
+        }
+        return {status_code::not_available};
+    }
+
+    [[nodiscard]] status grow() noexcept {
+        try {
+            if (slots.size() > (std::numeric_limits<std::size_t>::max)() / 2)
+                return {status_code::not_available};
+            std::vector<slot> replacement(slots.size() * 2);
+            std::size_t replacement_count = 0;
+            for (const auto& current : slots) {
+                if (current.type == nullptr)
+                    continue;
+                const auto result = insert_into(
+                    replacement, current.type, current.name, current.index, replacement_count);
+                if (!result.ok())
+                    return result;
+            }
+            slots.swap(replacement);
+            count = replacement_count;
+            return {};
+        }
+        catch (...) {
+            return {status_code::not_available};
+        }
+    }
+
+    std::vector<slot> slots;
+    std::size_t count = 0;
+};
+
 [[nodiscard]] constexpr bool integral_intrinsic(intrinsic_type value) noexcept {
     return value >= intrinsic_type::bool_type && value <= intrinsic_type::unsigned_long_long;
 }
@@ -150,13 +372,13 @@ private:
 class source_parser_state final {
 public:
     source_parser_state(
-        project_context& project_value,
+        project_semantic_services semantic_value,
         const source_snapshot& source_value,
         std::span<const parser_token> token_values,
         const source_environment& environment_value,
         operation_id operation_value,
         diagnostic_buffer& diagnostics_value) noexcept
-        : project(project_value), source(source_value), text(source_value.text()), tokens(token_values),
+        : semantic(semantic_value), source(source_value), text(source_value.text()), tokens(token_values),
           environment(environment_value), operation(operation_value), diagnostics(diagnostics_value) {}
 
     [[nodiscard]] status run(parsed_source& output) {
@@ -169,8 +391,14 @@ public:
         auto result = bindings.reserve(64);
         if (!result.ok())
             return result;
+        result = object_bindings.reserve(64);
+        if (!result.ok())
+            return result;
+        result = member_bindings.reserve(128);
+        if (!result.ok())
+            return result;
         candidate.snapshot = source;
-        result = parse_scope(project.identity_root(), false, 0);
+        result = parse_scope(semantic.identity_root(), false, 0);
         if (!result.ok())
             return result;
         if (current().kind != parser_token_kind::eof)
@@ -284,6 +512,16 @@ private:
                     return result;
                 continue;
             }
+            if (current().kind == parser_token_kind::identifier) {
+                const auto next = cursor + 1 < tokens.size() ? &tokens[cursor + 1] : nullptr;
+                const auto result = next != nullptr && next->kind == parser_token_kind::punctuation &&
+                    next->punctuation == parser_punctuation::dot
+                    ? parse_link(scope)
+                    : parse_object(scope);
+                if (!result.ok())
+                    return result;
+                continue;
+            }
             if (punctuation(parser_punctuation::hash))
                 return fail_unsupported(span(current()), "preprocessing directives must be removed by Source frontend");
             return fail_unsupported(span(current()), "unsupported declaration at semantic scope");
@@ -301,7 +539,7 @@ private:
 
         const auto name_span = span(current());
         identity_ref identity = nullptr;
-        auto result = project.resolve_declaration(
+        auto result = semantic.resolve_declaration(
             parent, token_text(current()), identity_kind::namespace_scope, identity);
         if (!result.ok()) {
             return fail(diagnostics::parser_semantic_resolution_failed, name_span,
@@ -345,7 +583,7 @@ private:
 
         const auto name_span = span(current());
         identity_ref identity = nullptr;
-        auto result = project.resolve_declaration(scope, token_text(current()), identity_kind::type, identity);
+        auto result = semantic.resolve_declaration(scope, token_text(current()), identity_kind::type, identity);
         if (!result.ok()) {
             return fail(diagnostics::parser_semantic_resolution_failed, name_span,
                 "failed to resolve record declaration", result.code);
@@ -410,6 +648,246 @@ private:
         fact.declaration = declaration;
         fact.declaration_kind = source_record_declaration_kind::definition;
         candidate.declarations[sequence_index].declaration = declaration;
+        for (std::uint32_t index = 0; index < fact.members.count; ++index) {
+            const auto& member = candidate.members[fact.members.begin + index];
+            result = member_bindings.insert(
+                identity, member.name, member_index::from_zero_based(index));
+            if (!result.ok())
+                return fail(diagnostics::parser_semantic_resolution_failed, declaration,
+                    "record member name conflicts within type", result.code);
+        }
+        return {};
+    }
+
+    [[nodiscard]] status parse_object(identity_ref scope) {
+        const auto declaration_start = current().offset;
+        const auto type_start = current().offset;
+        const auto modifier_begin = candidate.modifiers.size();
+        std::uint32_t type_end = type_start;
+
+        while (identifier("const") || identifier("volatile")) {
+            candidate.modifiers.push_back(source_type_modifier{
+                0,
+                identifier("const") ? source_type_modifier_kind::const_qualified
+                                    : source_type_modifier_kind::volatile_qualified,
+            });
+            type_end = current().offset + current().length;
+            advance();
+        }
+
+        identity_ref semantic_type = nullptr;
+        intrinsic_type intrinsic = intrinsic_type::none;
+        auto result = parse_type_base(scope, semantic_type, intrinsic, type_end, declaration_start);
+        if (!result.ok())
+            return result;
+
+        while (identifier("const") || identifier("volatile")) {
+            candidate.modifiers.push_back(source_type_modifier{
+                0,
+                identifier("const") ? source_type_modifier_kind::const_qualified
+                                    : source_type_modifier_kind::volatile_qualified,
+            });
+            type_end = current().offset + current().length;
+            advance();
+        }
+
+        for (;;) {
+            if (punctuation(parser_punctuation::asterisk)) {
+                candidate.modifiers.push_back(source_type_modifier{0, source_type_modifier_kind::pointer});
+                type_end = current().offset + current().length;
+                advance();
+                while (identifier("const") || identifier("volatile")) {
+                    candidate.modifiers.push_back(source_type_modifier{
+                        0,
+                        identifier("const") ? source_type_modifier_kind::const_qualified
+                                            : source_type_modifier_kind::volatile_qualified,
+                    });
+                    type_end = current().offset + current().length;
+                    advance();
+                }
+                continue;
+            }
+            if (punctuation(parser_punctuation::ampersand)) {
+                candidate.modifiers.push_back(source_type_modifier{0, source_type_modifier_kind::lvalue_reference});
+                type_end = current().offset + current().length;
+                advance();
+                continue;
+            }
+            if (punctuation(parser_punctuation::ampersand_ampersand)) {
+                candidate.modifiers.push_back(source_type_modifier{0, source_type_modifier_kind::rvalue_reference});
+                type_end = current().offset + current().length;
+                advance();
+                continue;
+            }
+            break;
+        }
+
+        if (current().kind != parser_token_kind::identifier)
+            return fail_syntax(span(current()), "expected object identifier");
+
+        const auto object_name_span = span(current());
+        identity_ref object_identity = nullptr;
+        result = semantic.resolve_declaration(
+            scope, token_text(current()), identity_kind::object, object_identity);
+        if (!result.ok()) {
+            return fail(diagnostics::parser_semantic_resolution_failed, object_name_span,
+                "failed to resolve object declaration", result.code);
+        }
+        advance();
+
+        while (punctuation(parser_punctuation::left_bracket)) {
+            advance();
+            if (punctuation(parser_punctuation::right_bracket)) {
+                candidate.modifiers.push_back(source_type_modifier{0, source_type_modifier_kind::unbounded_array});
+                advance();
+                continue;
+            }
+            if (current().kind != parser_token_kind::integer_literal)
+                return fail_syntax(span(current()), "expected positive object array bound or ']'");
+            std::uint64_t bound = 0;
+            const auto number = token_text(current());
+            const auto conversion = std::from_chars(number.data(), number.data() + number.size(), bound);
+            if (conversion.ec != std::errc{} || conversion.ptr != number.data() + number.size() || bound == 0)
+                return fail_syntax(span(current()), "object array bound must be a positive decimal integer");
+            advance();
+            if (!punctuation(parser_punctuation::right_bracket))
+                return fail_syntax(span(current()), "expected ']' after object array bound");
+            candidate.modifiers.push_back(source_type_modifier{bound, source_type_modifier_kind::bounded_array});
+            advance();
+        }
+
+        if (!punctuation(parser_punctuation::semicolon))
+            return fail_unsupported(span(current()), "object initializers and multi-declarators are not implemented");
+        const auto declaration_end = current().offset + current().length;
+        advance();
+
+        const auto modifier_count = candidate.modifiers.size() - modifier_begin;
+        if (modifier_begin > (std::numeric_limits<std::uint32_t>::max)() ||
+            modifier_count > (std::numeric_limits<std::uint32_t>::max)()) {
+            return {status_code::not_available};
+        }
+
+        const auto modifier_range = source_fact_range{
+            static_cast<std::uint32_t>(modifier_begin),
+            static_cast<std::uint32_t>(modifier_count),
+        };
+        const auto spelling = source_span{type_start, type_end - type_start};
+        const auto type = semantic_type != nullptr
+            ? source_type_ref::semantic(semantic_type, modifier_range, spelling)
+            : source_type_ref::builtin(intrinsic, modifier_range, spelling);
+        const auto object_index = static_cast<std::uint32_t>(candidate.objects.size());
+        candidate.objects.push_back(source_object_fact{
+            object_identity,
+            type,
+            source_span{declaration_start, declaration_end - declaration_start},
+        });
+        append_declaration(source_declaration_kind::object, object_index,
+            source_span{declaration_start, declaration_end - declaration_start});
+
+        const auto direct_named_type = semantic_type != nullptr && modifier_count == 0
+            ? semantic_type
+            : nullptr;
+        result = object_bindings.insert(object_identity, direct_named_type);
+        if (!result.ok()) {
+            return fail(diagnostics::parser_semantic_resolution_failed, object_name_span,
+                "object name conflicts within scope", result.code);
+        }
+        return {};
+    }
+
+    [[nodiscard]] source_interface_object lookup_visible_object(
+        identity_ref scope,
+        string_id name,
+        std::uint32_t source_offset) const noexcept {
+
+        auto current_scope = scope;
+        while (current_scope != nullptr) {
+            const auto local = object_bindings.find(current_scope, name);
+            if (local.identity != nullptr)
+                return local;
+            const auto imported = environment.find_object(current_scope, name, source_offset);
+            if (imported.identity != nullptr)
+                return imported;
+            current_scope = current_scope->parent();
+        }
+        return {};
+    }
+
+    [[nodiscard]] member_index lookup_visible_member(
+        identity_ref type,
+        string_id name,
+        std::uint32_t source_offset) const noexcept {
+
+        const auto local = member_bindings.find(type, name);
+        if (local)
+            return local;
+        return environment.find_member(type, name, source_offset);
+    }
+
+    [[nodiscard]] status parse_endpoint(
+        identity_ref scope,
+        std::uint32_t lookup_offset,
+        source_object_endpoint_fact& output) {
+
+        output = {};
+        if (current().kind != parser_token_kind::identifier)
+            return fail_syntax(span(current()), "expected object identifier in link endpoint");
+        const auto object_span = span(current());
+        const auto object_name = semantic.find_string(token_text(current()));
+        const auto object = object_name
+            ? lookup_visible_object(scope, object_name, lookup_offset)
+            : source_interface_object{};
+        if (object.identity == nullptr) {
+            return fail(diagnostics::parser_semantic_resolution_failed, object_span,
+                "link endpoint object is not visible", status_code::not_found);
+        }
+        if (object.named_type == nullptr) {
+            return fail_unsupported(object_span,
+                "link endpoints require an object of direct named record type");
+        }
+        advance();
+        if (!punctuation(parser_punctuation::dot))
+            return fail_syntax(span(current()), "expected '.' in link endpoint");
+        advance();
+        if (current().kind != parser_token_kind::identifier)
+            return fail_syntax(span(current()), "expected member identifier in link endpoint");
+        const auto member_span = span(current());
+        const auto member_name = semantic.find_string(token_text(current()));
+        const auto index = member_name
+            ? lookup_visible_member(object.named_type, member_name, lookup_offset)
+            : member_index{};
+        if (!index) {
+            return fail(diagnostics::parser_semantic_resolution_failed, member_span,
+                "link endpoint member is not visible", status_code::not_found);
+        }
+        output = {object.identity, index};
+        advance();
+        return {};
+    }
+
+    [[nodiscard]] status parse_link(identity_ref scope) {
+        const auto start = current().offset;
+        const auto lookup_offset = current().offset;
+        source_object_endpoint_fact target_endpoint;
+        auto result = parse_endpoint(scope, lookup_offset, target_endpoint);
+        if (!result.ok())
+            return result;
+        if (!punctuation(parser_punctuation::equal))
+            return fail_syntax(span(current()), "expected '=' between link endpoints");
+        advance();
+        source_object_endpoint_fact source_endpoint;
+        result = parse_endpoint(scope, lookup_offset, source_endpoint);
+        if (!result.ok())
+            return result;
+        if (!punctuation(parser_punctuation::semicolon))
+            return fail_syntax(span(current()), "expected ';' after link");
+        const auto end = current().offset + current().length;
+        advance();
+
+        const auto link_index = static_cast<std::uint32_t>(candidate.links.size());
+        const auto declaration = source_span{start, end - start};
+        candidate.links.push_back(source_link_fact{source_endpoint, target_endpoint, declaration});
+        append_declaration(source_declaration_kind::link, link_index, declaration);
         return {};
     }
 
@@ -426,7 +904,7 @@ private:
 
         const auto name_span = span(current());
         identity_ref identity = nullptr;
-        auto result = project.resolve_declaration(scope, token_text(current()), identity_kind::type, identity);
+        auto result = semantic.resolve_declaration(scope, token_text(current()), identity_kind::type, identity);
         if (!result.ok()) {
             return fail(diagnostics::parser_semantic_resolution_failed, name_span,
                 "failed to resolve enum declaration", result.code);
@@ -448,11 +926,11 @@ private:
             advance();
             const auto underlying_start = current().offset;
             std::uint32_t underlying_end = underlying_start;
-            identity_ref semantic = nullptr;
-            result = parse_type_base(scope, semantic, underlying, underlying_end, current().offset);
+            identity_ref semantic_type = nullptr;
+            result = parse_type_base(scope, semantic_type, underlying, underlying_end, current().offset);
             if (!result.ok())
                 return result;
-            if (semantic != nullptr || !integral_intrinsic(underlying))
+            if (semantic_type != nullptr || !integral_intrinsic(underlying))
                 return fail_unsupported(source_span{underlying_start, underlying_end - underlying_start},
                     "enum underlying type must be an intrinsic integral type");
             underlying_span = source_span{underlying_start, underlying_end - underlying_start};
@@ -483,7 +961,11 @@ private:
                !punctuation(parser_punctuation::right_brace)) {
             if (current().kind != parser_token_kind::identifier)
                 return fail_syntax(span(current()), "expected enumerator identifier");
-            const auto enumerator_name = span(current());
+            const auto enumerator_span = span(current());
+            string_id enumerator_name;
+            result = semantic.intern_string(token_text(current()), enumerator_name);
+            if (!result.ok())
+                return result;
             advance();
 
             source_integral_constant value{};
@@ -538,7 +1020,7 @@ private:
             }
             else {
                 if (have_value && implicit_value == (std::numeric_limits<std::int64_t>::max)())
-                    return fail_unsupported(enumerator_name, "implicit enum value exceeds signed 64-bit range");
+                    return fail_unsupported(enumerator_span, "implicit enum value exceeds signed 64-bit range");
                 if (have_value)
                     ++implicit_value;
                 else
@@ -649,7 +1131,10 @@ private:
 
         if (current().kind != parser_token_kind::identifier)
             return fail_syntax(span(current()), "expected non-static data member identifier");
-        const auto member_name = span(current());
+        string_id member_name;
+        result = semantic.intern_string(token_text(current()), member_name);
+        if (!result.ok())
+            return result;
         advance();
 
         while (punctuation(parser_punctuation::left_bracket)) {
@@ -703,7 +1188,7 @@ private:
 
     [[nodiscard]] identity_ref lookup_visible_type(
         identity_ref scope,
-        std::string_view name,
+        string_id name,
         std::uint32_t source_offset) const noexcept {
 
         auto current_scope = scope;
@@ -734,7 +1219,8 @@ private:
             advance();
             if (current().kind != parser_token_kind::identifier)
                 return fail_syntax(span(current()), "expected type identifier after elaborated type specifier");
-            semantic_type = lookup_visible_type(scope, token_text(current()), lookup_offset);
+            const auto name = semantic.find_string(token_text(current()));
+            semantic_type = name ? lookup_visible_type(scope, name, lookup_offset) : nullptr;
             if (semantic_type == nullptr)
                 return fail(diagnostics::parser_unresolved_type, span(current()),
                     "elaborated type name is not visible", status_code::not_found);
@@ -795,7 +1281,8 @@ private:
         else if (first == "short") intrinsic = intrinsic_type::signed_short;
         else if (first == "long") intrinsic = intrinsic_type::signed_long;
         else {
-            semantic_type = lookup_visible_type(scope, first, lookup_offset);
+            const auto name = semantic.find_string(first);
+            semantic_type = name ? lookup_visible_type(scope, name, lookup_offset) : nullptr;
             if (semantic_type == nullptr)
                 return fail(diagnostics::parser_unresolved_type, span(current()),
                     "type name is not visible in the Source semantic environment", status_code::not_found);
@@ -829,7 +1316,7 @@ private:
         return {};
     }
 
-    project_context& project;
+    project_semantic_services semantic;
     const source_snapshot& source;
     std::string_view text;
     std::span<const parser_token> tokens;
@@ -838,6 +1325,8 @@ private:
     diagnostic_buffer& diagnostics;
     parsed_source candidate;
     binding_index bindings;
+    object_binding_index object_bindings;
+    member_binding_index member_bindings;
     std::size_t cursor = 0;
 };
 
@@ -850,7 +1339,7 @@ status source_parser::parse(
     parsed_source& output) const noexcept {
 
     try {
-        source_parser_state state{project, source, tokens, environment, operation, diagnostics};
+        source_parser_state state{semantic, source, tokens, environment, operation, diagnostics};
         return state.run(output);
     }
     catch (const std::bad_alloc&) {

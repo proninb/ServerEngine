@@ -12,11 +12,11 @@ This repository reuses proven implementation mechanisms from the former `Server-
 - Windows x64 / POSIX x64 ABI configuration;
 - C++20 JSON SAX parser used by configuration loading;
 - Project Context;
-- Project Context-owned semantic identity space;
-- stable-address `identity_node` objects with Project-lifetime names;
-- one semantic declaration-resolution operation returning `identity_ref` directly;
+- Project-lifetime `string_id` String Table for canonical text atoms;
+- Project Context-owned semantic identity space using `(parent, string_id, kind)`;
+- stable-address `identity_node` objects returning `identity_ref` directly;
+- one current Graph containing Types, Objects, and Links;
 - no numeric semantic `stable_id`;
-- no Identity Registry or String Registry in the semantic path;
 - no `std::mutex` or `std::unordered_map` in Project semantic identity;
 - CMake and Visual Studio 18 / v145 builds.
 
@@ -49,7 +49,7 @@ source-language semantic resolution
 
 `identity_node` never contains a Graph pointer, Graph-local handle, definition state, ABI layout, members, or other compiled Graph state.
 
-The backing arena is a storage primitive only. It owns stable Project-lifetime bytes and performs no name resolution, canonicalization, hashing, or identity lookup.
+The identity backing arena owns stable Project-lifetime nodes only. Identifier bytes are canonicalized once by the Project String Table and represented thereafter by 32-bit `string_id`.
 
 ## Build
 
@@ -86,22 +86,23 @@ Current bootstrap flow:
 ```text
 server.json
     -> validate Server configuration
-    -> resolve project.json
-    -> validate Project configuration
-    -> create Project Context
-    -> create Project semantic identity root
+    -> project_manager.load(project.json)
+    -> build detached Project end to end
+    -> publish one current Project/Graph
+    -> project_manager.unload() on unload/exit
 ```
 
-SE-V3-06R replaces the minimal 06B frontend mechanics with production-oriented Source Manager acquisition, SHA-256 snapshots, Lexer directive spans, quoted-include DAG discovery, dependency-ready parallel Parser scheduling, positional visibility, and direct `identity_ref` source interfaces. SE-V3-06P separates filesystem normalization from hot normalized-path identity lookup. SE-V3-07 adds flat SourceContribution provenance, direct-identity full Graph construction, and sparse incremental Graph updates. SE-V3-08 connects the complete filesystem → frontend → Builder → current Graph path, retains Parser-visible interfaces between builds, and maintains sparse reverse Source dependencies.
+SE-V3-06R replaces the minimal 06B frontend mechanics with production-oriented Source Manager acquisition, SHA-256 snapshots, Lexer directive spans, quoted-include DAG discovery, dependency-ready parallel Parser scheduling, positional visibility, and direct `identity_ref` source interfaces. SE-V3-06P separates filesystem normalization from hot normalized-path identity lookup. SE-V3-07 adds flat SourceContribution provenance, direct-identity full Graph construction, and sparse incremental Graph updates. SE-V3-08 connects the complete filesystem → frontend → Builder → current Graph path. SE-V3-09 adds the Project String Table, canonical Objects and Links, hierarchical textual query, and detached Project LOAD/UNLOAD ownership. Read access is scoped by `project_read_guard`; only the short no-fail publication/replacement boundary excludes readers, and sparse headroom exhaustion falls back to detached full rebuild without invalidating the current Project on failure.
 
 The Server owns one current Graph only. There is no Graph generation counter, retained Graph history, or MVCC version-control layer. Full and incremental builds prepare all fallible work before a short no-fail publication boundary.
 
 ## Next implementation sequence
 
-1. Add Source change tracking as an acceleration layer feeding dirty `source_id` values into the proven incremental build API.
-2. Add compiled Graph persistence using file-local identity IDs; never serialize pointers.
-3. Add Runtime materialization and synchronize Runtime readers only around the short current-Graph publication boundary.
-4. Add SHM publication/materialization and external TCP/query control.
+1. Implement ABI/Implementation State: type/member layout, object storage layout, and resolved binding plans.
+2. Implement Runtime materialization: runtime region, native object construction, and native C++ reference binding.
+3. Add Source change tracking as an acceleration layer feeding dirty `source_id` values into the proven incremental API.
+4. Add compiled persistence only after the live Graph/Implementation boundary is frozen.
+5. Add SHM publication and external TCP/query control.
 
 ## Provenance
 
@@ -122,7 +123,7 @@ Project semantic resolution uses one lock-free fixed bucket index instead of sib
 
 ## SE-V3-06A Source Facts Contract
 
-The Parser -> Generation Builder boundary is now represented by immutable `source_facts`: direct Project `identity_ref` values for semantic entities, intrinsic Language/ABI codes for builtins, flat member/modifier arrays, and Source byte ranges for non-identity names and diagnostics. Unresolved names, `string_id`, numeric semantic IDs, and identity canonicalization do not cross this boundary. See `docs/SE_V3_06A_SOURCE_FACTS_CONTRACT.md`.
+The Parser -> Generation Builder boundary is now represented by immutable `source_facts`: direct Project `identity_ref` values for semantic entities, intrinsic Language/ABI codes for builtins, flat member/modifier arrays, and Source byte ranges for non-identity names and diagnostics. Unresolved names and numeric semantic IDs do not cross this boundary. From SE-V3-09 onward, non-identity textual atoms such as member/enumerator names cross as canonical `string_id` values. See `docs/SE_V3_06A_SOURCE_FACTS_CONTRACT.md`.
 
 ## SE-V3-06R Production Source Frontend Reuse
 
@@ -160,3 +161,17 @@ The default gate requires one million real Project identities to materialize int
 `project_context` now owns the Source Manager, persistent COLD Parser-interface cache, SourceContribution cache, and one current Graph. `project_build_orchestrator` performs full and incremental builds end to end. Incremental builds reacquire only dirty physical Sources, collect the committed reverse-dependent closure before replacing include edges, reparse dependents from committed snapshots without rereading them, and send only semantically changed SourceContributions to Generation Builder.
 
 Run `server_engine_project_build_benchmark --gate` to exercise real filesystem full build, one-file incremental update, and a common-header fanout case. Sparse gates require zero Source-graph/path-index/Builder full scans on normal incremental updates. See `docs/SE_V3_08_PROJECT_BUILD_ORCHESTRATION.md`.
+
+
+## SE-V3-09 Project String Table + Complete Graph
+
+`string_id` now denotes canonical text only; `identity_ref` remains semantic WHO. The one current Graph contains Types, Objects, and Links, while textual lookup is a boundary operation over String Table + Identity Space + Graph indexes. `project_manager` performs detached load/replace and full unload of Project-lifetime state.
+
+Run:
+
+```text
+server_engine_string_table_benchmark --gate
+server_engine_complete_graph_benchmark --gate
+```
+
+See `docs/SE_V3_09_COMPLETE_GRAPH.md`.

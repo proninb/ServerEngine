@@ -27,6 +27,7 @@ enum class parser_punctuation : std::uint8_t {
     semicolon,
     colon,
     comma,
+    dot,
     equal,
     plus,
     minus,

@@ -7,7 +7,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <string_view>
 
 namespace cw::server {
 
@@ -22,9 +21,8 @@ struct identity_index_statistics {
     std::size_t p99_successful_lookup_comparisons = 0;
 };
 
-// Project-lifetime semantic identity tree and its single source-language scope index.
-// The index is an acceleration structure for resolve_declaration(); it is not a
-// second identity registry and is never used by Generation Builder.
+// Project-lifetime semantic identity tree. string_id owns textual canonicalization;
+// this index canonicalizes only the semantic tuple (parent, local name, kind).
 class identity_space final {
 public:
     identity_space() noexcept;
@@ -36,9 +34,14 @@ public:
 
     [[nodiscard]] status resolve_declaration(
         identity_ref parent,
-        std::string_view local_name,
+        string_id local_name,
         identity_kind kind,
         identity_ref& output) noexcept;
+
+    [[nodiscard]] identity_ref find(
+        identity_ref parent,
+        string_id local_name,
+        identity_kind kind) const noexcept;
 
     [[nodiscard]] std::size_t size() const noexcept {
         return identity_count.load(std::memory_order_relaxed);
@@ -56,8 +59,6 @@ public:
         return semantic_bucket_count;
     }
 
-    // Diagnostic/benchmark snapshot of the immutable bucket chains. It performs
-    // no sorting and does not participate in semantic resolution.
     [[nodiscard]] identity_index_statistics index_statistics() const noexcept;
 
 private:
@@ -69,7 +70,7 @@ private:
         record(
             identity_node::construction_token token,
             identity_ref parent,
-            name_ref name,
+            string_id name,
             identity_kind kind,
             std::uint64_t hash) noexcept
             : identity(token, parent, name, kind), semantic_hash(hash) {}
@@ -82,16 +83,16 @@ private:
 
     [[nodiscard]] static std::uint64_t semantic_hash(
         identity_ref parent,
-        std::string_view local_name) noexcept;
+        string_id local_name) noexcept;
 
-    [[nodiscard]] const record* find(
+    [[nodiscard]] const record* find_record(
         identity_ref parent,
-        std::string_view local_name,
+        string_id local_name,
         std::uint64_t hash) const noexcept;
 
     [[nodiscard]] status make_candidate(
         identity_ref parent,
-        std::string_view local_name,
+        string_id local_name,
         identity_kind kind,
         std::uint64_t hash,
         record*& output) noexcept;

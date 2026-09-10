@@ -54,6 +54,12 @@ enum class source_facts_error_code : std::uint8_t {
     enum_value_name_range,
     enum_value_expression_range,
     enum_value_type,
+    object_identity_missing,
+    object_identity_kind,
+    object_range,
+    object_type,
+    link_endpoint,
+    link_range,
     declaration_sequence_index,
     declaration_sequence_order,
     declaration_sequence_range,
@@ -67,6 +73,8 @@ enum class source_fact_category : std::uint8_t {
     modifier_fact,
     enum_fact,
     enum_value_fact,
+    object_fact,
+    link_fact,
     declaration_ref,
 };
 
@@ -173,6 +181,18 @@ struct source_facts_validation_error {
         return "enum value expression range is outside the Source snapshot";
     case source_facts_error_code::enum_value_type:
         return "enum value carries a non-integral intrinsic type";
+    case source_facts_error_code::object_identity_missing:
+        return "object fact has no resolved identity";
+    case source_facts_error_code::object_identity_kind:
+        return "object fact identity is not an object identity";
+    case source_facts_error_code::object_range:
+        return "object declaration range is outside the Source snapshot";
+    case source_facts_error_code::object_type:
+        return "object type must be one resolved unmodified named Project type";
+    case source_facts_error_code::link_endpoint:
+        return "link endpoint is not a resolved object/member pair";
+    case source_facts_error_code::link_range:
+        return "link declaration range is outside the Source snapshot";
     case source_facts_error_code::declaration_sequence_index:
         return "declaration sequence does not reference each fact exactly once in per-kind order";
     case source_facts_error_code::declaration_sequence_order:

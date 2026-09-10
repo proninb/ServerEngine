@@ -121,13 +121,70 @@ private:
     std::size_t count = 0;
 };
 
-[[nodiscard]] bool contains_source(std::span<const source_id> values, source_id source) noexcept {
-    for (const auto value : values) {
-        if (value == source)
-            return true;
+
+class source_edge_set final {
+public:
+    [[nodiscard]] status insert(
+        source_id owner,
+        source_id dependency,
+        bool& inserted) noexcept {
+
+        inserted = false;
+        if (!owner || !dependency)
+            return {status_code::invalid_argument};
+
+        if (slots.empty() || (count + 1) * 2 >= slots.size()) {
+            const auto capacity = slots.empty() ? std::size_t{16} : slots.size() * 2;
+            const auto result = grow(capacity);
+            if (!result.ok())
+                return result;
+        }
+
+        const auto key = (static_cast<std::uint64_t>(owner.value()) << 32) |
+            static_cast<std::uint64_t>(dependency.value());
+        const auto mask = slots.size() - 1;
+        auto position = static_cast<std::size_t>(source_mix(key)) & mask;
+        for (;;) {
+            auto& slot = slots[position];
+            if (slot == 0) {
+                slot = key;
+                ++count;
+                inserted = true;
+                return {};
+            }
+            if (slot == key)
+                return {};
+            position = (position + 1) & mask;
+        }
     }
-    return false;
-}
+
+private:
+    [[nodiscard]] status grow(std::size_t capacity) noexcept {
+        try {
+            std::vector<std::uint64_t> replacement(capacity, 0);
+            const auto mask = replacement.size() - 1;
+            for (const auto key : slots) {
+                if (key == 0)
+                    continue;
+                auto position = static_cast<std::size_t>(source_mix(key)) & mask;
+                while (replacement[position] != 0)
+                    position = (position + 1) & mask;
+                replacement[position] = key;
+            }
+            slots.swap(replacement);
+            return {};
+        }
+        catch (const std::bad_alloc&) {
+            return {status_code::not_available};
+        }
+        catch (const std::length_error&) {
+            return {status_code::not_available};
+        }
+    }
+
+    std::vector<std::uint64_t> slots;
+    std::size_t count = 0;
+};
 
 void merge_diagnostics(const diagnostic_buffer& from, diagnostic_buffer& to) {
     for (const auto& record : from.records())
@@ -137,14 +194,22 @@ void merge_diagnostics(const diagnostic_buffer& from, diagnostic_buffer& to) {
 } // namespace
 
 source_frontend_generation::source_frontend_generation(
+    project_semantic_services semantic_value,
+    source_manager_update& source_update,
+    const source_frontend_cache& cache_value,
+    std::size_t worker_limit_value) noexcept
+    : semantic(semantic_value), sources(source_update), cache(&cache_value),
+      worker_limit(worker_limit_value == 0
+          ? (std::thread::hardware_concurrency() == 0 ? 1 : std::thread::hardware_concurrency())
+          : worker_limit_value) {}
+
+source_frontend_generation::source_frontend_generation(
     project_context& project_value,
     source_manager_update& source_update,
     const source_frontend_cache& cache_value,
     std::size_t worker_limit_value) noexcept
-    : project(project_value), sources(source_update), cache(&cache_value),
-      worker_limit(worker_limit_value == 0
-          ? (std::thread::hardware_concurrency() == 0 ? 1 : std::thread::hardware_concurrency())
-          : worker_limit_value) {}
+    : source_frontend_generation(
+          project_value.parser_services(), source_update, cache_value, worker_limit_value) {}
 
 status source_frontend_generation::build_incremental(
     std::span<const source_id> dirty_sources,
@@ -269,6 +334,7 @@ status source_frontend_generation::build_incremental(
         }
 
         std::vector<source_id> include_changed;
+        source_edge_set dependency_edges;
         std::size_t discovery_cursor = 0;
         while (discovery_cursor < states.size()) {
             const auto current_source = states[discovery_cursor].source;
@@ -314,7 +380,11 @@ status source_frontend_generation::build_incremental(
                 result = sources.resolve_include(current_source, path_text, dependency);
                 if (!result.ok())
                     return result;
-                if (!contains_source(states[discovery_cursor].dependencies, dependency))
+                bool edge_inserted = false;
+                result = dependency_edges.insert(current_source, dependency, edge_inserted);
+                if (!result.ok())
+                    return result;
+                if (edge_inserted)
                     states[discovery_cursor].dependencies.push_back(dependency);
                 states[discovery_cursor].imports.push_back(
                     incremental_import{include.visible_from, dependency});
@@ -381,13 +451,12 @@ status source_frontend_generation::build_incremental(
                 ready.push_back(index);
         }
 
-        source_parser parser{project};
+        source_parser parser{semantic};
         std::size_t parsed_count = 0;
         for (std::size_t cursor = 0; cursor < ready.size(); ++cursor) {
             auto& state = states[ready[cursor]];
             std::vector<source_environment_import> environment_imports;
             std::vector<const source_interface*> interface_imports;
-            std::vector<identity_ref> local_types;
             environment_imports.reserve(state.imports.size());
             interface_imports.reserve(state.dependencies.size());
 
@@ -428,14 +497,9 @@ status source_frontend_generation::build_incremental(
                 return result;
 
             const auto facts = state.parsed.facts();
-            local_types.reserve(facts.records().size() + facts.enums().size());
-            for (const auto& record : facts.records())
-                local_types.push_back(record.identity);
-            for (const auto& enum_fact : facts.enums())
-                local_types.push_back(enum_fact.identity);
 
             state.interface = std::make_unique<source_interface>();
-            result = state.interface->initialize(local_types, interface_imports);
+            result = state.interface->initialize(facts, interface_imports);
             if (!result.ok())
                 return result;
             state.parsed_value = true;

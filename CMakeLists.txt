@@ -14,6 +14,7 @@ add_library(server_engine_core STATIC
     server_engine/project/project_configuration_loader.cpp
     server_engine/project/identity/identity_arena.cpp
     server_engine/project/identity/identity_space.cpp
+    server_engine/project/string/string_table.cpp
     server_engine/project/frontend/source_facts_validation.cpp
     server_engine/project/frontend/include_discovery.cpp
     server_engine/project/frontend/source_frontend_generation.cpp
@@ -30,6 +31,7 @@ add_library(server_engine_core STATIC
     server_engine/project/parser/source_parser.cpp
     server_engine/project/project_context.cpp
     server_engine/project/project_build_orchestrator.cpp
+    server_engine/project/project_manager.cpp
 )
 
 target_include_directories(server_engine_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/server_engine)
@@ -52,8 +54,14 @@ target_link_libraries(server_engine_identity_benchmark PRIVATE server_engine_cor
 add_executable(server_engine_source_manager_benchmark benchmarks/source_manager_benchmark.cpp)
 target_link_libraries(server_engine_source_manager_benchmark PRIVATE server_engine_core Threads::Threads)
 
+add_executable(server_engine_string_table_benchmark benchmarks/string_table_benchmark.cpp)
+target_link_libraries(server_engine_string_table_benchmark PRIVATE server_engine_core Threads::Threads)
+
 add_executable(server_engine_generation_builder_benchmark benchmarks/generation_builder_benchmark.cpp)
 target_link_libraries(server_engine_generation_builder_benchmark PRIVATE server_engine_core Threads::Threads)
+
+add_executable(server_engine_complete_graph_benchmark benchmarks/complete_graph_benchmark.cpp)
+target_link_libraries(server_engine_complete_graph_benchmark PRIVATE server_engine_core Threads::Threads)
 
 add_executable(server_engine_project_build_benchmark benchmarks/project_build_benchmark.cpp)
 target_link_libraries(server_engine_project_build_benchmark PRIVATE server_engine_core Threads::Threads)
@@ -62,13 +70,17 @@ if(MSVC)
     target_compile_options(server_engine_tests PRIVATE /W4 /permissive-)
     target_compile_options(server_engine_identity_benchmark PRIVATE /W4 /permissive-)
     target_compile_options(server_engine_source_manager_benchmark PRIVATE /W4 /permissive-)
+    target_compile_options(server_engine_string_table_benchmark PRIVATE /W4 /permissive-)
     target_compile_options(server_engine_generation_builder_benchmark PRIVATE /W4 /permissive-)
+    target_compile_options(server_engine_complete_graph_benchmark PRIVATE /W4 /permissive-)
     target_compile_options(server_engine_project_build_benchmark PRIVATE /W4 /permissive-)
 else()
     target_compile_options(server_engine_tests PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(server_engine_identity_benchmark PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(server_engine_source_manager_benchmark PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(server_engine_string_table_benchmark PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(server_engine_generation_builder_benchmark PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(server_engine_complete_graph_benchmark PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(server_engine_project_build_benchmark PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
@@ -99,6 +111,7 @@ add_test(NAME parser_parallel_sources COMMAND server_engine_tests parser_paralle
 add_test(NAME frontend_include_pipeline COMMAND server_engine_tests frontend_include_pipeline)
 add_test(NAME frontend_include_cycle COMMAND server_engine_tests frontend_include_cycle)
 add_test(NAME frontend_parallel_roots COMMAND server_engine_tests frontend_parallel_roots)
+add_test(NAME frontend_parallel_failure_safe COMMAND server_engine_tests frontend_parallel_failure_safe)
 
 add_test(NAME frontend_transitive_include_pipeline COMMAND server_engine_tests frontend_transitive_include_pipeline)
 add_test(NAME frontend_shared_include_identity COMMAND server_engine_tests frontend_shared_include_identity)
@@ -123,3 +136,15 @@ add_test(NAME project_build_orchestrator_remove_leaf COMMAND server_engine_tests
 add_test(NAME project_build_orchestrator_builder_conflict_rollback COMMAND server_engine_tests project_build_orchestrator_builder_conflict_rollback)
 add_test(NAME project_build_orchestrator_semantic_noop COMMAND server_engine_tests project_build_orchestrator_semantic_noop)
 add_test(NAME project_build_orchestrator_reverse_edge_replacement COMMAND server_engine_tests project_build_orchestrator_reverse_edge_replacement)
+
+add_test(NAME string_table_canonicalization COMMAND server_engine_tests string_table_canonicalization)
+add_test(NAME complete_graph_objects_links_query COMMAND server_engine_tests complete_graph_objects_links_query)
+add_test(NAME complete_graph_incremental_link_retarget COMMAND server_engine_tests complete_graph_incremental_link_retarget)
+add_test(NAME complete_graph_object_reactivation COMMAND server_engine_tests complete_graph_object_reactivation)
+add_test(NAME complete_graph_duplicate_new_link_rollback COMMAND server_engine_tests complete_graph_duplicate_new_link_rollback)
+add_test(NAME project_manager_load_unload COMMAND server_engine_tests project_manager_load_unload)
+add_test(NAME project_read_guard_publication_barrier COMMAND server_engine_tests project_read_guard_publication_barrier)
+add_test(NAME project_rebuild_failure_preserves_current COMMAND server_engine_tests project_rebuild_failure_preserves_current)
+add_test(NAME project_update_rebuild_required_fallback COMMAND server_engine_tests project_update_rebuild_required_fallback)
+add_test(NAME project_update_rebuild_failure_preserves_current COMMAND server_engine_tests project_update_rebuild_failure_preserves_current)
+add_test(NAME project_update_rebuild_unload_cleanup COMMAND server_engine_tests project_update_rebuild_unload_cleanup)

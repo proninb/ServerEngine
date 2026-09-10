@@ -2,6 +2,7 @@
 #include "../server_engine/project/project_configuration_loader.hpp"
 #include "../server_engine/project/project_context.hpp"
 #include "../server_engine/project/project_build_orchestrator.hpp"
+#include "../server_engine/project/project_manager.hpp"
 #include "../server_engine/project/frontend/source_facts_validation.hpp"
 #include "../server_engine/project/frontend/include_discovery.hpp"
 #include "../server_engine/project/frontend/source_frontend_generation.hpp"
@@ -17,6 +18,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -63,7 +65,7 @@ bool test_project_identity_resolution() {
         return false;
     if (!context.resolve_declaration(root, "N", identity_kind::namespace_scope, n2).ok())
         return false;
-    if (n1 == nullptr || n1 != n2 || n1->name().view() != "N")
+    if (n1 == nullptr || n1 != n2 || context.string(n1->name()) != "N")
         return false;
 
     identity_ref a1 = nullptr;
@@ -74,7 +76,7 @@ bool test_project_identity_resolution() {
         return false;
 
     if (a1 == nullptr || a1 != a2 || a1->parent() != n1 ||
-        a1->name().view() != "A" || a1->kind() != identity_kind::type)
+        context.string(a1->name()) != "A" || a1->kind() != identity_kind::type)
         return false;
 
     identity_ref conflict = nullptr;
@@ -97,7 +99,7 @@ bool test_project_identity_name_lifetime() {
         return false;
 
     source_name.assign("Modified");
-    return identity != nullptr && identity->name().view() == "Controller";
+    return identity != nullptr && context.string(identity->name()) == "Controller";
 }
 
 bool test_project_identity_concurrency() {
@@ -184,6 +186,11 @@ bool test_project_identity_index_statistics() {
     return source_span{static_cast<std::uint32_t>(offset), static_cast<std::uint32_t>(value.size())};
 }
 
+[[nodiscard]] string_id test_string(project_context& context, std::string_view value) {
+    string_id result;
+    return context.intern_string(value, result).ok() ? result : string_id{};
+}
+
 bool test_source_facts_contract() {
     project_configuration configuration;
     project_context context{std::move(configuration)};
@@ -219,14 +226,14 @@ bool test_source_facts_contract() {
     const std::array members{
         source_member_fact{
             source_type_ref::semantic(b, source_fact_range{0, 2}, span_of(text, "const B*")),
-            span_of(text, "value"),
+            test_string(context, "value"),
             value_declaration,
             source_member_access::public_access,
         },
         source_member_fact{
             source_type_ref::builtin(
                 intrinsic_type::signed_int, source_fact_range{2, 0}, span_of(text, "int")),
-            span_of(text, "count"),
+            test_string(context, "count"),
             count_declaration,
             source_member_access::public_access,
         },
@@ -266,8 +273,8 @@ bool test_source_facts_contract() {
         return false;
     }
 
-    if (facts.text(facts.members()[0].name) != "value" ||
-        facts.text(facts.members()[1].name) != "count") {
+    if (context.string(facts.members()[0].name) != "value" ||
+        context.string(facts.members()[1].name) != "count") {
         return false;
     }
 
@@ -298,7 +305,7 @@ bool test_source_facts_validation() {
     const std::array members{
         source_member_fact{
             source_type_ref{nullptr, intrinsic_type::none, source_fact_range{0, 0}, span_of(text, "Missing")},
-            span_of(text, "value"),
+            test_string(context, "value"),
             member_range,
             source_member_access::public_access,
         },
@@ -355,7 +362,7 @@ bool test_source_facts_enum_validation() {
     const std::array<source_type_modifier, 0> modifiers{};
     const std::array values{
         source_enum_value_fact{
-            span_of(text, "A"),
+            test_string(context, "A"),
             source_integral_constant{intrinsic_type::signed_int, 1},
             span_of(text, "1"),
         },
@@ -463,7 +470,7 @@ bool lex_and_parse(
         return false;
     if (!includes.empty())
         return false;
-    source_parser parser{context};
+    source_parser parser{context.parser_services()};
     return parser.parse(snapshot, tokens, environment, operation, diagnostics, output).ok();
 }
 
@@ -650,7 +657,7 @@ bool test_parser_source_facts_producer() {
     const auto& value = facts.members()[0];
     const auto& count = facts.members()[1];
     const auto& values = facts.members()[2];
-    if (value.type.identity != b || facts.text(value.name) != "value" ||
+    if (value.type.identity != b || context.string(value.name) != "value" ||
         count.type.intrinsic != intrinsic_type::unsigned_long_long ||
         values.type.intrinsic != intrinsic_type::signed_int)
         return false;
@@ -700,9 +707,8 @@ bool test_parser_cross_source_visibility() {
         return false;
     const auto first_facts = first.facts();
     const auto b = first_facts.records()[0].identity;
-    const std::array local_types{b};
     source_interface first_interface;
-    if (!first_interface.initialize(local_types).ok())
+    if (!first_interface.initialize(first_facts).ok())
         return false;
 
     source_snapshot second_snapshot;
@@ -731,10 +737,9 @@ bool test_parser_positional_include_visibility() {
     parsed_source b_parsed;
     if (!lex_and_parse(context, b_snapshot, empty_environment, operation_id{530}, diagnostics, b_parsed))
         return false;
-    const auto b = b_parsed.facts().records()[0].identity;
-    const std::array local_types{b};
+    const auto b_facts = b_parsed.facts();
     source_interface b_interface;
-    if (!b_interface.initialize(local_types).ok())
+    if (!b_interface.initialize(b_facts).ok())
         return false;
 
     source_snapshot a_snapshot;
@@ -750,7 +755,7 @@ bool test_parser_positional_include_visibility() {
         return false;
     const std::array imports{source_environment_import{includes[0].visible_from, &b_interface}};
     const source_environment environment{imports};
-    source_parser parser{context};
+    source_parser parser{context.parser_services()};
     parsed_source output;
     const auto result = parser.parse(a_snapshot, tokens, environment, operation_id{531}, diagnostics, output);
     return result.code == status_code::not_found && !output && !diagnostics.records().empty() &&
@@ -768,7 +773,7 @@ bool test_parser_unresolved_type() {
     std::vector<parser_token> tokens;
     if (!lex_source(snapshot, operation_id{620}, diagnostics, tokens).ok())
         return false;
-    source_parser parser{context};
+    source_parser parser{context.parser_services()};
     parsed_source output;
     const source_environment environment;
     const auto result = parser.parse(snapshot, tokens, environment, operation_id{620}, diagnostics, output);
@@ -808,7 +813,7 @@ bool test_parser_parallel_sources() {
             return false;
     }
 
-    source_parser parser{context};
+    source_parser parser{context.parser_services()};
     std::array<parsed_source, worker_count> outputs{};
     std::array<diagnostic_buffer, worker_count> diagnostic_outputs{};
     std::array<std::vector<parser_token>, worker_count> tokens{};
@@ -954,6 +959,44 @@ bool test_frontend_parallel_roots() {
     return shared != nullptr;
 }
 
+
+bool test_frontend_parallel_failure_safe() {
+    constexpr std::size_t count = 32;
+    const auto directory = std::filesystem::temp_directory_path() /
+        "server_engine_v309_parallel_failure";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    std::vector<std::filesystem::path> roots;
+    roots.reserve(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto path = directory / ("r" + std::to_string(index) + ".hpp");
+        std::ofstream file(path);
+        if (index == count / 2)
+            file << "#define BROKEN 1\nstruct Broken;";
+        else
+            file << "struct T" << index << ";";
+        roots.push_back(path);
+    }
+
+    project_configuration configuration;
+    project_context context{std::move(configuration)};
+    source_manager manager;
+    auto update = manager.begin_update();
+    source_frontend_generation frontend{context, update, 8};
+    source_frontend_result result;
+    diagnostic_buffer diagnostics;
+    const auto build = frontend.build(
+        roots, operation_id{825}, diagnostics, result);
+
+    const bool pass = !build.ok() && !diagnostics.records().empty() &&
+        manager.source_count() == 0 && result.sources().empty();
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
 
 bool test_frontend_transitive_include_pipeline() {
     const auto directory = std::filesystem::temp_directory_path() / "server_engine_v306r_transitive";
@@ -1122,14 +1165,14 @@ bool test_source_contribution_capture() {
     const std::array members{
         source_member_fact{
             source_type_ref::builtin(intrinsic_type::signed_int, {}, span_of(text, "int")),
-            span_of(text, "value"), span_of(text, "int value;"), source_member_access::public_access},
+            test_string(context, "value"), span_of(text, "int value;"), source_member_access::public_access},
     };
     const std::array records{
         source_record_fact{a, {0, 1}, span_of(text, "struct A { int value; };"),
             source_record_declaration_kind::definition, source_record_kind::struct_type},
     };
     const std::array enum_values{
-        source_enum_value_fact{span_of(text, "X"),
+        source_enum_value_fact{test_string(context, "X"),
             source_integral_constant{intrinsic_type::signed_int, 7}, span_of(text, "7")},
     };
     const std::array enums{
@@ -1165,8 +1208,8 @@ bool test_source_contribution_capture() {
     const auto captured_members = cache.members(state->members);
     const auto captured_values = cache.enum_values(state->enum_values);
     return captured_members.size() == 1 && captured_values.size() == 1 &&
-           cache.name(captured_members[0].name) == "value" &&
-           cache.name(captured_values[0].name) == "X" &&
+           context.string(captured_members[0].name) == "value" &&
+           context.string(captured_values[0].name) == "X" &&
            cache.types(source_id{1})[0].identity == a &&
            cache.types(source_id{1})[1].identity == e;
 }
@@ -1189,7 +1232,7 @@ bool test_generation_builder_g0() {
     const std::array members{
         source_member_fact{
             source_type_ref::semantic(b, {0, 1}, span_of(text, "B*")),
-            span_of(text, "value"), span_of(text, "B* value;"),
+            test_string(context, "value"), span_of(text, "B* value;"),
             source_member_access::public_access},
     };
     const std::array records{
@@ -1227,7 +1270,7 @@ bool test_generation_builder_g0() {
 
     const auto a_handle = graph_value.type_at(1);
     const auto a_members = graph_value.members(a_handle);
-    if (a_members.size() != 1 || graph_value.name(a_members[0].name) != "value")
+    if (a_members.size() != 1 || context.string(a_members[0].name) != "value")
         return false;
 
     derived_type_record pointer;
@@ -1256,9 +1299,9 @@ bool test_generation_builder_enum() {
     const std::array<source_member_fact, 0> members{};
     const std::array<source_type_modifier, 0> modifiers{};
     const std::array values{
-        source_enum_value_fact{span_of(text, "X"),
+        source_enum_value_fact{test_string(context, "X"),
             source_integral_constant{intrinsic_type::signed_int, 7}, span_of(text, "7")},
-        source_enum_value_fact{span_of(text, "Y"),
+        source_enum_value_fact{test_string(context, "Y"),
             source_integral_constant{intrinsic_type::signed_int, 9}, span_of(text, "9")},
     };
     const std::array enums{
@@ -1288,7 +1331,7 @@ bool test_generation_builder_enum() {
     return entry != nullptr && entry->kind == graph_type_kind::enumeration && entry->defined() &&
            entry->enum_fixed_underlying() && entry->enum_underlying == intrinsic_type::unsigned_int &&
            materialized.size() == 2 && materialized[0].bits == 7 && materialized[1].bits == 9 &&
-           graph_value.name(materialized[0].name) == "X" && graph_value.name(materialized[1].name) == "Y";
+           context.string(materialized[0].name) == "X" && context.string(materialized[1].name) == "Y";
 }
 
 bool test_generation_builder_redeclaration() {
@@ -1421,7 +1464,7 @@ bool test_generation_builder_incremental_modify() {
     const std::array members{
         source_member_fact{
             source_type_ref::builtin(intrinsic_type::signed_int, {}, {0, 3}),
-            {4, 1}, {0, 6}, source_member_access::public_access},
+            test_string(context, "x"), {0, 6}, source_member_access::public_access},
     };
     const std::array a1_records{
         source_record_fact{a, {0, 1}, {0, 6}, source_record_declaration_kind::definition, source_record_kind::struct_type},
@@ -1445,7 +1488,7 @@ bool test_generation_builder_incremental_modify() {
     return graph_value.type_count() == 2 &&
         graph_value.type_at(0) == a_handle && graph_value.type_at(1) == b_handle &&
         graph_value.members(a_handle).size() == 1 &&
-        graph_value.name(graph_value.members(a_handle)[0].name) == "x";
+        context.string(graph_value.members(a_handle)[0].name) == "x";
 }
 
 bool test_generation_builder_incremental_remove_add() {
@@ -1534,7 +1577,7 @@ bool test_generation_builder_incremental_dangling_guard() {
     const std::array b_members{
         source_member_fact{
             source_type_ref::semantic(a, {0, 1}, {0, 2}),
-            {3, 1}, {0, 5}, source_member_access::public_access},
+            test_string(context, "a"), {0, 5}, source_member_access::public_access},
     };
     const std::array b_records{
         source_record_fact{b, {0, 1}, {0, 5}, source_record_declaration_kind::definition, source_record_kind::struct_type},
@@ -1615,13 +1658,17 @@ bool test_generation_builder_incremental_conflict_rollback() {
 
 
 
-[[nodiscard]] type_handle find_graph_type_by_name(const graph& graph_value, std::string_view name) {
+[[nodiscard]] type_handle find_graph_type_by_name(
+    const project_context& context,
+    std::string_view name) {
+
+    const auto& graph_value = context.compiled_graph();
     for (std::size_t index = 0; index < graph_value.type_slot_count(); ++index) {
         const auto handle = graph_value.type_at(index);
         if (!handle)
             continue;
         const auto identity = graph_value.identity(handle);
-        if (identity != nullptr && identity->name().view() == name)
+        if (identity != nullptr && context.string(identity->name()) == name)
             return handle;
     }
     return {};
@@ -1663,8 +1710,8 @@ bool test_project_build_orchestrator_full() {
         context.sources().find(normalized_a, a_source).ok() &&
         context.sources().find(normalized_b, b_source).ok();
 
-    const auto a_handle = find_graph_type_by_name(context.compiled_graph(), "A");
-    const auto b_handle = find_graph_type_by_name(context.compiled_graph(), "B");
+    const auto a_handle = find_graph_type_by_name(context, "A");
+    const auto b_handle = find_graph_type_by_name(context, "B");
     const auto b_dependents = context.sources().dependents(b_source);
     const bool pass = resolved && a_source && b_source && a_source != b_source &&
         context.sources().source_count() == 2 && context.compiled_graph().type_count() == 2 &&
@@ -1712,16 +1759,16 @@ bool test_project_build_orchestrator_incremental() {
         return false;
     }
 
-    const auto a_handle_before = find_graph_type_by_name(context.compiled_graph(), "A");
-    const auto b_handle_before = find_graph_type_by_name(context.compiled_graph(), "B");
+    const auto a_handle_before = find_graph_type_by_name(context, "A");
+    const auto b_handle_before = find_graph_type_by_name(context, "B");
     { std::ofstream b(b_path, std::ios::trunc); b << "struct B { int count; };"; }
 
     diagnostics.clear();
     project_build_result update;
     const std::array dirty{b_source};
     const auto result = orchestrator.update(dirty, operation_id{1003}, diagnostics, update);
-    const auto a_handle_after = find_graph_type_by_name(context.compiled_graph(), "A");
-    const auto b_handle_after = find_graph_type_by_name(context.compiled_graph(), "B");
+    const auto a_handle_after = find_graph_type_by_name(context, "A");
+    const auto b_handle_after = find_graph_type_by_name(context, "B");
     const auto b_members = context.compiled_graph().members(b_handle_after);
 
     const bool pass = result.ok() && !diagnostics.has_errors() && update.changed &&
@@ -1733,7 +1780,7 @@ bool test_project_build_orchestrator_incremental() {
         update.telemetry.sources.source_graph_full_scans == 0 &&
         update.telemetry.sources.path_index_full_rebuilds == 0 &&
         a_handle_before == a_handle_after && b_handle_before == b_handle_after &&
-        b_members.size() == 1 && context.compiled_graph().name(b_members.front().name) == "count";
+        b_members.size() == 1 && context.string(b_members.front().name) == "count";
 
     std::filesystem::remove_all(directory, error);
     return pass;
@@ -1812,7 +1859,7 @@ bool test_project_build_orchestrator_failure_rollback() {
     }
 
     const auto committed_snapshot = context.sources().current(source);
-    const auto handle = find_graph_type_by_name(context.compiled_graph(), "A");
+    const auto handle = find_graph_type_by_name(context, "A");
     const auto before_members = context.compiled_graph().members(handle).size();
     const auto* before_interface = context.frontend_cache().interface(source);
     { std::ofstream file(path, std::ios::trunc); file << "#define X 1\nstruct A { int changed; };"; }
@@ -1974,7 +2021,7 @@ bool test_project_build_orchestrator_builder_conflict_rollback() {
     }
 
     const auto committed_snapshot = context.sources().current(a_source);
-    const auto b_handle = find_graph_type_by_name(context.compiled_graph(), "B");
+    const auto b_handle = find_graph_type_by_name(context, "B");
     const auto before_types = context.compiled_graph().type_count();
     const auto* before_interface = context.frontend_cache().interface(a_source);
     { std::ofstream a(a_path, std::ios::trunc); a << "#include \"b.hpp\"\nstruct B {};"; }
@@ -1987,7 +2034,7 @@ bool test_project_build_orchestrator_builder_conflict_rollback() {
     const bool pass = result.code == status_code::semantic_conflict && diagnostics.has_errors() &&
         committed_snapshot && after_snapshot && committed_snapshot.hash() == after_snapshot.hash() &&
         context.compiled_graph().type_count() == before_types &&
-        find_graph_type_by_name(context.compiled_graph(), "B") == b_handle &&
+        find_graph_type_by_name(context, "B") == b_handle &&
         context.frontend_cache().interface(a_source) == before_interface;
 
     std::filesystem::remove_all(directory, error);
@@ -2025,7 +2072,7 @@ bool test_project_build_orchestrator_semantic_noop() {
         std::filesystem::remove_all(directory, error);
         return false;
     }
-    const auto handle = find_graph_type_by_name(context.compiled_graph(), "A");
+    const auto handle = find_graph_type_by_name(context, "A");
     const auto before_hash = context.sources().current(source).hash();
     { std::ofstream file(path, std::ios::trunc); file << "\nstruct A;\n"; }
 
@@ -2038,7 +2085,7 @@ bool test_project_build_orchestrator_semantic_noop() {
         update.telemetry.builder.changed_sources == 0 && update.telemetry.builder.changed_types == 0 &&
         update.telemetry.builder_prepare_ns == 0 &&
         context.compiled_graph().type_count() == 1 &&
-        find_graph_type_by_name(context.compiled_graph(), "A") == handle &&
+        find_graph_type_by_name(context, "A") == handle &&
         context.sources().current(source).hash() != before_hash;
     std::filesystem::remove_all(directory, error);
     return pass;
@@ -2110,6 +2157,744 @@ bool test_project_build_orchestrator_reverse_edge_replacement() {
     return pass;
 }
 
+
+bool test_string_table_canonicalization() {
+    project_configuration configuration;
+    project_context context{std::move(configuration)};
+
+    string_id a1;
+    string_id a2;
+    string_id b;
+    if (!context.intern_string("A", a1).ok() ||
+        !context.intern_string("A", a2).ok() ||
+        !context.intern_string("B", b).ok()) {
+        return false;
+    }
+    if (!a1 || a1 != a2 || !b || b == a1 ||
+        context.string(a1) != "A" || context.string(b) != "B") {
+        return false;
+    }
+
+    constexpr std::size_t thread_count = 8;
+    std::array<string_id, thread_count> shared{};
+    std::array<std::thread, thread_count> workers;
+    for (std::size_t index = 0; index < thread_count; ++index) {
+        workers[index] = std::thread([&context, &shared, index]() {
+            string_id value;
+            for (std::size_t pass = 0; pass < 128; ++pass) {
+                if (!context.intern_string("Shared", value).ok()) {
+                    shared[index] = {};
+                    return;
+                }
+            }
+            shared[index] = value;
+        });
+    }
+    for (auto& worker : workers)
+        worker.join();
+
+    const auto canonical = context.find_string("Shared");
+    if (!canonical || context.string(canonical) != "Shared")
+        return false;
+    for (const auto value : shared) {
+        if (value != canonical)
+            return false;
+    }
+    return true;
+}
+
+bool test_complete_graph_objects_links_query() {
+    const auto directory = std::filesystem::temp_directory_path() / "server_engine_v309_objects_links";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto path = directory / "model.hpp";
+    {
+        std::ofstream file(path);
+        file << "namespace N { struct IO { int IN; int OUT; }; IO A; IO B; B.IN = A.OUT; }";
+    }
+
+    project_configuration configuration;
+    configuration.version = 1;
+    configuration.name = "GraphObjectsLinks";
+    configuration.project.push_back(project_item_configuration{path, project_item_role::type});
+    project_context context{std::move(configuration)};
+    project_build_orchestrator orchestrator{context, 1};
+    diagnostic_buffer diagnostics;
+    project_build_result build;
+    const auto result = orchestrator.rebuild(operation_id{1100}, diagnostics, build);
+    if (!result.ok() || diagnostics.has_errors()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    type_handle io;
+    object_handle a;
+    object_handle b;
+    object_endpoint a_out;
+    object_endpoint b_in;
+    link_handle link;
+    if (!context.find_type("N::IO", io).ok() ||
+        !context.find_object("N::A", a).ok() ||
+        !context.find_object("N::B", b).ok() ||
+        !context.find_endpoint("N::A.OUT", a_out).ok() ||
+        !context.find_endpoint("N::B.IN", b_in).ok() ||
+        !context.find_link("N::B.IN", link).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    const auto& graph_value = context.compiled_graph();
+    const auto* a_entry = graph_value.find(a);
+    const auto* link_entry = graph_value.find(link);
+    type_handle a_type;
+    const bool pass = graph_value.type_count() == 1 && graph_value.object_count() == 2 &&
+        graph_value.link_count() == 1 && a_entry != nullptr &&
+        graph_value.named(a_entry->type, a_type) && a_type == io &&
+        link_entry != nullptr && link_entry->source == a_out && link_entry->target == b_in &&
+        graph_value.find_link(b_in) == link;
+
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+bool test_complete_graph_incremental_link_retarget() {
+    const auto directory = std::filesystem::temp_directory_path() / "server_engine_v309_link_retarget";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto path = directory / "model.hpp";
+    {
+        std::ofstream file(path);
+        file << "struct IO { int IN; int OUT; }; IO A; IO B; IO C; B.IN = A.OUT;";
+    }
+    project_configuration configuration;
+    configuration.version = 1;
+    configuration.name = "LinkRetarget";
+    configuration.project.push_back(project_item_configuration{path, project_item_role::type});
+    project_context context{std::move(configuration)};
+    project_build_orchestrator orchestrator{context, 1};
+    diagnostic_buffer diagnostics;
+    project_build_result full;
+    if (!orchestrator.rebuild(operation_id{1110}, diagnostics, full).ok() || diagnostics.has_errors()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    object_handle a_before;
+    object_handle b_before;
+    object_handle c_before;
+    object_endpoint b_in;
+    link_handle link_before;
+    if (!context.find_object("A", a_before).ok() || !context.find_object("B", b_before).ok() ||
+        !context.find_object("C", c_before).ok() || !context.find_endpoint("B.IN", b_in).ok() ||
+        !context.find_link("B.IN", link_before).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    std::string normalized;
+    source_id source;
+    if (!normalize_source_path(path, normalized).ok() || !context.sources().find(normalized, source).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+    {
+        std::ofstream file(path, std::ios::trunc);
+        file << "struct IO { int IN; int OUT; }; IO A; IO B; IO C; B.IN = C.OUT;  ";
+    }
+
+    diagnostics.clear();
+    project_build_result update;
+    const std::array dirty{source};
+    const auto result = orchestrator.update(dirty, operation_id{1111}, diagnostics, update);
+
+    object_handle a_after;
+    object_handle b_after;
+    object_handle c_after;
+    object_endpoint c_out;
+    link_handle link_after;
+    const bool resolved = context.find_object("A", a_after).ok() &&
+        context.find_object("B", b_after).ok() && context.find_object("C", c_after).ok() &&
+        context.find_endpoint("C.OUT", c_out).ok() && context.find_link("B.IN", link_after).ok();
+    const auto* link_entry = resolved ? context.compiled_graph().find(link_after) : nullptr;
+    const bool pass = result.ok() && !diagnostics.has_errors() && resolved &&
+        a_before == a_after && b_before == b_after && c_before == c_after &&
+        link_before == link_after && link_entry != nullptr && link_entry->source == c_out &&
+        link_entry->target == b_in && context.compiled_graph().object_count() == 3 &&
+        context.compiled_graph().link_count() == 1 &&
+        update.telemetry.builder.graph_full_scans == 0 &&
+        update.telemetry.builder.contribution_full_scans == 0;
+
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+bool test_complete_graph_object_reactivation() {
+    const auto directory = std::filesystem::temp_directory_path() / "server_engine_v309_object_reactivation";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto path = directory / "model.hpp";
+    { std::ofstream file(path); file << "struct IO { int value; }; IO A;"; }
+    project_configuration configuration;
+    configuration.version = 1;
+    configuration.name = "ObjectReactivation";
+    configuration.project.push_back(project_item_configuration{path, project_item_role::type});
+    project_context context{std::move(configuration)};
+    project_build_orchestrator orchestrator{context, 1};
+    diagnostic_buffer diagnostics;
+    project_build_result full;
+    if (!orchestrator.rebuild(operation_id{1120}, diagnostics, full).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    object_handle original;
+    if (!context.find_object("A", original).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+    std::string normalized;
+    source_id source;
+    if (!normalize_source_path(path, normalized).ok() || !context.sources().find(normalized, source).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    { std::ofstream file(path, std::ios::trunc); file << "struct IO { int value; };"; }
+    diagnostics.clear();
+    project_build_result removed;
+    const std::array dirty{source};
+    if (!orchestrator.update(dirty, operation_id{1121}, diagnostics, removed).ok() ||
+        context.compiled_graph().object_count() != 0) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+    object_handle absent;
+    if (context.find_object("A", absent).code != status_code::not_found ||
+        context.compiled_graph().object_at(original.value() - 1)) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    { std::ofstream file(path, std::ios::trunc); file << "struct IO { int value; }; IO A;  "; }
+    diagnostics.clear();
+    project_build_result added;
+    const auto result = orchestrator.update(dirty, operation_id{1122}, diagnostics, added);
+    object_handle reactivated;
+    const bool pass = result.ok() && !diagnostics.has_errors() &&
+        context.find_object("A", reactivated).ok() && reactivated == original &&
+        context.compiled_graph().object_count() == 1 &&
+        added.telemetry.builder.graph_full_scans == 0 &&
+        added.telemetry.builder.contribution_full_scans == 0;
+
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+bool test_complete_graph_duplicate_new_link_rollback() {
+    const auto directory = std::filesystem::temp_directory_path() / "server_engine_v309_duplicate_link";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto path = directory / "model.hpp";
+    {
+        std::ofstream file(path);
+        file << "struct IO { int IN; int OUT; }; IO A; IO B; IO C;";
+    }
+    project_configuration configuration;
+    configuration.version = 1;
+    configuration.name = "DuplicateLink";
+    configuration.project.push_back(project_item_configuration{path, project_item_role::type});
+    project_context context{std::move(configuration)};
+    project_build_orchestrator orchestrator{context, 1};
+    diagnostic_buffer diagnostics;
+    project_build_result full;
+    if (!orchestrator.rebuild(operation_id{1130}, diagnostics, full).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    std::string normalized;
+    source_id source;
+    if (!normalize_source_path(path, normalized).ok() || !context.sources().find(normalized, source).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+    const auto committed = context.sources().current(source);
+    const auto* committed_interface = context.frontend_cache().interface(source);
+    object_handle a_before;
+    object_handle b_before;
+    object_handle c_before;
+    if (!context.find_object("A", a_before).ok() || !context.find_object("B", b_before).ok() ||
+        !context.find_object("C", c_before).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    {
+        std::ofstream file(path, std::ios::trunc);
+        file << "struct IO { int IN; int OUT; }; IO A; IO B; IO C; B.IN = A.OUT; B.IN = C.OUT;  ";
+    }
+    diagnostics.clear();
+    project_build_result update;
+    const std::array dirty{source};
+    const auto result = orchestrator.update(dirty, operation_id{1131}, diagnostics, update);
+    const auto after = context.sources().current(source);
+    object_handle a_after;
+    object_handle b_after;
+    object_handle c_after;
+    const bool pass = result.code == status_code::semantic_conflict && diagnostics.has_errors() &&
+        committed && after && committed.hash() == after.hash() &&
+        context.frontend_cache().interface(source) == committed_interface &&
+        context.compiled_graph().link_count() == 0 && context.compiled_graph().object_count() == 3 &&
+        context.find_object("A", a_after).ok() && context.find_object("B", b_after).ok() &&
+        context.find_object("C", c_after).ok() &&
+        a_before == a_after && b_before == b_after && c_before == c_after;
+
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+
+bool test_project_manager_load_unload() {
+    const auto directory = std::filesystem::temp_directory_path() / "server_engine_v309_project_lifecycle";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto model_path = directory / "model.hpp";
+    const auto project_path = directory / "project.json";
+    const auto bad_project_path = directory / "bad_project.json";
+    { std::ofstream file(model_path); file << "struct IO { int value; }; IO A;"; }
+    {
+        std::ofstream file(project_path);
+        file << R"({"version":1,"name":"Loaded","project":[{"path":"model.hpp","role":"type"}],"configuration":{"abi":{"target":"windows-x64","pack":8}}})";
+    }
+    {
+        std::ofstream file(bad_project_path);
+        file << R"({"version":1,"name":"Bad","project":[{"path":"missing.hpp","role":"type"}],"configuration":{"abi":{"target":"windows-x64","pack":8}}})";
+    }
+
+    project_manager manager;
+    diagnostic_buffer diagnostics;
+    project_build_result build;
+    if (!manager.load(project_path, operation_id{1140}, diagnostics, build, 1).ok() ||
+        diagnostics.has_errors() || !manager.loaded()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    project_read_guard first_read;
+    if (!manager.read(first_read).ok() || !first_read) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+    object_handle object_before;
+    if (!first_read->find_object("A", object_before).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+    first_read = {};
+
+    diagnostics.clear();
+    project_build_result failed;
+    const auto failed_result = manager.load(
+        bad_project_path, operation_id{1141}, diagnostics, failed, 1);
+    if (failed_result.ok() || !manager.loaded()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    project_read_guard after_failed_load;
+    object_handle object_after;
+    if (!manager.read(after_failed_load).ok() || !after_failed_load ||
+        !after_failed_load->find_object("A", object_after).ok() || object_after != object_before) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+    after_failed_load = {};
+
+    manager.unload();
+    project_read_guard after_unload;
+    const bool pass = !manager.loaded() &&
+        manager.read(after_unload).code == status_code::not_found && !after_unload;
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+
+bool test_project_read_guard_publication_barrier() {
+    const auto directory = std::filesystem::temp_directory_path() / "server_engine_v309_read_guard";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto path = directory / "model.hpp";
+    { std::ofstream file(path); file << "struct A { int first; };"; }
+
+    project_configuration configuration;
+    configuration.version = 1;
+    configuration.name = "ReadGuard";
+    configuration.project.push_back(project_item_configuration{path, project_item_role::type});
+
+    project_manager manager;
+    diagnostic_buffer diagnostics;
+    project_build_result loaded;
+    if (!manager.load(std::move(configuration), operation_id{1150}, diagnostics, loaded, 2).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    project_read_guard read;
+    if (!manager.read(read).ok() || !read) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    std::string normalized;
+    source_id source;
+    type_handle before;
+    if (!normalize_source_path(path, normalized).ok() ||
+        !read->sources().find(normalized, source).ok() ||
+        !read->find_type("A", before).ok() ||
+        read->compiled_graph().members(before).size() != 1) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    { std::ofstream file(path, std::ios::trunc); file << "struct A { int first; int second; };"; }
+
+    std::atomic_bool started{false};
+    std::atomic_bool finished{false};
+    status update_status;
+    project_build_result updated;
+    std::thread worker([&] {
+        diagnostic_buffer worker_diagnostics;
+        const std::array dirty{source};
+        started.store(true, std::memory_order_release);
+        update_status = manager.update(
+            dirty, operation_id{1151}, worker_diagnostics, updated, 2);
+        finished.store(true, std::memory_order_release);
+    });
+
+    while (!started.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds{30});
+
+    const bool blocked = !finished.load(std::memory_order_acquire) &&
+        read->compiled_graph().members(before).size() == 1;
+    read = {};
+    worker.join();
+
+    project_read_guard after;
+    type_handle after_handle;
+    const bool published = update_status.ok() && updated.changed &&
+        manager.read(after).ok() && after &&
+        after->find_type("A", after_handle).ok() &&
+        after->compiled_graph().members(after_handle).size() == 2;
+
+    after = {};
+    manager.unload();
+    std::filesystem::remove_all(directory, error);
+    return blocked && published;
+}
+
+bool test_project_rebuild_failure_preserves_current() {
+    const auto directory = std::filesystem::temp_directory_path() / "server_engine_v309_rebuild_rollback";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto path = directory / "model.hpp";
+    { std::ofstream file(path); file << "struct A { int value; };"; }
+
+    project_configuration configuration;
+    configuration.version = 1;
+    configuration.name = "RebuildRollback";
+    configuration.project.push_back(project_item_configuration{path, project_item_role::type});
+
+    project_manager manager;
+    diagnostic_buffer diagnostics;
+    project_build_result loaded;
+    if (!manager.load(std::move(configuration), operation_id{1160}, diagnostics, loaded, 1).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    { std::ofstream file(path, std::ios::trunc); file << "#define BROKEN 1\nstruct A { int changed; };"; }
+    diagnostics.clear();
+    project_build_result rebuilt;
+    const auto result = manager.rebuild(operation_id{1161}, diagnostics, rebuilt, 1);
+
+    project_read_guard read;
+    type_handle type;
+    const bool pass = !result.ok() && manager.loaded() &&
+        manager.read(read).ok() && read &&
+        read->find_type("A", type).ok() &&
+        read->compiled_graph().members(type).size() == 1;
+
+    read = {};
+    manager.unload();
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+bool test_project_update_rebuild_required_fallback() {
+    const auto directory = std::filesystem::temp_directory_path() / "server_engine_v309_rebuild_fallback";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto root_path = directory / "root.hpp";
+    { std::ofstream file(root_path); file << "struct Root;"; }
+
+    project_configuration configuration;
+    configuration.version = 1;
+    configuration.name = "Fallback";
+    configuration.project.push_back(project_item_configuration{root_path, project_item_role::type});
+
+    project_manager manager;
+    diagnostic_buffer diagnostics;
+    project_build_result loaded;
+    if (!manager.load(std::move(configuration), operation_id{1170}, diagnostics, loaded, 2).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    source_id root_source;
+    {
+        project_read_guard read;
+        std::string normalized;
+        if (!manager.read(read).ok() || !read ||
+            !normalize_source_path(root_path, normalized).ok() ||
+            !read->sources().find(normalized, root_source).ok()) {
+            std::filesystem::remove_all(directory, error);
+            return false;
+        }
+    }
+
+    constexpr std::size_t added_count = 70;
+    for (std::size_t index = 0; index < added_count; ++index) {
+        std::ofstream file(directory / ("type_" + std::to_string(index) + ".hpp"));
+        file << "struct T" << index << ";";
+    }
+    {
+        std::ofstream file(root_path, std::ios::trunc);
+        for (std::size_t index = 0; index < added_count; ++index)
+            file << "#include \"type_" << index << ".hpp\"\n";
+        file << "struct Root;";
+    }
+
+    diagnostics.clear();
+    project_build_result updated;
+    const std::array dirty{root_source};
+    const auto result = manager.update(dirty, operation_id{1171}, diagnostics, updated, 2);
+
+    project_read_guard read;
+    type_handle last_type;
+    const bool pass = result.ok() && updated.rebuilt && !diagnostics.has_errors() &&
+        manager.read(read).ok() && read &&
+        read->sources().source_count() == added_count + 1 &&
+        read->compiled_graph().type_count() == added_count + 1 &&
+        read->find_type("T69", last_type).ok();
+
+    read = {};
+    manager.unload();
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+
+bool test_project_update_rebuild_unload_cleanup() {
+    const auto directory = std::filesystem::temp_directory_path() /
+        "server_engine_v309_update_rebuild_unload";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto path = directory / "model.hpp";
+    { std::ofstream file(path); file << "struct OldType { int value; };"; }
+
+    project_configuration configuration;
+    configuration.version = 1;
+    configuration.name = "UpdateRebuildUnload";
+    configuration.project.push_back(project_item_configuration{path, project_item_role::type});
+
+    project_manager manager;
+    diagnostic_buffer diagnostics;
+    project_build_result loaded;
+    if (!manager.load(std::move(configuration), operation_id{1190}, diagnostics, loaded, 1).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    source_id source;
+    {
+        project_read_guard read;
+        std::string normalized;
+        type_handle old_type;
+        if (!manager.read(read).ok() || !read ||
+            !normalize_source_path(path, normalized).ok() ||
+            !read->sources().find(normalized, source).ok() ||
+            !read->find_type("OldType", old_type).ok()) {
+            std::filesystem::remove_all(directory, error);
+            return false;
+        }
+    }
+
+    { std::ofstream file(path, std::ios::trunc); file << "struct NewType { int value; };"; }
+    diagnostics.clear();
+    project_build_result updated;
+    const std::array dirty{source};
+    if (!manager.update(dirty, operation_id{1191}, diagnostics, updated, 1).ok() || !updated.changed) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    std::size_t identities_after_update = 0;
+    std::size_t strings_after_update = 0;
+    {
+        project_read_guard read;
+        type_handle new_type;
+        type_handle removed_type;
+        if (!manager.read(read).ok() || !read ||
+            !read->find_type("NewType", new_type).ok() ||
+            read->find_type("OldType", removed_type).ok()) {
+            std::filesystem::remove_all(directory, error);
+            return false;
+        }
+        identities_after_update = read->identity_count();
+        strings_after_update = read->string_table_stats().strings;
+    }
+
+    diagnostics.clear();
+    project_build_result rebuilt;
+    if (!manager.rebuild(operation_id{1192}, diagnostics, rebuilt, 1).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    {
+        project_read_guard read;
+        type_handle new_type;
+        type_handle removed_type;
+        if (!manager.read(read).ok() || !read ||
+            !read->find_type("NewType", new_type).ok() ||
+            read->find_type("OldType", removed_type).ok() ||
+            read->identity_count() >= identities_after_update ||
+            read->string_table_stats().strings >= strings_after_update) {
+            std::filesystem::remove_all(directory, error);
+            return false;
+        }
+    }
+
+    manager.unload();
+    project_read_guard after_unload;
+    const bool pass = !manager.loaded() &&
+        manager.read(after_unload).code == status_code::not_found && !after_unload;
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+bool test_project_update_rebuild_failure_preserves_current() {
+    const auto directory = std::filesystem::temp_directory_path() / "server_engine_v309_fallback_rollback";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto main_path = directory / "main.hpp";
+    const auto other_path = directory / "other.hpp";
+    { std::ofstream file(main_path); file << "struct Main;"; }
+    { std::ofstream file(other_path); file << "struct Other;"; }
+
+    project_configuration configuration;
+    configuration.version = 1;
+    configuration.name = "FallbackRollback";
+    configuration.project.push_back(project_item_configuration{main_path, project_item_role::type});
+    configuration.project.push_back(project_item_configuration{other_path, project_item_role::type});
+
+    project_manager manager;
+    diagnostic_buffer diagnostics;
+    project_build_result loaded;
+    if (!manager.load(std::move(configuration), operation_id{1180}, diagnostics, loaded, 2).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    source_id main_source;
+    {
+        project_read_guard read;
+        std::string normalized;
+        if (!manager.read(read).ok() || !read ||
+            !normalize_source_path(main_path, normalized).ok() ||
+            !read->sources().find(normalized, main_source).ok()) {
+            std::filesystem::remove_all(directory, error);
+            return false;
+        }
+    }
+
+    constexpr std::size_t added_count = 70;
+    for (std::size_t index = 0; index < added_count; ++index) {
+        std::ofstream file(directory / ("new_" + std::to_string(index) + ".hpp"));
+        file << "struct N" << index << ";";
+    }
+    {
+        std::ofstream file(main_path, std::ios::trunc);
+        for (std::size_t index = 0; index < added_count; ++index)
+            file << "#include \"new_" << index << ".hpp\"\n";
+        file << "struct Main;";
+    }
+    { std::ofstream file(other_path, std::ios::trunc); file << "#define BROKEN 1\nstruct Other;"; }
+
+    diagnostics.clear();
+    project_build_result updated;
+    const std::array dirty{main_source};
+    const auto result = manager.update(dirty, operation_id{1181}, diagnostics, updated, 2);
+
+    project_read_guard read;
+    type_handle main_type;
+    type_handle other_type;
+    type_handle new_type;
+    const bool pass = !result.ok() && manager.loaded() &&
+        manager.read(read).ok() && read &&
+        read->sources().source_count() == 2 &&
+        read->compiled_graph().type_count() == 2 &&
+        read->find_type("Main", main_type).ok() &&
+        read->find_type("Other", other_type).ok() &&
+        read->find_type("N69", new_type).code == status_code::not_found;
+
+    read = {};
+    manager.unload();
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
 using test_function = bool (*)();
 
 struct test_case {
@@ -2144,6 +2929,7 @@ constexpr std::array tests{
     test_case{"frontend_include_pipeline", &test_frontend_include_pipeline},
     test_case{"frontend_include_cycle", &test_frontend_include_cycle},
     test_case{"frontend_parallel_roots", &test_frontend_parallel_roots},
+    test_case{"frontend_parallel_failure_safe", &test_frontend_parallel_failure_safe},
     test_case{"frontend_transitive_include_pipeline", &test_frontend_transitive_include_pipeline},
     test_case{"frontend_shared_include_identity", &test_frontend_shared_include_identity},
     test_case{"frontend_unsupported_directive", &test_frontend_unsupported_directive},
@@ -2166,6 +2952,17 @@ constexpr std::array tests{
     test_case{"project_build_orchestrator_builder_conflict_rollback", &test_project_build_orchestrator_builder_conflict_rollback},
     test_case{"project_build_orchestrator_semantic_noop", &test_project_build_orchestrator_semantic_noop},
     test_case{"project_build_orchestrator_reverse_edge_replacement", &test_project_build_orchestrator_reverse_edge_replacement},
+    test_case{"string_table_canonicalization", &test_string_table_canonicalization},
+    test_case{"complete_graph_objects_links_query", &test_complete_graph_objects_links_query},
+    test_case{"complete_graph_incremental_link_retarget", &test_complete_graph_incremental_link_retarget},
+    test_case{"complete_graph_object_reactivation", &test_complete_graph_object_reactivation},
+    test_case{"complete_graph_duplicate_new_link_rollback", &test_complete_graph_duplicate_new_link_rollback},
+    test_case{"project_manager_load_unload", &test_project_manager_load_unload},
+    test_case{"project_read_guard_publication_barrier", &test_project_read_guard_publication_barrier},
+    test_case{"project_rebuild_failure_preserves_current", &test_project_rebuild_failure_preserves_current},
+    test_case{"project_update_rebuild_required_fallback", &test_project_update_rebuild_required_fallback},
+    test_case{"project_update_rebuild_failure_preserves_current", &test_project_update_rebuild_failure_preserves_current},
+    test_case{"project_update_rebuild_unload_cleanup", &test_project_update_rebuild_unload_cleanup},
 };
 
 } // namespace

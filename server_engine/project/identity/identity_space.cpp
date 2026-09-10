@@ -1,7 +1,6 @@
 #include "identity_space.hpp"
 
 #include <array>
-#include <cstring>
 #include <limits>
 #include <new>
 
@@ -44,7 +43,7 @@ identity_space::identity_space() noexcept
     : root_record(
           identity_node::construction_token{},
           nullptr,
-          name_ref{},
+          string_id{},
           identity_kind::root,
           0),
       buckets(new (std::nothrow) std::atomic<record*>[semantic_bucket_count]) {
@@ -58,22 +57,16 @@ identity_space::identity_space() noexcept
 
 std::uint64_t identity_space::semantic_hash(
     identity_ref parent,
-    std::string_view local_name) noexcept {
-
-    std::uint64_t hash = 1469598103934665603ULL;
-    for (const unsigned char byte : local_name) {
-        hash ^= byte;
-        hash *= 1099511628211ULL;
-    }
+    string_id local_name) noexcept {
 
     const auto parent_value = static_cast<std::uint64_t>(
         reinterpret_cast<std::uintptr_t>(parent));
-    return mix64(hash ^ mix64(parent_value));
+    return mix64(parent_value ^ (static_cast<std::uint64_t>(local_name.value()) << 32));
 }
 
-const identity_space::record* identity_space::find(
+const identity_space::record* identity_space::find_record(
     identity_ref parent,
-    std::string_view local_name,
+    string_id local_name,
     std::uint64_t hash) const noexcept {
 
     if (buckets == nullptr)
@@ -84,7 +77,7 @@ const identity_space::record* identity_space::find(
     while (item != nullptr) {
         if (item->semantic_hash == hash &&
             item->identity.parent() == parent &&
-            item->identity.name().view() == local_name) {
+            item->identity.name() == local_name) {
             return item;
         }
         item = item->next_bucket;
@@ -94,33 +87,21 @@ const identity_space::record* identity_space::find(
 
 status identity_space::make_candidate(
     identity_ref parent,
-    std::string_view local_name,
+    string_id local_name,
     identity_kind kind,
     std::uint64_t hash,
     record*& output) noexcept {
 
     output = nullptr;
-
-    if (local_name.size() > std::numeric_limits<std::uint32_t>::max())
-        return {status_code::not_available};
-
-    if (sizeof(record) > std::numeric_limits<std::size_t>::max() - local_name.size())
-        return {status_code::not_available};
-
     void* memory = nullptr;
-    const auto result = storage.allocate(sizeof(record) + local_name.size(), alignof(record), memory);
+    const auto result = storage.allocate(sizeof(record), alignof(record), memory);
     if (!result.ok())
         return result;
 
-    auto* name_memory = reinterpret_cast<char*>(memory) + sizeof(record);
-    if (!local_name.empty())
-        std::memcpy(name_memory, local_name.data(), local_name.size());
-
-    const auto name = name_ref{name_memory, static_cast<std::uint32_t>(local_name.size())};
     output = ::new (memory) record(
         identity_node::construction_token{},
         parent,
-        name,
+        local_name,
         kind,
         hash);
     return {};
@@ -128,13 +109,13 @@ status identity_space::make_candidate(
 
 status identity_space::resolve_declaration(
     identity_ref parent,
-    std::string_view local_name,
+    string_id local_name,
     identity_kind kind,
     identity_ref& output) noexcept {
 
     output = nullptr;
 
-    if (parent == nullptr || local_name.empty() || kind == identity_kind::root)
+    if (parent == nullptr || !local_name || kind == identity_kind::root)
         return {status_code::invalid_argument};
 
     if (buckets == nullptr)
@@ -143,7 +124,7 @@ status identity_space::resolve_declaration(
     const auto hash = semantic_hash(parent, local_name);
     auto& bucket = buckets[static_cast<std::size_t>(hash) & semantic_bucket_mask];
 
-    if (const auto* existing = find(parent, local_name, hash); existing != nullptr) {
+    if (const auto* existing = find_record(parent, local_name, hash); existing != nullptr) {
         if (existing->identity.kind() != kind)
             return {status_code::semantic_conflict};
         output = &existing->identity;
@@ -161,7 +142,7 @@ status identity_space::resolve_declaration(
         while (item != nullptr) {
             if (item->semantic_hash == hash &&
                 item->identity.parent() == parent &&
-                item->identity.name().view() == local_name) {
+                item->identity.name() == local_name) {
                 if (item->identity.kind() != kind)
                     return {status_code::semantic_conflict};
                 output = &item->identity;
@@ -181,6 +162,20 @@ status identity_space::resolve_declaration(
             return {};
         }
     }
+}
+
+identity_ref identity_space::find(
+    identity_ref parent,
+    string_id local_name,
+    identity_kind kind) const noexcept {
+
+    if (parent == nullptr || !local_name || kind == identity_kind::root)
+        return nullptr;
+    const auto hash = semantic_hash(parent, local_name);
+    const auto* found = find_record(parent, local_name, hash);
+    return found != nullptr && found->identity.kind() == kind
+        ? &found->identity
+        : nullptr;
 }
 
 identity_index_statistics identity_space::index_statistics() const noexcept {

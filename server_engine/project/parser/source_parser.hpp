@@ -17,7 +17,8 @@ namespace cw::server {
 // project identity_ref values in source_facts. It owns no filesystem/preprocessor work.
 class source_parser final {
 public:
-    explicit source_parser(project_context& project_value) noexcept : project(project_value) {}
+    explicit source_parser(project_semantic_services semantic_value) noexcept
+        : semantic(semantic_value) {}
 
     [[nodiscard]] status parse(
         const source_snapshot& source,
@@ -28,7 +29,7 @@ public:
         parsed_source& output) const noexcept;
 
 private:
-    project_context& project;
+    project_semantic_services semantic;
 };
 
 } // namespace cw::server

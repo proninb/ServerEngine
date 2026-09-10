@@ -1,6 +1,8 @@
 #pragma once
 
+#include "../../member_index.hpp"
 #include "../../source_id.hpp"
+#include "../../string_id.hpp"
 #include "../identity/identity_node.hpp"
 
 #include <cstddef>
@@ -119,7 +121,7 @@ enum class source_member_access : std::uint8_t {
 
 struct source_member_fact final {
     source_type_ref type{};
-    source_span name{};
+    string_id name{};
     source_span declaration{};
     source_member_access access = source_member_access::public_access;
 };
@@ -132,7 +134,7 @@ struct source_integral_constant final {
 };
 
 struct source_enum_value_fact final {
-    source_span name{};
+    string_id name{};
     source_integral_constant value{};
     source_span expression{};
 };
@@ -152,10 +154,34 @@ struct source_enum_fact final {
     bool scoped = false;
 };
 
+
+// One named Project object. Object identity is semantic WHO; its type remains a
+// fully resolved Parser TypeRef and is materialized to Graph TypeRef by Builder.
+struct source_object_fact final {
+    identity_ref identity = nullptr;
+    source_type_ref type{};
+    source_span declaration{};
+};
+
+struct source_object_endpoint_fact final {
+    identity_ref object = nullptr;
+    member_index member{};
+};
+
+// Assignment syntax `target.member = source.member;` becomes one directed semantic
+// link from source endpoint to target endpoint. No textual lookup survives Parser.
+struct source_link_fact final {
+    source_object_endpoint_fact source{};
+    source_object_endpoint_fact target{};
+    source_span declaration{};
+};
+
 enum class source_declaration_kind : std::uint8_t {
     namespace_scope,
     record_type,
     enum_type,
+    object,
+    link,
 };
 
 // Preserves total lexical declaration order across separate flat fact arrays so
@@ -177,7 +203,7 @@ public:
         std::span<const source_record_fact> records,
         std::span<const source_member_fact> members,
         std::span<const source_type_modifier> modifiers) noexcept
-        : source_facts(source, source_text, namespaces, records, members, modifiers, {}, {}, {}) {}
+        : source_facts(source, source_text, namespaces, records, members, modifiers, {}, {}, {}, {}, {}) {}
 
     constexpr source_facts(
         source_id source,
@@ -189,6 +215,21 @@ public:
         std::span<const source_enum_fact> enums,
         std::span<const source_enum_value_fact> enum_values,
         std::span<const source_declaration_ref> declarations) noexcept
+        : source_facts(source, source_text, namespaces, records, members, modifiers, enums,
+              enum_values, declarations, {}, {}) {}
+
+    constexpr source_facts(
+        source_id source,
+        std::string_view source_text,
+        std::span<const source_namespace_fact> namespaces,
+        std::span<const source_record_fact> records,
+        std::span<const source_member_fact> members,
+        std::span<const source_type_modifier> modifiers,
+        std::span<const source_enum_fact> enums,
+        std::span<const source_enum_value_fact> enum_values,
+        std::span<const source_declaration_ref> declarations,
+        std::span<const source_object_fact> objects,
+        std::span<const source_link_fact> links) noexcept
         : source_value(source),
           source_text_value(source_text),
           namespaces_value(namespaces),
@@ -197,7 +238,9 @@ public:
           modifiers_value(modifiers),
           enums_value(enums),
           enum_values_value(enum_values),
-          declarations_value(declarations) {}
+          declarations_value(declarations),
+          objects_value(objects),
+          links_value(links) {}
 
     [[nodiscard]] constexpr source_id source() const noexcept { return source_value; }
     [[nodiscard]] constexpr std::string_view source_text() const noexcept { return source_text_value; }
@@ -208,6 +251,8 @@ public:
     [[nodiscard]] constexpr std::span<const source_enum_fact> enums() const noexcept { return enums_value; }
     [[nodiscard]] constexpr std::span<const source_enum_value_fact> enum_values() const noexcept { return enum_values_value; }
     [[nodiscard]] constexpr std::span<const source_declaration_ref> declarations() const noexcept { return declarations_value; }
+    [[nodiscard]] constexpr std::span<const source_object_fact> objects() const noexcept { return objects_value; }
+    [[nodiscard]] constexpr std::span<const source_link_fact> links() const noexcept { return links_value; }
 
     [[nodiscard]] constexpr std::string_view text(source_span range) const noexcept {
         if (range.offset > source_text_value.size() ||
@@ -227,6 +272,8 @@ private:
     std::span<const source_enum_fact> enums_value;
     std::span<const source_enum_value_fact> enum_values_value;
     std::span<const source_declaration_ref> declarations_value;
+    std::span<const source_object_fact> objects_value;
+    std::span<const source_link_fact> links_value;
 };
 
 static_assert(std::is_trivially_copyable_v<source_span>);
@@ -239,6 +286,9 @@ static_assert(std::is_trivially_copyable_v<source_member_fact>);
 static_assert(std::is_trivially_copyable_v<source_enum_fact>);
 static_assert(std::is_trivially_copyable_v<source_enum_value_fact>);
 static_assert(std::is_trivially_copyable_v<source_declaration_ref>);
+static_assert(std::is_trivially_copyable_v<source_object_fact>);
+static_assert(std::is_trivially_copyable_v<source_object_endpoint_fact>);
+static_assert(std::is_trivially_copyable_v<source_link_fact>);
 static_assert(sizeof(source_span) == 8);
 static_assert(sizeof(source_fact_range) == 8);
 

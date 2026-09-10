@@ -26,6 +26,8 @@ struct generation_build_telemetry final {
     std::uint64_t unique_types = 0;
     std::uint64_t members = 0;
     std::uint64_t enum_values = 0;
+    std::uint64_t objects = 0;
+    std::uint64_t links = 0;
     std::uint64_t canonical_type_refs = 0;
     std::uint64_t derived_type_refs = 0;
 

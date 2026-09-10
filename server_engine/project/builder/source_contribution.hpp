@@ -9,18 +9,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
-#include <string_view>
 #include <vector>
 
 namespace cw::server {
 
 class diagnostic_buffer;
 class generation_builder;
-
-struct source_contribution_name_ref final {
-    std::uint32_t offset = 0;
-    std::uint32_t length = 0;
-};
 
 enum class source_contribution_type_kind : std::uint8_t {
     record,
@@ -35,13 +29,23 @@ struct source_contribution_type_ref final {
 
 struct source_contribution_member final {
     source_contribution_type_ref type{};
-    source_contribution_name_ref name{};
+    string_id name{};
     source_member_access access = source_member_access::public_access;
 };
 
 struct source_contribution_enum_value final {
-    source_contribution_name_ref name{};
+    string_id name{};
     source_integral_constant value{};
+};
+
+struct source_contribution_object final {
+    identity_ref identity = nullptr;
+    source_contribution_type_ref type{};
+};
+
+struct source_contribution_link final {
+    source_object_endpoint_fact source{};
+    source_object_endpoint_fact target{};
 };
 
 // One Project type declaration/definition contributed by one Source. The record
@@ -66,6 +70,8 @@ struct source_contribution_state final {
     source_fact_range members{};
     source_fact_range modifiers{};
     source_fact_range enum_values{};
+    source_fact_range objects{};
+    source_fact_range links{};
 };
 
 // Build-side semantic aggregation for one generation-local type slot. It is
@@ -91,7 +97,15 @@ struct source_contribution_statistics final {
     std::size_t members = 0;
     std::size_t modifiers = 0;
     std::size_t enum_values = 0;
-    std::size_t name_bytes = 0;
+    std::size_t objects = 0;
+    std::size_t links = 0;
+};
+
+struct source_contribution_storage_usage final {
+    std::size_t retained_bytes = 0;
+    std::size_t reserve_bytes = 0;
+    std::size_t stale_bytes = 0;
+    std::size_t construction_slots = 0;
 };
 
 class source_contribution_cache_update;
@@ -113,9 +127,11 @@ public:
     [[nodiscard]] std::span<const source_contribution_member> members(source_fact_range range) const noexcept;
     [[nodiscard]] std::span<const source_type_modifier> modifiers(source_fact_range range) const noexcept;
     [[nodiscard]] std::span<const source_contribution_enum_value> enum_values(source_fact_range range) const noexcept;
-    [[nodiscard]] std::string_view name(source_contribution_name_ref value) const noexcept;
+    [[nodiscard]] std::span<const source_contribution_object> objects(source_id source) const noexcept;
+    [[nodiscard]] std::span<const source_contribution_link> links(source_id source) const noexcept;
     [[nodiscard]] const source_construction_state* construction(type_handle handle) const noexcept;
     [[nodiscard]] const source_contribution_statistics& statistics() const noexcept { return statistics_value; }
+    [[nodiscard]] source_contribution_storage_usage storage_usage() const noexcept;
 
     // Compares Parser output directly with retained build provenance. This is a
     // semantic-delta filter only: identity_ref equality and Source-local payload
@@ -133,7 +149,8 @@ private:
         std::vector<source_contribution_member> members;
         std::vector<source_type_modifier> modifiers;
         std::vector<source_contribution_enum_value> enum_values;
-        std::vector<char> names;
+        std::vector<source_contribution_object> objects;
+        std::vector<source_contribution_link> links;
         // One-based by type_handle; slot zero is the sentinel.
         std::vector<source_construction_state> construction;
         source_contribution_statistics statistics{};
@@ -185,7 +202,8 @@ private:
         std::size_t members,
         std::size_t modifiers,
         std::size_t enum_values,
-        std::size_t name_bytes) noexcept;
+        std::size_t objects,
+        std::size_t links) noexcept;
 
     source_contribution_cache* owner = nullptr;
     source_contribution_cache::storage candidate;
@@ -227,13 +245,15 @@ public:
     [[nodiscard]] std::span<const source_contribution_member> members(source_fact_range range) const noexcept;
     [[nodiscard]] std::span<const source_type_modifier> modifiers(source_fact_range range) const noexcept;
     [[nodiscard]] std::span<const source_contribution_enum_value> enum_values(source_fact_range range) const noexcept;
-    [[nodiscard]] std::string_view name(source_contribution_name_ref value) const noexcept;
+    [[nodiscard]] std::span<const source_contribution_object> previous_objects(source_id source) const noexcept;
+    [[nodiscard]] std::span<const source_contribution_object> replacement_objects(source_id source) const noexcept;
+    [[nodiscard]] std::span<const source_contribution_link> previous_links(source_id source) const noexcept;
+    [[nodiscard]] std::span<const source_contribution_link> replacement_links(source_id source) const noexcept;
 
     [[nodiscard]] const source_construction_state* construction(type_handle handle) const noexcept;
     [[nodiscard]] status set_construction(type_handle handle, const source_construction_state& state) noexcept;
 
     [[nodiscard]] std::span<const source_id> changed_sources() const noexcept { return changed_source_ids; }
-    [[nodiscard]] std::span<const char> appended_names() const noexcept { return candidate.names; }
 
     [[nodiscard]] status prepare_publish() noexcept;
     void publish_prepared() noexcept;
@@ -264,7 +284,8 @@ private:
         std::size_t members,
         std::size_t modifiers,
         std::size_t enum_values,
-        std::size_t name_bytes) noexcept;
+        std::size_t objects,
+        std::size_t links) noexcept;
 
     [[nodiscard]] source_patch* find_source_patch(source_id source) noexcept;
     [[nodiscard]] const source_patch* find_source_patch(source_id source) const noexcept;
@@ -288,7 +309,8 @@ private:
     std::size_t member_base = 0;
     std::size_t modifier_base = 0;
     std::size_t enum_value_base = 0;
-    std::size_t name_base = 0;
+    std::size_t object_base = 0;
+    std::size_t link_base = 0;
     status failure{};
     bool prepared = false;
     bool published = false;

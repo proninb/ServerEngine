@@ -1,10 +1,23 @@
 #include "source_frontend_cache.hpp"
 
+#include <algorithm>
+#include <limits>
 #include <new>
 #include <stdexcept>
 #include <utility>
 
 namespace cw::server {
+namespace {
+
+[[nodiscard]] bool cache_headroom(std::size_t size, std::size_t& output) noexcept {
+    const auto extra = (std::max)(size / 16, std::size_t{64});
+    if (size > (std::numeric_limits<std::size_t>::max)() - extra)
+        return false;
+    output = size + extra;
+    return true;
+}
+
+} // namespace
 
 const source_interface* source_frontend_cache::interface(source_id source) const noexcept {
     if (!source)
@@ -83,8 +96,13 @@ status source_frontend_cache_update::prepare_publish(
         if (full_reconstruction) {
             if (full_candidate.size() < required_source_count)
                 full_candidate.resize(required_source_count);
+            std::size_t capacity = 0;
+            if (!cache_headroom(required_source_count, capacity))
+                return {status_code::not_available};
+            full_candidate.reserve(capacity);
         } else {
-            owner->interfaces.reserve(required_source_count);
+            if (required_source_count > owner->interfaces.capacity())
+                return {status_code::rebuild_required};
             for (const auto& item : replacements) {
                 if (!item.source || static_cast<std::size_t>(item.source.value()) > required_source_count)
                     return {status_code::invalid_argument};

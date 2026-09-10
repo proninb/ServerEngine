@@ -66,8 +66,19 @@ private:
 class source_frontend_generation final {
 public:
     source_frontend_generation(
+        project_semantic_services semantic_value,
+        source_manager_update& source_update,
+        std::size_t worker_limit = 0) noexcept;
+
+    source_frontend_generation(
         project_context& project_value,
         source_manager_update& source_update,
+        std::size_t worker_limit = 0) noexcept;
+
+    source_frontend_generation(
+        project_semantic_services semantic_value,
+        source_manager_update& source_update,
+        const source_frontend_cache& cache_value,
         std::size_t worker_limit = 0) noexcept;
 
     source_frontend_generation(
@@ -89,7 +100,7 @@ public:
         source_frontend_result& output) noexcept;
 
 private:
-    project_context& project;
+    project_semantic_services semantic;
     source_manager_update& sources;
     const source_frontend_cache* cache = nullptr;
     std::size_t worker_limit = 1;

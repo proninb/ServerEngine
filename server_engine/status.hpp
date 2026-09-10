@@ -14,6 +14,7 @@ enum class status_code : std::uint32_t {
     not_found,
     persistence_failed,
     artifact_corrupt,
+    rebuild_required,
     not_available,
 };
 

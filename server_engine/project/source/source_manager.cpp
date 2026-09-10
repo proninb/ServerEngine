@@ -131,6 +131,19 @@ namespace {
     return capacity;
 }
 
+[[nodiscard]] bool incremental_headroom(
+    std::size_t size,
+    std::size_t minimum_extra,
+    std::size_t& output) noexcept {
+
+    const auto proportional = size / 16;
+    const auto extra = (std::max)(proportional, minimum_extra);
+    if (size > (std::numeric_limits<std::size_t>::max)() - extra)
+        return false;
+    output = size + extra;
+    return true;
+}
+
 class sparse_source_set final {
 public:
     [[nodiscard]] bool contains(source_id source) const noexcept {
@@ -1164,7 +1177,7 @@ status source_manager_update::build_sparse_path_insertions() noexcept {
 
     const auto required_count = owner->records.size() + new_sources.size();
     if (required_count > owner->path_index.size() / 2)
-        return {status_code::not_available};
+        return {status_code::rebuild_required};
 
     try {
         prepared_path_insertions.reserve(new_sources.size());
@@ -1229,28 +1242,44 @@ status source_manager_update::prepare_publish() noexcept {
         }
     }
 
-    try {
-        if (!new_sources.empty()) {
-            owner->records.reserve(owner->records.size() + new_sources.size());
-            owner->states.reserve(owner->states.size() + new_sources.size());
-            prepared_path_storage_size = owner->path_storage.size() + added_path_bytes;
-            owner->path_storage.reserve(prepared_path_storage_size);
+    if (!new_sources.empty()) {
+        prepared_path_storage_size = owner->path_storage.size() + added_path_bytes;
+
+        if (owner->records.empty()) {
+            // Full construction happens in a detached Project and therefore has no
+            // externally readable committed storage to invalidate.
+            try {
+                std::size_t source_capacity = 0;
+                std::size_t path_capacity = 0;
+                if (!incremental_headroom(new_sources.size(), 64, source_capacity) ||
+                    !incremental_headroom(prepared_path_storage_size, 4096, path_capacity)) {
+                    return {status_code::not_available};
+                }
+                owner->records.reserve(source_capacity);
+                owner->states.reserve(source_capacity);
+                owner->path_storage.reserve(path_capacity);
+            }
+            catch (const std::bad_alloc&) {
+                return {status_code::not_available};
+            }
+            catch (const std::length_error&) {
+                return {status_code::not_available};
+            }
+        } else if (owner->records.size() + new_sources.size() > owner->records.capacity() ||
+                   owner->states.size() + new_sources.size() > owner->states.capacity() ||
+                   prepared_path_storage_size > owner->path_storage.capacity()) {
+            // Incremental prepare never grows committed containers. Reallocation
+            // here would invalidate Source views held by concurrent read guards
+            // before the publication barrier.
+            prepared_path_index.clear();
+            prepared_path_insertions.clear();
+            prepared_path_storage_size = 0;
+            return {status_code::rebuild_required};
         }
-        prepared = true;
-        return {};
     }
-    catch (const std::bad_alloc&) {
-        prepared_path_index.clear();
-        prepared_path_insertions.clear();
-        prepared_path_storage_size = 0;
-        return {status_code::not_available};
-    }
-    catch (const std::length_error&) {
-        prepared_path_index.clear();
-        prepared_path_insertions.clear();
-        prepared_path_storage_size = 0;
-        return {status_code::not_available};
-    }
+
+    prepared = true;
+    return {};
 }
 
 void source_manager_update::publish_prepared() noexcept {

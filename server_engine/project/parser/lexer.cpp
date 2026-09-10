@@ -166,6 +166,7 @@ status lex_source(
                 case ';': token.punctuation = parser_punctuation::semicolon; ++index; break;
                 case ':': token.punctuation = parser_punctuation::colon; ++index; break;
                 case ',': token.punctuation = parser_punctuation::comma; ++index; break;
+                case '.': token.punctuation = parser_punctuation::dot; ++index; break;
                 case '=': token.punctuation = parser_punctuation::equal; ++index; break;
                 case '+': token.punctuation = parser_punctuation::plus; ++index; break;
                 case '-': token.punctuation = parser_punctuation::minus; ++index; break;

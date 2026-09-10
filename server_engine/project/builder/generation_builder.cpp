@@ -395,6 +395,22 @@ public:
         return {status_code::not_available};
     }
 
+    [[nodiscard]] bool contains(std::uint32_t value) const noexcept {
+        if (value == 0 || slots.empty())
+            return false;
+        const auto mask = slots.size() - 1;
+        auto position = static_cast<std::size_t>(mix64(value)) & mask;
+        for (std::size_t probe = 0; probe < slots.size(); ++probe) {
+            const auto current = slots[position];
+            if (current == 0)
+                return false;
+            if (current == value)
+                return true;
+            position = (position + 1) & mask;
+        }
+        return false;
+    }
+
 private:
     [[nodiscard]] status grow() noexcept {
         if (slots.size() > (std::numeric_limits<std::size_t>::max)() / 2)
@@ -504,6 +520,147 @@ void insert_identity_slot(
         }
         position = (position + 1) & mask;
     }
+}
+
+void insert_object_identity_slot(
+    std::vector<graph_object_identity_index_slot>& slots,
+    std::span<const identity_ref> identities,
+    identity_ref identity,
+    std::uint32_t handle) noexcept {
+
+    const auto hash = identity_hash(identity);
+    const auto fingerprint = fold32(hash);
+    const auto mask = slots.size() - 1;
+    auto position = static_cast<std::size_t>(hash) & mask;
+    for (;;) {
+        auto& slot = slots[position];
+        if (slot.handle == 0) {
+            slot.fingerprint = fingerprint;
+            slot.handle = handle;
+            return;
+        }
+        if (slot.fingerprint == fingerprint && slot.handle <= identities.size() &&
+            identities[slot.handle - 1] == identity) {
+            return;
+        }
+        position = (position + 1) & mask;
+    }
+}
+
+[[nodiscard]] std::uint64_t endpoint_hash(object_endpoint endpoint) noexcept {
+    return mix64(
+        (static_cast<std::uint64_t>(endpoint.object.value()) << 32) ^
+        static_cast<std::uint64_t>(endpoint.member.value()));
+}
+
+class sparse_endpoint_set final {
+public:
+    [[nodiscard]] status reserve(std::size_t expected) noexcept {
+        std::size_t capacity = 0;
+        if (!checked_index_capacity(expected == 0 ? 1 : expected, capacity))
+            return {status_code::not_available};
+        try {
+            slots.assign(capacity, {});
+            return {};
+        } catch (...) {
+            return {status_code::initialization_failed};
+        }
+    }
+
+    [[nodiscard]] status insert(object_endpoint value, bool& inserted) noexcept {
+        inserted = false;
+        if (!value.object || !value.member)
+            return {status_code::invalid_argument};
+        if (slots.empty()) {
+            const auto result = reserve(4);
+            if (!result.ok())
+                return result;
+        }
+        if ((count + 1) * 2 > slots.size()) {
+            const auto result = grow();
+            if (!result.ok())
+                return result;
+        }
+        return insert_no_grow(value, inserted);
+    }
+
+private:
+    struct slot final {
+        object_endpoint endpoint{};
+        bool occupied = false;
+    };
+
+    [[nodiscard]] status insert_no_grow(object_endpoint value, bool& inserted) noexcept {
+        inserted = false;
+        const auto mask = slots.size() - 1;
+        auto position = static_cast<std::size_t>(endpoint_hash(value)) & mask;
+        for (std::size_t probe = 0; probe < slots.size(); ++probe) {
+            auto& current = slots[position];
+            if (!current.occupied) {
+                current.endpoint = value;
+                current.occupied = true;
+                ++count;
+                inserted = true;
+                return {};
+            }
+            if (current.endpoint == value)
+                return {};
+            position = (position + 1) & mask;
+        }
+        return {status_code::not_available};
+    }
+
+    [[nodiscard]] status grow() noexcept {
+        if (slots.size() > (std::numeric_limits<std::size_t>::max)() / 2)
+            return {status_code::not_available};
+        try {
+            auto old = std::move(slots);
+            slots.assign(old.size() * 2, {});
+            count = 0;
+            for (const auto& current : old) {
+                if (!current.occupied)
+                    continue;
+                bool inserted = false;
+                const auto result = insert_no_grow(current.endpoint, inserted);
+                if (!result.ok())
+                    return result;
+            }
+            return {};
+        } catch (...) {
+            return {status_code::initialization_failed};
+        }
+    }
+
+    std::vector<slot> slots;
+    std::size_t count = 0;
+};
+
+[[nodiscard]] bool insert_link_slot(
+    std::vector<graph_link_index_slot>& slots,
+    std::span<const link_record> links,
+    object_endpoint target,
+    std::uint32_t handle) noexcept {
+
+    if (slots.empty() || !target.object || !target.member || handle == 0)
+        return false;
+    const auto hash = endpoint_hash(target);
+    const auto fingerprint = fold32(hash);
+    const auto mask = slots.size() - 1;
+    auto position = static_cast<std::size_t>(hash) & mask;
+    for (std::size_t probe = 0; probe < slots.size(); ++probe) {
+        auto& slot = slots[position];
+        if (slot.handle == 0) {
+            slot.fingerprint = fingerprint;
+            slot.handle = handle;
+            return true;
+        }
+        if (slot.fingerprint == fingerprint && slot.handle <= links.size() &&
+            links[slot.handle - 1].target == target) {
+            return false;
+        }
+        position = (position + 1) & mask;
+    }
+    return false;
 }
 
 [[nodiscard]] derived_type_kind derived_kind(source_type_modifier_kind kind) noexcept {
@@ -664,7 +821,8 @@ status generation_builder::prepare_g0(
     std::size_t total_members = 0;
     std::size_t total_modifiers = 0;
     std::size_t total_enum_values = 0;
-    std::size_t total_name_bytes = 0;
+    std::size_t total_objects = 0;
+    std::size_t total_links = 0;
     for (const auto& facts : sources) {
         max_source_id = std::max(
             max_source_id, static_cast<std::size_t>(facts.source().value()));
@@ -672,30 +830,18 @@ status generation_builder::prepare_g0(
             !checked_add_size(total_types, facts.enums().size()) ||
             !checked_add_size(total_members, facts.members().size()) ||
             !checked_add_size(total_modifiers, facts.modifiers().size()) ||
-            !checked_add_size(total_enum_values, facts.enum_values().size())) {
+            !checked_add_size(total_enum_values, facts.enum_values().size()) ||
+            !checked_add_size(total_objects, facts.objects().size()) ||
+            !checked_add_size(total_links, facts.links().size())) {
             const status result{status_code::not_available};
             emit_failure(result, facts.source(), operation, "G0 contribution counts overflow", diagnostics);
             return result;
-        }
-        for (const auto& member : facts.members()) {
-            if (!checked_add_size(total_name_bytes, member.name.length)) {
-                const status result{status_code::not_available};
-                emit_failure(result, facts.source(), operation, "G0 member-name bytes overflow", diagnostics);
-                return result;
-            }
-        }
-        for (const auto& value : facts.enum_values()) {
-            if (!checked_add_size(total_name_bytes, value.name.length)) {
-                const status result{status_code::not_available};
-                emit_failure(result, facts.source(), operation, "G0 enum-name bytes overflow", diagnostics);
-                return result;
-            }
         }
     }
 
     auto reserve_result = contributions.reserve_rebuild(
         max_source_id, total_types, total_members, total_modifiers,
-        total_enum_values, total_name_bytes);
+        total_enum_values, total_objects, total_links);
     if (!reserve_result.ok()) {
         emit_failure(reserve_result, {}, operation, "SourceContribution G0 reserve failed", diagnostics);
         return reserve_result;
@@ -729,6 +875,8 @@ status generation_builder::prepare_g0(
     telemetry_value.type_declarations = statistics.type_declarations;
     telemetry_value.members = statistics.members;
     telemetry_value.enum_values = statistics.enum_values;
+    telemetry_value.objects = statistics.objects;
+    telemetry_value.links = statistics.links;
     telemetry_value.unique_types = prepared_graph.types.size();
     telemetry_value.canonical_type_refs =
         prepared_graph.canonical_types.empty() ? 0 : prepared_graph.canonical_types.size() - 1;
@@ -759,7 +907,8 @@ status generation_builder::prepare_incremental(
     std::size_t total_members = 0;
     std::size_t total_modifiers = 0;
     std::size_t total_enum_values = 0;
-    std::size_t total_name_bytes = 0;
+    std::size_t total_objects = 0;
+    std::size_t total_links = 0;
     std::size_t touched_upper = 0;
 
     for (const auto& facts : replacements) {
@@ -769,7 +918,9 @@ status generation_builder::prepare_incremental(
             !checked_add_size(total_types, facts.enums().size()) ||
             !checked_add_size(total_members, facts.members().size()) ||
             !checked_add_size(total_modifiers, facts.modifiers().size()) ||
-            !checked_add_size(total_enum_values, facts.enum_values().size())) {
+            !checked_add_size(total_enum_values, facts.enum_values().size()) ||
+            !checked_add_size(total_objects, facts.objects().size()) ||
+            !checked_add_size(total_links, facts.links().size())) {
             const status result{status_code::not_available};
             emit_failure(result, facts.source(), operation, "incremental contribution counts overflow", diagnostics);
             return result;
@@ -785,20 +936,6 @@ status generation_builder::prepare_incremental(
             const status result{status_code::not_available};
             emit_failure(result, facts.source(), operation, "incremental touched-type count overflow", diagnostics);
             return result;
-        }
-        for (const auto& member : facts.members()) {
-            if (!checked_add_size(total_name_bytes, member.name.length)) {
-                const status result{status_code::not_available};
-                emit_failure(result, facts.source(), operation, "incremental member-name bytes overflow", diagnostics);
-                return result;
-            }
-        }
-        for (const auto& value : facts.enum_values()) {
-            if (!checked_add_size(total_name_bytes, value.name.length)) {
-                const status result{status_code::not_available};
-                emit_failure(result, facts.source(), operation, "incremental enum-name bytes overflow", diagnostics);
-                return result;
-            }
         }
     }
 
@@ -822,7 +959,7 @@ status generation_builder::prepare_incremental(
 
     auto result = sparse_contributions.reserve_incremental(
         source_changes, touched_upper, total_types, total_members, total_modifiers,
-        total_enum_values, total_name_bytes);
+        total_enum_values, total_objects, total_links);
     if (!result.ok()) {
         emit_failure(result, {}, operation, "SourceContribution incremental reserve failed", diagnostics);
         return result;
@@ -852,7 +989,8 @@ status generation_builder::prepare_incremental(
     const auto publish_prepare_begin = clock_type::now();
     result = sparse_contributions.prepare_publish();
     if (!result.ok()) {
-        emit_failure(result, {}, operation, "SourceContribution incremental prepare failed", diagnostics);
+        if (result.code != status_code::rebuild_required)
+            emit_failure(result, {}, operation, "SourceContribution incremental prepare failed", diagnostics);
         return result;
     }
     const auto publish_prepare_end = clock_type::now();
@@ -864,6 +1002,8 @@ status generation_builder::prepare_incremental(
     telemetry_value.type_declarations = statistics.type_declarations;
     telemetry_value.members = statistics.members;
     telemetry_value.enum_values = statistics.enum_values;
+    telemetry_value.objects = statistics.objects;
+    telemetry_value.links = statistics.links;
     telemetry_value.unique_types = prepared_update.live_type_count;
     telemetry_value.canonical_type_refs =
         target.canonical_types.size() + prepared_update.canonical_types.size() - 1;
@@ -884,8 +1024,7 @@ status generation_builder::prepare_incremental_graph(
         if (target.types.size() != target.identities.size() ||
             target.types.size() + 1 != target.named_refs.size() ||
             target.types.size() != target.dependency_versions.size() ||
-            target.types.size() != target.reverse_dependency_heads.size() ||
-            target.names.size() != contribution_cache.committed.names.size()) {
+            target.types.size() != target.reverse_dependency_heads.size()) {
             result = {status_code::invalid_argument};
             emit_failure(result, {}, operation, "incremental Graph/cache lineage mismatch", diagnostics);
             return result;
@@ -893,16 +1032,21 @@ status generation_builder::prepare_incremental_graph(
 
         prepared_update = {};
         prepared_update.live_type_count = target.live_type_count;
+        prepared_update.live_object_count = target.live_object_count;
+        prepared_update.live_link_count = target.live_link_count;
         prepared_update.intrinsic_refs = target.intrinsic_refs;
-        prepared_update.names.assign(
-            sparse_contributions.appended_names().begin(),
-            sparse_contributions.appended_names().end());
 
         const auto changed = sparse_contributions.changed_sources();
         std::size_t touched_upper = 0;
+        std::size_t touched_object_upper = 0;
+        std::size_t touched_link_upper = 0;
         for (const auto source : changed) {
             if (!checked_add_size(touched_upper, sparse_contributions.previous_types(source).size()) ||
-                !checked_add_size(touched_upper, sparse_contributions.replacement_types(source).size())) {
+                !checked_add_size(touched_upper, sparse_contributions.replacement_types(source).size()) ||
+                !checked_add_size(touched_object_upper, sparse_contributions.previous_objects(source).size()) ||
+                !checked_add_size(touched_object_upper, sparse_contributions.replacement_objects(source).size()) ||
+                !checked_add_size(touched_link_upper, sparse_contributions.previous_links(source).size()) ||
+                !checked_add_size(touched_link_upper, sparse_contributions.replacement_links(source).size())) {
                 return {status_code::not_available};
             }
         }
@@ -910,8 +1054,13 @@ status generation_builder::prepare_incremental_graph(
         prepared_update.type_patches.reserve(touched_upper);
         prepared_update.new_types.reserve(touched_upper);
         prepared_update.new_identities.reserve(touched_upper);
-        prepared_update.named_ref_patches.reserve(touched_upper);
+        prepared_update.named_ref_patches.reserve(touched_upper + touched_object_upper);
         prepared_update.dependency_version_patches.reserve(touched_upper);
+        prepared_update.object_patches.reserve(touched_object_upper);
+        prepared_update.new_objects.reserve(touched_object_upper);
+        prepared_update.new_object_identities.reserve(touched_object_upper);
+        prepared_update.link_patches.reserve(touched_link_upper);
+        prepared_update.new_links.reserve(touched_link_upper);
 
         sparse_u32_map type_patch_map;
         result = type_patch_map.reserve(touched_upper + 1);
@@ -924,7 +1073,39 @@ status generation_builder::prepare_incremental_graph(
         std::vector<std::uint32_t> touched_handles;
         touched_handles.reserve(touched_upper);
         sparse_identity_map new_identity_map;
-        result = new_identity_map.reserve(touched_upper + 1);
+        result = new_identity_map.reserve(touched_upper + touched_object_upper + 1);
+        if (!result.ok())
+            return result;
+        sparse_u32_map object_patch_map;
+        result = object_patch_map.reserve(touched_object_upper + 1);
+        if (!result.ok())
+            return result;
+        sparse_u32_map link_patch_map;
+        result = link_patch_map.reserve(touched_link_upper + 1);
+        if (!result.ok())
+            return result;
+        sparse_identity_map new_object_identity_map;
+        result = new_object_identity_map.reserve(touched_object_upper + 1);
+        if (!result.ok())
+            return result;
+        sparse_handle_set retired_objects;
+        result = retired_objects.reserve(touched_object_upper + 1);
+        if (!result.ok())
+            return result;
+        sparse_handle_set claimed_objects;
+        result = claimed_objects.reserve(touched_object_upper + 1);
+        if (!result.ok())
+            return result;
+        sparse_handle_set retired_links;
+        result = retired_links.reserve(touched_link_upper + 1);
+        if (!result.ok())
+            return result;
+        sparse_handle_set claimed_links;
+        result = claimed_links.reserve(touched_link_upper + 1);
+        if (!result.ok())
+            return result;
+        sparse_endpoint_set claimed_link_targets;
+        result = claimed_link_targets.reserve(touched_link_upper + 1);
         if (!result.ok())
             return result;
 
@@ -978,6 +1159,65 @@ status generation_builder::prepare_incremental_graph(
             if (!type_patch_map.insert(handle, position).ok())
                 return nullptr;
             return &prepared_update.type_patches[position - 1].value;
+        };
+
+        const auto find_or_create_object_handle = [&](identity_ref identity, std::uint32_t& output) -> status {
+            output = 0;
+            if (identity == nullptr || identity->kind() != identity_kind::object)
+                return {status_code::invalid_argument};
+            const auto existing = target.find_object_identity(identity);
+            if (existing) {
+                output = existing.value();
+                return {};
+            }
+            output = new_object_identity_map.find(identity);
+            if (output != 0)
+                return {};
+            if (target.object_entries.size() + prepared_update.new_objects.size() >=
+                (std::numeric_limits<std::uint32_t>::max)()) {
+                return {status_code::not_available};
+            }
+            output = static_cast<std::uint32_t>(
+                target.object_entries.size() + prepared_update.new_objects.size() + 1);
+            prepared_update.new_objects.push_back({});
+            prepared_update.new_object_identities.push_back(identity);
+            return new_object_identity_map.insert(identity, output);
+        };
+
+        const auto get_mutable_object = [&](std::uint32_t handle) -> object_entry* {
+            if (handle == 0)
+                return nullptr;
+            if (handle > target.object_entries.size()) {
+                const auto local = static_cast<std::size_t>(handle) - target.object_entries.size() - 1;
+                return local < prepared_update.new_objects.size() ? &prepared_update.new_objects[local] : nullptr;
+            }
+            const auto existing = object_patch_map.find(handle);
+            if (existing != 0)
+                return &prepared_update.object_patches[existing - 1].value;
+            prepared_graph_update::object_patch patch;
+            patch.handle = handle;
+            patch.value = target.object_entries[handle - 1];
+            prepared_update.object_patches.push_back(patch);
+            const auto position = static_cast<std::uint32_t>(prepared_update.object_patches.size());
+            if (!object_patch_map.insert(handle, position).ok())
+                return nullptr;
+            return &prepared_update.object_patches[position - 1].value;
+        };
+
+        const auto get_mutable_link = [&](std::uint32_t handle) -> link_record* {
+            if (handle == 0 || handle > target.link_records.size())
+                return nullptr;
+            const auto existing = link_patch_map.find(handle);
+            if (existing != 0)
+                return &prepared_update.link_patches[existing - 1].value;
+            prepared_graph_update::link_patch patch;
+            patch.handle = handle;
+            patch.value = target.link_records[handle - 1];
+            prepared_update.link_patches.push_back(patch);
+            const auto position = static_cast<std::uint32_t>(prepared_update.link_patches.size());
+            if (!link_patch_map.insert(handle, position).ok())
+                return nullptr;
+            return &prepared_update.link_patches[position - 1].value;
         };
 
         for (const auto source : changed) {
@@ -1072,12 +1312,19 @@ status generation_builder::prepare_incremental_graph(
             }
         }
 
+        for (const auto source : changed) {
+            for (const auto& object : sparse_contributions.replacement_objects(source)) {
+                if (!checked_add_size(total_new_modifiers, object.type.modifiers.count))
+                    return {status_code::not_available};
+            }
+        }
+
         prepared_update.members.reserve(total_new_members);
         prepared_update.canonical_types.reserve(total_new_members + total_new_modifiers);
         prepared_update.dependency_edges.reserve(total_new_members);
 
         sparse_u32_map named_patch_map;
-        result = named_patch_map.reserve(touched_upper + total_new_members + 1);
+        result = named_patch_map.reserve(touched_upper + total_new_members + touched_object_upper + 1);
         if (!result.ok())
             return result;
 
@@ -1320,7 +1567,7 @@ status generation_builder::prepare_incremental_graph(
                             }
 
                             prepared_update.members.push_back(member_record{
-                                {member.name.offset, member.name.length}, current, member.access});
+                                member.name, current, member.access});
 
                             if (member.type.identity != nullptr) {
                                 std::uint32_t target_handle_value = 0;
@@ -1350,7 +1597,7 @@ status generation_builder::prepare_incremental_graph(
                         next.definition.count = static_cast<std::uint32_t>(values.size());
                         for (const auto& value : values) {
                             prepared_update.enum_values.push_back(enum_value_record{
-                                value.value.bits, {value.name.offset, value.name.length}, value.value.intrinsic});
+                                value.value.bits, value.name, value.value.intrinsic});
                         }
                     }
                 }
@@ -1371,6 +1618,211 @@ status generation_builder::prepare_incremental_graph(
                     edge.owner_version = version;
             }
         }
+        for (const auto source : changed) {
+            for (const auto& old_object : sparse_contributions.previous_objects(source)) {
+                const auto handle = target.find_object_identity(old_object.identity);
+                if (!handle) {
+                    result = {status_code::invalid_argument};
+                    emit_failure(result, source, operation, "previous object identity absent from Graph", diagnostics);
+                    return result;
+                }
+                auto* entry = get_mutable_object(handle.value());
+                if (entry == nullptr)
+                    return {status_code::initialization_failed};
+                if (entry->live()) {
+                    *entry = {};
+                    --prepared_update.live_object_count;
+                }
+                bool inserted = false;
+                result = retired_objects.insert(handle.value(), inserted);
+                if (!result.ok())
+                    return result;
+            }
+
+            for (const auto& old_link : sparse_contributions.previous_links(source)) {
+                const auto source_object = target.find_object_identity(old_link.source.object);
+                const auto target_object = target.find_object_identity(old_link.target.object);
+                if (!source_object || !target_object) {
+                    result = {status_code::invalid_argument};
+                    emit_failure(result, source, operation, "previous link object identity absent from Graph", diagnostics);
+                    return result;
+                }
+                const object_endpoint old_target{target_object, old_link.target.member};
+                const auto handle = target.find_link_raw(old_target);
+                if (!handle) {
+                    result = {status_code::invalid_argument};
+                    emit_failure(result, source, operation, "previous link absent from Graph", diagnostics);
+                    return result;
+                }
+                auto* link = get_mutable_link(handle.value());
+                if (link == nullptr)
+                    return {status_code::initialization_failed};
+                if (link->live()) {
+                    link->source = {};
+                    --prepared_update.live_link_count;
+                }
+                bool inserted = false;
+                result = retired_links.insert(handle.value(), inserted);
+                if (!result.ok())
+                    return result;
+            }
+        }
+
+        const auto candidate_object_entry = [&](std::uint32_t handle) -> const object_entry* {
+            if (handle == 0)
+                return nullptr;
+            if (handle > target.object_entries.size()) {
+                const auto local = static_cast<std::size_t>(handle) - target.object_entries.size() - 1;
+                return local < prepared_update.new_objects.size() ? &prepared_update.new_objects[local] : nullptr;
+            }
+            const auto position = object_patch_map.find(handle);
+            if (position != 0)
+                return &prepared_update.object_patches[position - 1].value;
+            return &target.object_entries[handle - 1];
+        };
+
+        const auto materialize_object_type = [&](
+            const source_contribution_object& object, TypeRef& output) -> status {
+            TypeRef current;
+            status local;
+            if (object.type.identity != nullptr) {
+                std::uint32_t base_handle = 0;
+                local = find_or_create_handle(object.type.identity, base_handle);
+                if (local.ok())
+                    local = get_named(base_handle, current);
+            } else {
+                local = get_intrinsic(object.type.intrinsic, current);
+            }
+            if (!local.ok())
+                return local;
+            for (const auto& modifier : sparse_contributions.modifiers(object.type.modifiers)) {
+                TypeRef wrapped;
+                local = get_derived(derived_kind(modifier.kind), current, modifier.value, wrapped);
+                if (!local.ok())
+                    return local;
+                current = wrapped;
+            }
+            output = current;
+            return {};
+        };
+
+        for (const auto source : changed) {
+            for (const auto& object : sparse_contributions.replacement_objects(source)) {
+                std::uint32_t handle_value = 0;
+                result = find_or_create_object_handle(object.identity, handle_value);
+                if (!result.ok())
+                    return result;
+
+                bool claimed = false;
+                result = claimed_objects.insert(handle_value, claimed);
+                if (!result.ok())
+                    return result;
+                if (!claimed) {
+                    result = {status_code::semantic_conflict};
+                    emit_failure(result, source, operation, "multiple Project object declarations", diagnostics);
+                    return result;
+                }
+
+                auto* entry = get_mutable_object(handle_value);
+                if (entry == nullptr)
+                    return {status_code::initialization_failed};
+                const bool historical_live =
+                    handle_value <= target.object_entries.size() && target.object_entries[handle_value - 1].live();
+                const bool was_retired = retired_objects.contains(handle_value);
+                if (entry->live() && (!historical_live || !was_retired)) {
+                    result = {status_code::semantic_conflict};
+                    emit_failure(result, source, operation, "multiple Project object declarations", diagnostics);
+                    return result;
+                }
+
+                TypeRef object_type;
+                result = materialize_object_type(object, object_type);
+                if (!result.ok()) {
+                    emit_failure(result, source, operation, "object TypeRef materialization failed", diagnostics);
+                    return result;
+                }
+                const bool was_live = entry->live();
+                *entry = object_entry{object_type, 0x80000000u};
+                if (!was_live)
+                    ++prepared_update.live_object_count;
+            }
+        }
+
+        const auto validate_object_endpoint = [&](object_endpoint endpoint) noexcept -> bool {
+            const auto* object = candidate_object_entry(endpoint.object.value());
+            if (object == nullptr || !object->live() || !endpoint.member || !object->type)
+                return false;
+            const auto* type_ref = canonical_record(object->type);
+            if (type_ref == nullptr || type_ref->kind != canonical_type_kind::named)
+                return false;
+            const auto* type = candidate_entry(type_ref->child_or_handle);
+            return type != nullptr && type->live() && type->kind == graph_type_kind::record &&
+                type->defined() && endpoint.member.value() < type->definition.count;
+        };
+
+        for (const auto source : changed) {
+            for (const auto& link : sparse_contributions.replacement_links(source)) {
+                std::uint32_t source_object_value = 0;
+                std::uint32_t target_object_value = 0;
+                result = find_or_create_object_handle(link.source.object, source_object_value);
+                if (!result.ok())
+                    return result;
+                result = find_or_create_object_handle(link.target.object, target_object_value);
+                if (!result.ok())
+                    return result;
+                const object_endpoint source_endpoint{object_handle{source_object_value}, link.source.member};
+                const object_endpoint target_endpoint{object_handle{target_object_value}, link.target.member};
+                if (!validate_object_endpoint(source_endpoint) || !validate_object_endpoint(target_endpoint)) {
+                    result = {status_code::semantic_conflict};
+                    emit_failure(result, source, operation, "link endpoint is not a live record member", diagnostics);
+                    return result;
+                }
+
+                bool target_inserted = false;
+                result = claimed_link_targets.insert(target_endpoint, target_inserted);
+                if (!result.ok())
+                    return result;
+                if (!target_inserted) {
+                    result = {status_code::semantic_conflict};
+                    emit_failure(result, source, operation, "duplicate link target in replacement set", diagnostics);
+                    return result;
+                }
+
+                const auto historical = target.find_link_raw(target_endpoint);
+                if (historical) {
+                    const bool was_retired = retired_links.contains(historical.value());
+                    const bool historical_live = target.link_records[historical.value() - 1].live();
+                    if (historical_live && !was_retired) {
+                        result = {status_code::semantic_conflict};
+                        emit_failure(result, source, operation, "multiple links target the same endpoint", diagnostics);
+                        return result;
+                    }
+                    bool inserted = false;
+                    result = claimed_links.insert(historical.value(), inserted);
+                    if (!result.ok())
+                        return result;
+                    if (!inserted) {
+                        result = {status_code::semantic_conflict};
+                        emit_failure(result, source, operation, "duplicate link target in replacement set", diagnostics);
+                        return result;
+                    }
+                    auto* value = get_mutable_link(historical.value());
+                    if (value == nullptr)
+                        return {status_code::initialization_failed};
+                    const bool was_live = value->live();
+                    *value = {source_endpoint, target_endpoint};
+                    if (!was_live)
+                        ++prepared_update.live_link_count;
+                } else {
+                    if (target.link_records.size() + prepared_update.new_links.size() >=
+                        (std::numeric_limits<std::uint32_t>::max)())
+                        return {status_code::not_available};
+                    prepared_update.new_links.push_back({source_endpoint, target_endpoint});
+                    ++prepared_update.live_link_count;
+                }
+            }
+        }
+
         const auto definition_end = clock_type::now();
         telemetry_value.type_ref_materialization_ns = elapsed_ns(type_ref_begin, definition_end);
         telemetry_value.definition_materialization_ns = elapsed_ns(definition_begin, definition_end);
@@ -1473,66 +1925,39 @@ status generation_builder::prepare_incremental_graph(
         const auto total_identity_count = target.identities.size() + prepared_update.new_identities.size();
         if (!prepared_update.new_identities.empty() &&
             (target.identity_index.empty() || total_identity_count * 2 > target.identity_index.size())) {
-            std::size_t capacity = 0;
-            if (!checked_index_capacity(total_identity_count, capacity))
-                return {status_code::not_available};
-            prepared_update.rebuilt_identity_index.assign(capacity, {});
-            for (std::size_t index = 0; index < target.identities.size(); ++index) {
-                insert_identity_slot(prepared_update.rebuilt_identity_index, target.identities,
-                    target.identities[index], static_cast<std::uint32_t>(index + 1));
-            }
-            std::vector<identity_ref> combined = target.identities;
-            combined.insert(combined.end(), prepared_update.new_identities.begin(), prepared_update.new_identities.end());
-            for (std::size_t index = target.identities.size(); index < combined.size(); ++index) {
-                insert_identity_slot(prepared_update.rebuilt_identity_index, combined,
-                    combined[index], static_cast<std::uint32_t>(index + 1));
-            }
-            prepared_update.replace_identity_index = true;
-            ++telemetry_value.graph_full_scans;
+            return {status_code::rebuild_required};
+        }
+
+        const auto total_object_count = target.object_identities.size() + prepared_update.new_object_identities.size();
+        if (!prepared_update.new_object_identities.empty() &&
+            (target.object_identity_index.empty() || total_object_count * 2 > target.object_identity_index.size())) {
+            return {status_code::rebuild_required};
+        }
+        const auto total_link_slots = target.link_records.size() + prepared_update.new_links.size();
+        if (!prepared_update.new_links.empty() &&
+            (target.link_index.empty() || total_link_slots * 2 > target.link_index.size())) {
+            return {status_code::rebuild_required};
         }
 
         prepared_update.derived_index_entries = target.derived_index_entries + static_cast<std::size_t>(new_derived_count);
         if (new_derived_count != 0 &&
             (target.derived_index.empty() || prepared_update.derived_index_entries * 2 > target.derived_index.size())) {
-            std::size_t capacity = 0;
-            if (!checked_index_capacity(prepared_update.derived_index_entries, capacity))
-                return {status_code::not_available};
-            prepared_update.rebuilt_derived_index.assign(capacity, {});
-            auto insert_record = [&](const graph_canonical_type_record& record, std::uint32_t ref) {
-                if (record.kind != canonical_type_kind::derived)
-                    return;
-                const auto hash = derived_hash(
-                    static_cast<derived_type_kind>(record.detail), record.child_or_handle, record.payload);
-                const auto fingerprint = fold32(hash);
-                const auto mask = prepared_update.rebuilt_derived_index.size() - 1;
-                auto position = static_cast<std::size_t>(hash) & mask;
-                while (prepared_update.rebuilt_derived_index[position].type_ref != 0)
-                    position = (position + 1) & mask;
-                prepared_update.rebuilt_derived_index[position] = {fingerprint, ref};
-            };
-            for (std::size_t index = 1; index < target.canonical_types.size(); ++index)
-                insert_record(target.canonical_types[index], static_cast<std::uint32_t>(index));
-            for (std::size_t index = 0; index < prepared_update.canonical_types.size(); ++index) {
-                insert_record(prepared_update.canonical_types[index],
-                    static_cast<std::uint32_t>(target.canonical_types.size() + index));
-            }
-            prepared_update.replace_derived_index = true;
-            ++telemetry_value.graph_full_scans;
+            return {status_code::rebuild_required};
         }
 
-        if (target.names.size() + prepared_update.names.size() > target.names.capacity() ||
-            target.member_records.size() + prepared_update.members.size() > target.member_records.capacity() ||
+        if (target.member_records.size() + prepared_update.members.size() > target.member_records.capacity() ||
             target.enum_value_records.size() + prepared_update.enum_values.size() > target.enum_value_records.capacity() ||
             target.canonical_types.size() + prepared_update.canonical_types.size() > target.canonical_types.capacity() ||
             target.types.size() + prepared_update.new_types.size() > target.types.capacity() ||
             target.identities.size() + prepared_update.new_identities.size() > target.identities.capacity() ||
+            target.object_entries.size() + prepared_update.new_objects.size() > target.object_entries.capacity() ||
+            target.object_identities.size() + prepared_update.new_object_identities.size() > target.object_identities.capacity() ||
+            target.link_records.size() + prepared_update.new_links.size() > target.link_records.capacity() ||
             target.named_refs.size() + prepared_update.new_types.size() > target.named_refs.capacity() ||
             target.dependency_versions.size() + prepared_update.new_types.size() > target.dependency_versions.capacity() ||
             target.reverse_dependency_heads.size() + prepared_update.new_types.size() > target.reverse_dependency_heads.capacity() ||
             target.dependency_edges.size() + prepared_update.dependency_edges.size() > target.dependency_edges.capacity()) {
-            result = {status_code::not_available};
-            emit_failure(result, {}, operation, "incremental arena headroom exhausted; explicit G0 rebuild required", diagnostics);
-            return result;
+            return {status_code::rebuild_required};
         }
 
         return {};
@@ -1554,9 +1979,11 @@ status generation_builder::prepare_graph(
     diagnostic_buffer& diagnostics) noexcept {
 
     auto& storage = contributions.candidate;
-    if (storage.types.size() >= (std::numeric_limits<std::uint32_t>::max)()) {
+    if (storage.types.size() >= (std::numeric_limits<std::uint32_t>::max)() ||
+        storage.objects.size() >= (std::numeric_limits<std::uint32_t>::max)() ||
+        storage.links.size() >= (std::numeric_limits<std::uint32_t>::max)()) {
         const status result{status_code::not_available};
-        emit_failure(result, {}, operation, "Too many type declarations", diagnostics);
+        emit_failure(result, {}, operation, "Too many Graph declarations", diagnostics);
         return result;
     }
 
@@ -1641,7 +2068,13 @@ status generation_builder::prepare_graph(
     local_identity_index identity_index;
     auto result = identity_index.initialize(storage.types.size());
     if (!result.ok()) {
-        emit_failure(result, {}, operation, "Generation identity->handle index allocation failed", diagnostics);
+        emit_failure(result, {}, operation, "Graph type identity index allocation failed", diagnostics);
+        return result;
+    }
+    local_identity_index object_identity_index;
+    result = object_identity_index.initialize(storage.objects.size());
+    if (!result.ok()) {
+        emit_failure(result, {}, operation, "Graph object identity index allocation failed", diagnostics);
         return result;
     }
 
@@ -1651,9 +2084,11 @@ status generation_builder::prepare_graph(
         prepared_graph.identities.reserve(storage.types.size());
         prepared_graph.members.reserve(storage.members.size());
         prepared_graph.enum_values.reserve(storage.enum_values.size());
-        prepared_graph.names = storage.names;
+        prepared_graph.objects.reserve(storage.objects.size());
+        prepared_graph.object_identities.reserve(storage.objects.size());
+        prepared_graph.links.reserve(storage.links.size());
         prepared_graph.canonical_types.reserve(
-            1 + storage.members.size() + storage.modifiers.size());
+            1 + storage.members.size() + storage.objects.size() + storage.modifiers.size());
         prepared_graph.canonical_types.push_back({});
         storage.construction.resize(storage.types.size() + 1);
 
@@ -1661,6 +2096,8 @@ status generation_builder::prepare_graph(
         std::vector<std::uint32_t> declaration_handles(storage.types.size(), 0);
         std::vector<std::uint32_t> member_base_handles(storage.members.size(), 0);
         std::vector<TypeRef> member_type_refs(storage.members.size());
+        std::vector<std::uint32_t> object_base_handles(storage.objects.size(), 0);
+        std::vector<TypeRef> object_type_refs(storage.objects.size());
         definition_seen.reserve(storage.types.size());
 
         const auto identity_begin = clock_type::now();
@@ -1787,6 +2224,37 @@ status generation_builder::prepare_graph(
                 return result;
             }
             member_base_handles[index] = handle;
+        }
+
+
+        for (std::size_t index = 0; index < storage.objects.size(); ++index) {
+            const auto& object = storage.objects[index];
+            const auto proposed = static_cast<std::uint32_t>(prepared_graph.objects.size() + 1);
+            std::uint32_t handle_value = 0;
+            bool inserted = false;
+            result = object_identity_index.insert_or_find(
+                object.identity, proposed, handle_value, inserted);
+            if (!result.ok()) {
+                emit_failure(result, {}, operation, "object identity_ref materialization failed", diagnostics);
+                return result;
+            }
+            if (!inserted) {
+                result = {status_code::semantic_conflict};
+                emit_failure(result, {}, operation, "multiple Project object declarations", diagnostics);
+                return result;
+            }
+            prepared_graph.objects.push_back({});
+            prepared_graph.object_identities.push_back(object.identity);
+
+            if (object.type.identity != nullptr) {
+                const auto type_handle_value = identity_index.find(object.type.identity);
+                if (type_handle_value == 0) {
+                    result = {status_code::semantic_conflict};
+                    emit_failure(result, {}, operation, "object identity_ref has no Project type declaration", diagnostics);
+                    return result;
+                }
+                object_base_handles[index] = type_handle_value;
+            }
         }
 
         const auto identity_end = clock_type::now();
@@ -1923,6 +2391,41 @@ status generation_builder::prepare_graph(
             }
             member_type_refs[index] = current;
         }
+
+        for (std::size_t index = 0; index < storage.objects.size(); ++index) {
+            const auto& object = storage.objects[index];
+            TypeRef current;
+            if (object.type.identity != nullptr)
+                result = get_named(object_base_handles[index], current);
+            else
+                result = get_intrinsic(object.type.intrinsic, current);
+            if (!result.ok()) {
+                emit_failure(result, {}, operation, "object base TypeRef materialization failed", diagnostics);
+                return result;
+            }
+
+            const auto modifier_begin = static_cast<std::size_t>(object.type.modifiers.begin);
+            const auto modifier_count = static_cast<std::size_t>(object.type.modifiers.count);
+            if (modifier_begin > storage.modifiers.size() ||
+                modifier_count > storage.modifiers.size() - modifier_begin) {
+                result = {status_code::invalid_argument};
+                emit_failure(result, {}, operation, "object modifier range invalid", diagnostics);
+                return result;
+            }
+            for (std::size_t modifier_index = 0; modifier_index < modifier_count; ++modifier_index) {
+                const auto& modifier = storage.modifiers[modifier_begin + modifier_index];
+                TypeRef wrapped;
+                result = get_derived(derived_kind(modifier.kind), current, modifier.value, wrapped);
+                if (!result.ok()) {
+                    emit_failure(result, {}, operation, "object derived TypeRef materialization failed", diagnostics);
+                    return result;
+                }
+                current = wrapped;
+            }
+            object_type_refs[index] = current;
+            prepared_graph.objects[index].type = current;
+            prepared_graph.objects[index].flags = 0x80000000u;
+        }
         const auto type_ref_end = clock_type::now();
         telemetry_value.type_ref_materialization_ns = elapsed_ns(type_ref_begin, type_ref_end);
         telemetry_value.derived_type_refs = derived_count;
@@ -1974,9 +2477,7 @@ status generation_builder::prepare_graph(
                         const auto member_index = item_begin + item;
                         const auto& contribution_member = storage.members[member_index];
                         member_record materialized;
-                        materialized.name = {
-                            contribution_member.name.offset,
-                            contribution_member.name.length};
+                        materialized.name = contribution_member.name;
                         materialized.type = member_type_refs[member_index];
                         materialized.access = contribution_member.access;
                         prepared_graph.members.push_back(materialized);
@@ -2029,7 +2530,7 @@ status generation_builder::prepare_graph(
                         const auto& value = storage.enum_values[item_begin + item];
                         enum_value_record materialized;
                         materialized.bits = value.value.bits;
-                        materialized.name = {value.name.offset, value.name.length};
+                        materialized.name = value.name;
                         materialized.intrinsic = value.value.intrinsic;
                         prepared_graph.enum_values.push_back(materialized);
                     }
@@ -2040,6 +2541,91 @@ status generation_builder::prepare_graph(
         telemetry_value.definition_materialization_ns = elapsed_ns(definition_begin, definition_end);
         prepared_graph.live_type_count = prepared_graph.types.size();
 
+        {
+            std::size_t object_index_capacity = 0;
+            if (!checked_index_capacity(prepared_graph.objects.size(), object_index_capacity)) {
+                result = {status_code::not_available};
+                emit_failure(result, {}, operation, "Graph object identity index too large", diagnostics);
+                return result;
+            }
+            if (object_index_capacity == 0)
+                object_index_capacity = 8;
+            prepared_graph.object_identity_index.assign(object_index_capacity, {});
+            for (std::size_t index = 0; index < prepared_graph.object_identities.size(); ++index) {
+                insert_object_identity_slot(
+                    prepared_graph.object_identity_index, prepared_graph.object_identities,
+                    prepared_graph.object_identities[index], static_cast<std::uint32_t>(index + 1));
+            }
+        }
+
+        std::size_t link_index_capacity = 0;
+        if (!checked_index_capacity(storage.links.size(), link_index_capacity)) {
+            result = {status_code::not_available};
+            emit_failure(result, {}, operation, "Graph link index too large", diagnostics);
+            return result;
+        }
+        if (link_index_capacity == 0)
+            link_index_capacity = 8;
+        prepared_graph.link_index.assign(link_index_capacity, {});
+        for (std::size_t source_index = 1; source_index < storage.sources.size(); ++source_index) {
+            const auto& source_state = storage.sources[source_index];
+            if (!source_state.source)
+                continue;
+            const auto links_begin = static_cast<std::size_t>(source_state.links.begin);
+            const auto links_count = static_cast<std::size_t>(source_state.links.count);
+            if (links_begin > storage.links.size() || links_count > storage.links.size() - links_begin) {
+                result = {status_code::invalid_argument};
+                emit_failure(result, source_state.source, operation, "SourceContribution link range invalid", diagnostics);
+                return result;
+            }
+            for (std::size_t offset = 0; offset < links_count; ++offset) {
+                const auto& link = storage.links[links_begin + offset];
+                const auto source_object = object_identity_index.find(link.source.object);
+                const auto target_object = object_identity_index.find(link.target.object);
+                if (source_object == 0 || target_object == 0) {
+                    result = {status_code::semantic_conflict};
+                    emit_failure(result, source_state.source, operation, "link endpoint object absent from Graph", diagnostics);
+                    return result;
+                }
+
+                const object_endpoint source_endpoint{
+                    object_handle{source_object}, link.source.member};
+                const object_endpoint target_endpoint{
+                    object_handle{target_object}, link.target.member};
+
+                const auto validate_endpoint = [&](object_endpoint endpoint) noexcept -> bool {
+                    if (!endpoint.object || !endpoint.member || endpoint.object.value() > prepared_graph.objects.size())
+                        return false;
+                    const auto& object = prepared_graph.objects[endpoint.object.value() - 1];
+                    if (!object.live() || !object.type || object.type.value() >= prepared_graph.canonical_types.size())
+                        return false;
+                    const auto& type_ref = prepared_graph.canonical_types[object.type.value()];
+                    if (type_ref.kind != canonical_type_kind::named || type_ref.child_or_handle == 0 ||
+                        type_ref.child_or_handle > prepared_graph.types.size())
+                        return false;
+                    const auto& type = prepared_graph.types[type_ref.child_or_handle - 1];
+                    return type.live() && type.kind == graph_type_kind::record && type.defined() &&
+                        endpoint.member.value() < type.definition.count;
+                };
+                if (!validate_endpoint(source_endpoint) || !validate_endpoint(target_endpoint)) {
+                    result = {status_code::semantic_conflict};
+                    emit_failure(result, source_state.source, operation, "link endpoint is not a live record member", diagnostics);
+                    return result;
+                }
+
+                prepared_graph.links.push_back({source_endpoint, target_endpoint});
+                const auto handle = static_cast<std::uint32_t>(prepared_graph.links.size());
+                if (!insert_link_slot(
+                        prepared_graph.link_index, prepared_graph.links, target_endpoint, handle)) {
+                    result = {status_code::semantic_conflict};
+                    emit_failure(result, source_state.source, operation, "multiple links target the same endpoint", diagnostics);
+                    return result;
+                }
+            }
+        }
+        prepared_graph.live_object_count = prepared_graph.objects.size();
+        prepared_graph.live_link_count = prepared_graph.links.size();
+
         result = reserve_headroom(prepared_graph.types);
         if (!result.ok()) return result;
         result = reserve_headroom(prepared_graph.identities);
@@ -2048,7 +2634,11 @@ status generation_builder::prepare_graph(
         if (!result.ok()) return result;
         result = reserve_headroom(prepared_graph.enum_values);
         if (!result.ok()) return result;
-        result = reserve_headroom(prepared_graph.names);
+        result = reserve_headroom(prepared_graph.objects);
+        if (!result.ok()) return result;
+        result = reserve_headroom(prepared_graph.object_identities);
+        if (!result.ok()) return result;
+        result = reserve_headroom(prepared_graph.links);
         if (!result.ok()) return result;
         result = reserve_headroom(prepared_graph.canonical_types);
         if (!result.ok()) return result;
@@ -2087,6 +2677,28 @@ status generation_builder::prepare_graph(
                 return result;
             }
         }
+        if (prepared_graph.objects.size() != prepared_graph.object_identities.size()) {
+            result = {status_code::invalid_argument};
+            emit_failure(result, {}, operation, "detached Graph object arrays diverged", diagnostics);
+            return result;
+        }
+        for (std::size_t index = 0; index < prepared_graph.objects.size(); ++index) {
+            if (prepared_graph.object_identities[index] == nullptr || !prepared_graph.objects[index].live() ||
+                !prepared_graph.objects[index].type ||
+                prepared_graph.objects[index].type.value() >= prepared_graph.canonical_types.size()) {
+                result = {status_code::invalid_argument};
+                emit_failure(result, {}, operation, "detached Graph object invalid", diagnostics);
+                return result;
+            }
+        }
+        for (const auto& link : prepared_graph.links) {
+            if (!link.live()) {
+                result = {status_code::invalid_argument};
+                emit_failure(result, {}, operation, "detached Graph link invalid", diagnostics);
+                return result;
+            }
+        }
+
         for (std::size_t index = 1; index < prepared_graph.canonical_types.size(); ++index) {
             const auto& type = prepared_graph.canonical_types[index];
             if (type.kind == canonical_type_kind::named) {

@@ -1,19 +1,32 @@
 #pragma once
 
+#include "../frontend/source_facts.hpp"
 #include "../identity/identity_node.hpp"
+#include "../../member_index.hpp"
 #include "../../status.hpp"
+#include "../../string_id.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <span>
-#include <string_view>
 #include <vector>
 
 namespace cw::server {
 
-// Immutable Parser-visible interface exported by one parsed Source. Local type
-// bindings are indexed directly to identity_ref; imports are referenced, not copied,
-// so transitive include visibility does not duplicate project declarations.
+struct source_interface_object final {
+    identity_ref identity = nullptr;
+    identity_ref named_type = nullptr;
+};
+
+struct source_interface_member final {
+    identity_ref type = nullptr;
+    string_id name{};
+    member_index index{};
+};
+
+// Immutable Parser-visible interface exported by one parsed Source. It retains
+// resolved types, objects and record-member positions using identity_ref/string_id;
+// imports are referenced, so transitive visibility never copies declarations.
 class source_interface final {
 public:
     source_interface() = default;
@@ -23,25 +36,56 @@ public:
     source_interface& operator=(source_interface&&) noexcept = default;
 
     [[nodiscard]] status initialize(
-        std::span<const identity_ref> local_types,
+        const source_facts& facts,
         std::span<const source_interface* const> imports = {}) noexcept;
 
     [[nodiscard]] identity_ref find_type(
         identity_ref scope,
-        std::string_view name) const noexcept;
+        string_id name) const noexcept;
+
+    [[nodiscard]] source_interface_object find_object(
+        identity_ref scope,
+        string_id name) const noexcept;
+
+    [[nodiscard]] member_index find_member(
+        identity_ref type,
+        string_id name) const noexcept;
 
     [[nodiscard]] std::span<const identity_ref> local_types() const noexcept {
         return local_type_values;
     }
 
 private:
+    struct object_slot final {
+        identity_ref identity = nullptr;
+        identity_ref named_type = nullptr;
+    };
+
+    struct member_slot final {
+        identity_ref type = nullptr;
+        string_id name{};
+        member_index index{};
+    };
+
     [[nodiscard]] identity_ref find_type_recursive(
         identity_ref scope,
-        std::string_view name,
+        string_id name,
+        std::uint32_t depth) const noexcept;
+
+    [[nodiscard]] source_interface_object find_object_recursive(
+        identity_ref scope,
+        string_id name,
+        std::uint32_t depth) const noexcept;
+
+    [[nodiscard]] member_index find_member_recursive(
+        identity_ref type,
+        string_id name,
         std::uint32_t depth) const noexcept;
 
     std::vector<identity_ref> local_type_values;
-    std::vector<identity_ref> slots;
+    std::vector<identity_ref> type_slots;
+    std::vector<object_slot> object_slots;
+    std::vector<member_slot> member_slots;
     std::vector<const source_interface*> imported_interfaces;
 };
 
@@ -50,8 +94,7 @@ struct source_environment_import final {
     const source_interface* interface = nullptr;
 };
 
-// Non-owning positional include environment for one Parser invocation. An import
-// participates in lookup only after its original #include source position.
+// Non-owning positional include environment for one Parser invocation.
 class source_environment final {
 public:
     source_environment() noexcept = default;
@@ -60,7 +103,17 @@ public:
 
     [[nodiscard]] identity_ref find_type(
         identity_ref scope,
-        std::string_view name,
+        string_id name,
+        std::uint32_t source_offset) const noexcept;
+
+    [[nodiscard]] source_interface_object find_object(
+        identity_ref scope,
+        string_id name,
+        std::uint32_t source_offset) const noexcept;
+
+    [[nodiscard]] member_index find_member(
+        identity_ref type,
+        string_id name,
         std::uint32_t source_offset) const noexcept;
 
 private:

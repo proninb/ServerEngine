@@ -56,6 +56,10 @@ namespace {
         return "enum";
     case source_fact_category::enum_value_fact:
         return "enum_value";
+    case source_fact_category::object_fact:
+        return "object";
+    case source_fact_category::link_fact:
+        return "link";
     case source_fact_category::declaration_ref:
         return "declaration";
     }
@@ -200,21 +204,13 @@ status validate_source_facts(
             return fail(error, source_facts_error_code::member_access,
                 source_fact_category::member_fact, index, item.declaration);
         }
-        if (item.name.length == 0) {
+        if (!item.name) {
             return fail(error, source_facts_error_code::member_name_empty,
-                source_fact_category::member_fact, index, item.name);
-        }
-        if (!valid_span(item.name, source_size)) {
-            return fail(error, source_facts_error_code::member_name_range,
-                source_fact_category::member_fact, index, item.name);
+                source_fact_category::member_fact, index, item.declaration);
         }
         if (item.declaration.length == 0 || !valid_span(item.declaration, source_size)) {
             return fail(error, source_facts_error_code::member_range,
                 source_fact_category::member_fact, index, item.declaration);
-        }
-        if (!contains(item.declaration, item.name)) {
-            return fail(error, source_facts_error_code::member_name_outside_declaration,
-                source_fact_category::member_fact, index, item.name);
         }
         if (item.type.spelling.length == 0 || !valid_span(item.type.spelling, source_size)) {
             return fail(error, source_facts_error_code::type_spelling_range,
@@ -323,10 +319,9 @@ status validate_source_facts(
         const auto end = static_cast<std::size_t>(item.enumerators.begin) + item.enumerators.count;
         for (std::size_t value_index = item.enumerators.begin; value_index < end; ++value_index) {
             const auto& value = enum_values[value_index];
-            if (value.name.length == 0 || !valid_span(value.name, source_size) ||
-                !contains(item.declaration, value.name)) {
+            if (!value.name) {
                 return fail(error, source_facts_error_code::enum_value_name_range,
-                    source_fact_category::enum_value_fact, value_index, value.name);
+                    source_fact_category::enum_value_fact, value_index, item.declaration);
             }
             if (value.expression.length != 0 &&
                 (!valid_span(value.expression, source_size) || !contains(item.declaration, value.expression))) {
@@ -345,11 +340,71 @@ status validate_source_facts(
             source_fact_category::packet, expected_enum_value_begin);
     }
 
+    const auto objects = facts.objects();
+    std::uint32_t previous_object_offset = 0;
+    for (std::size_t index = 0; index < objects.size(); ++index) {
+        const auto& item = objects[index];
+        if (item.identity == nullptr) {
+            return fail(error, source_facts_error_code::object_identity_missing,
+                source_fact_category::object_fact, index, item.declaration);
+        }
+        if (item.identity->kind() != identity_kind::object) {
+            return fail(error, source_facts_error_code::object_identity_kind,
+                source_fact_category::object_fact, index, item.declaration);
+        }
+        if (item.declaration.length == 0 || !valid_span(item.declaration, source_size)) {
+            return fail(error, source_facts_error_code::object_range,
+                source_fact_category::object_fact, index, item.declaration);
+        }
+        if (index != 0 && item.declaration.offset < previous_object_offset) {
+            return fail(error, source_facts_error_code::declaration_sequence_order,
+                source_fact_category::object_fact, index, item.declaration);
+        }
+        previous_object_offset = item.declaration.offset;
+        const bool semantic_type = item.type.identity != nullptr &&
+            item.type.identity->kind() == identity_kind::type &&
+            item.type.intrinsic == intrinsic_type::none;
+        const bool intrinsic_type_value = item.type.identity == nullptr &&
+            item.type.intrinsic != intrinsic_type::none;
+        if (!semantic_type && !intrinsic_type_value) {
+            return fail(error, source_facts_error_code::object_type,
+                source_fact_category::object_fact, index, item.declaration);
+        }
+        if (item.type.modifiers.begin > facts.modifiers().size() ||
+            item.type.modifiers.count > facts.modifiers().size() - item.type.modifiers.begin) {
+            return fail(error, source_facts_error_code::object_type,
+                source_fact_category::object_fact, index, item.declaration);
+        }
+    }
+
+    const auto links = facts.links();
+    std::uint32_t previous_link_offset = 0;
+    for (std::size_t index = 0; index < links.size(); ++index) {
+        const auto& item = links[index];
+        if (item.declaration.length == 0 || !valid_span(item.declaration, source_size)) {
+            return fail(error, source_facts_error_code::link_range,
+                source_fact_category::link_fact, index, item.declaration);
+        }
+        if (index != 0 && item.declaration.offset < previous_link_offset) {
+            return fail(error, source_facts_error_code::declaration_sequence_order,
+                source_fact_category::link_fact, index, item.declaration);
+        }
+        previous_link_offset = item.declaration.offset;
+        if (item.source.object == nullptr || item.source.object->kind() != identity_kind::object ||
+            !item.source.member || item.target.object == nullptr ||
+            item.target.object->kind() != identity_kind::object || !item.target.member) {
+            return fail(error, source_facts_error_code::link_endpoint,
+                source_fact_category::link_fact, index, item.declaration);
+        }
+    }
+
     const auto declarations = facts.declarations();
     if (!declarations.empty()) {
         std::size_t next_namespace = 0;
         std::size_t next_record = 0;
         std::size_t next_enum = 0;
+        std::size_t next_object = 0;
+        std::size_t next_link = 0;
         std::uint32_t previous_offset = 0;
         for (std::size_t index = 0; index < declarations.size(); ++index) {
             const auto& item = declarations[index];
@@ -381,13 +436,28 @@ status validate_source_facts(
                 }
                 expected = enums[next_enum++].declaration;
                 break;
+            case source_declaration_kind::object:
+                if (item.index != next_object || next_object >= objects.size()) {
+                    return fail(error, source_facts_error_code::declaration_sequence_index,
+                        source_fact_category::declaration_ref, index, item.declaration);
+                }
+                expected = objects[next_object++].declaration;
+                break;
+            case source_declaration_kind::link:
+                if (item.index != next_link || next_link >= links.size()) {
+                    return fail(error, source_facts_error_code::declaration_sequence_index,
+                        source_fact_category::declaration_ref, index, item.declaration);
+                }
+                expected = links[next_link++].declaration;
+                break;
             }
             if (expected.offset != item.declaration.offset || expected.length != item.declaration.length) {
                 return fail(error, source_facts_error_code::declaration_sequence_range,
                     source_fact_category::declaration_ref, index, item.declaration);
             }
         }
-        if (next_namespace != namespaces.size() || next_record != records.size() || next_enum != enums.size()) {
+        if (next_namespace != namespaces.size() || next_record != records.size() || next_enum != enums.size() ||
+            next_object != objects.size() || next_link != links.size()) {
             return fail(error, source_facts_error_code::declaration_sequence_index,
                 source_fact_category::packet, declarations.size());
         }

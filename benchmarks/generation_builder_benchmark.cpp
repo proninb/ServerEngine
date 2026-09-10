@@ -99,6 +99,9 @@ struct run_result final {
         return false;
 
     try {
+        string_id member_name;
+        if (!context.intern_string("x", member_name).ok())
+            return false;
         output.text.assign(count * 4, 'x');
         output.records.reserve(count);
         output.members.reserve(count);
@@ -114,7 +117,7 @@ struct run_result final {
                     intrinsic_type::signed_int,
                     source_fact_range{0, 0},
                     source_span{base, 1}),
-                source_span{base + 2, 1},
+                member_name,
                 source_span{base, 4},
                 source_member_access::public_access});
             output.records.push_back(source_record_fact{
@@ -144,6 +147,9 @@ struct run_result final {
         return false;
 
     try {
+        string_id member_name;
+        if (!context.intern_string("x", member_name).ok())
+            return false;
         output.text.assign(count * 4, 'x');
         output.records.reserve(count);
         output.members.reserve(count);
@@ -167,7 +173,7 @@ struct run_result final {
                     identities[index],
                     source_fact_range{static_cast<std::uint32_t>(index), 1},
                     source_span{base, 1}),
-                source_span{base + 2, 1},
+                member_name,
                 source_span{base, 4},
                 source_member_access::public_access});
             output.records.push_back(source_record_fact{
@@ -388,13 +394,16 @@ void print_incremental(std::size_t total, std::string_view scenario, const incre
         return false;
 
     constexpr std::string_view member_text = "T* x;";
+    string_id member_name;
+    if (!fixture.context.intern_string("x", member_name).ok())
+        return false;
     const std::array modifiers{
         source_type_modifier{0, source_type_modifier_kind::pointer},
     };
     const std::array members{
         source_member_fact{
             source_type_ref::semantic(target_identity, {0, 1}, {0, 2}),
-            {3, 1}, {0, 5}, source_member_access::public_access},
+            member_name, {0, 5}, source_member_access::public_access},
     };
     const std::array records{
         source_record_fact{target_identity, {0, 1}, {0, 5},

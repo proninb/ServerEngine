@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <new>
+#include <mutex>
 #include <stdexcept>
 #include <vector>
 
@@ -82,6 +83,30 @@ status project_build_orchestrator::rebuild(
     project_build_result& output) noexcept {
 
     output = {};
+    try {
+        project_context candidate{project.configuration()};
+        project_build_orchestrator detached{candidate, worker_limit};
+        auto result = detached.rebuild_current(operation, diagnostics, output);
+        if (!result.ok())
+            return result;
+        project.replace_compiled(candidate.release_compiled());
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+}
+
+status project_build_orchestrator::rebuild_current(
+    operation_id operation,
+    diagnostic_buffer& diagnostics,
+    project_build_result& output) noexcept {
+
+    output = {};
+    output.telemetry.storage_before = project.storage_pressure();
     const auto total_begin = build_clock::now();
 
     try {
@@ -90,8 +115,10 @@ status project_build_orchestrator::rebuild(
         if (!result.ok())
             return result;
 
-        auto source_update = project.sources().begin_update();
-        source_frontend_generation frontend_builder{project, source_update, worker_limit};
+        auto& state = project.mutable_compiled();
+        auto semantic = project.parser_services();
+        auto source_update = state.sources.begin_update();
+        source_frontend_generation frontend_builder{semantic, source_update, worker_limit};
         source_frontend_result frontend;
 
         const auto frontend_begin = build_clock::now();
@@ -110,7 +137,7 @@ status project_build_orchestrator::rebuild(
             facts.push_back(entry.parsed.facts());
         }
 
-        generation_builder builder{project.contributions(), project.compiled_graph()};
+        generation_builder builder{state.contributions, state.graph_value};
         const auto builder_begin = build_clock::now();
         result = builder.prepare_g0(
             facts, project.configuration().abi, operation, diagnostics);
@@ -120,7 +147,7 @@ status project_build_orchestrator::rebuild(
         if (!result.ok())
             return result;
 
-        auto cache_update = project.frontend_cache().begin_update(true);
+        auto cache_update = state.frontend_cache.begin_update(true);
         for (auto& entry : frontend.entries) {
             result = cache_update.replace(entry.source, std::move(entry.interface));
             if (!result.ok())
@@ -144,18 +171,25 @@ status project_build_orchestrator::rebuild(
             return result;
 
         const auto publish_begin = build_clock::now();
-        source_update.publish_prepared();
-        builder.publish_prepared();
-        const auto publish_end = build_clock::now();
-        output.telemetry.publication_ns = elapsed_ns(publish_begin, publish_end);
-
         const auto interface_publish_begin = build_clock::now();
-        cache_update.publish_prepared();
-        const auto interface_publish_end = build_clock::now();
+        build_clock::time_point publish_end;
+        build_clock::time_point interface_publish_end;
+        {
+            std::unique_lock<std::shared_mutex> publication_lock;
+            if (publication_mutex != nullptr)
+                publication_lock = std::unique_lock<std::shared_mutex>{*publication_mutex};
+            source_update.publish_prepared();
+            builder.publish_prepared();
+            publish_end = build_clock::now();
+            cache_update.publish_prepared();
+            interface_publish_end = build_clock::now();
+        }
+        output.telemetry.publication_ns = elapsed_ns(publish_begin, publish_end);
         output.telemetry.interface_publish_ns =
             elapsed_ns(interface_publish_begin, interface_publish_end);
         output.telemetry.total_ns = elapsed_ns(total_begin, interface_publish_end);
         output.telemetry.sources = source_update.telemetry();
+        output.telemetry.storage_after = project.storage_pressure();
         output.changed = true;
         return {};
     }
@@ -174,16 +208,22 @@ status project_build_orchestrator::update(
     project_build_result& output) noexcept {
 
     output = {};
+    output.telemetry.storage_before = project.storage_pressure();
+    if (output.telemetry.storage_before.rebuild_recommended)
+        return {status_code::rebuild_required};
+
     const auto total_begin = build_clock::now();
-    if (!project.frontend_cache().complete() || !project.contributions().complete())
+    auto& state = project.mutable_compiled();
+    if (!state.frontend_cache.complete() || !state.contributions.complete())
         return {status_code::not_available};
     if (dirty_sources.empty())
         return {};
 
     try {
-        auto source_update = project.sources().begin_update();
+        auto semantic = project.parser_services();
+        auto source_update = state.sources.begin_update();
         source_frontend_generation frontend_builder{
-            project, source_update, project.frontend_cache(), worker_limit};
+            semantic, source_update, state.frontend_cache, worker_limit};
         source_frontend_result frontend;
 
         const auto frontend_begin = build_clock::now();
@@ -205,11 +245,17 @@ status project_build_orchestrator::update(
                 return result;
 
             const auto publish_begin = build_clock::now();
-            source_update.publish_prepared();
+            {
+                std::unique_lock<std::shared_mutex> publication_lock;
+                if (publication_mutex != nullptr)
+                    publication_lock = std::unique_lock<std::shared_mutex>{*publication_mutex};
+                source_update.publish_prepared();
+            }
             const auto publish_end = build_clock::now();
             output.telemetry.publication_ns = elapsed_ns(publish_begin, publish_end);
             output.telemetry.total_ns = elapsed_ns(total_begin, publish_end);
             output.telemetry.sources = source_update.telemetry();
+            output.telemetry.storage_after = project.storage_pressure();
             output.changed = false;
             return {};
         }
@@ -217,11 +263,11 @@ status project_build_orchestrator::update(
         std::vector<source_facts> replacements;
         std::vector<source_id> removals;
         result = collect_builder_inputs(
-            frontend, project.contributions(), replacements, removals);
+            frontend, state.contributions, replacements, removals);
         if (!result.ok())
             return result;
 
-        generation_builder builder{project.contributions(), project.compiled_graph()};
+        generation_builder builder{state.contributions, state.graph_value};
         if (!replacements.empty() || !removals.empty()) {
             const auto builder_begin = build_clock::now();
             result = builder.prepare_incremental(
@@ -233,7 +279,7 @@ status project_build_orchestrator::update(
                 return result;
         }
 
-        auto cache_update = project.frontend_cache().begin_update(false);
+        auto cache_update = state.frontend_cache.begin_update(false);
         for (auto& entry : frontend.entries) {
             result = cache_update.replace(
                 entry.source,
@@ -259,18 +305,25 @@ status project_build_orchestrator::update(
             return result;
 
         const auto publish_begin = build_clock::now();
-        source_update.publish_prepared();
-        builder.publish_prepared();
-        const auto publish_end = build_clock::now();
-        output.telemetry.publication_ns = elapsed_ns(publish_begin, publish_end);
-
         const auto interface_publish_begin = build_clock::now();
-        cache_update.publish_prepared();
-        const auto interface_publish_end = build_clock::now();
+        build_clock::time_point publish_end;
+        build_clock::time_point interface_publish_end;
+        {
+            std::unique_lock<std::shared_mutex> publication_lock;
+            if (publication_mutex != nullptr)
+                publication_lock = std::unique_lock<std::shared_mutex>{*publication_mutex};
+            source_update.publish_prepared();
+            builder.publish_prepared();
+            publish_end = build_clock::now();
+            cache_update.publish_prepared();
+            interface_publish_end = build_clock::now();
+        }
+        output.telemetry.publication_ns = elapsed_ns(publish_begin, publish_end);
         output.telemetry.interface_publish_ns =
             elapsed_ns(interface_publish_begin, interface_publish_end);
         output.telemetry.total_ns = elapsed_ns(total_begin, interface_publish_end);
         output.telemetry.sources = source_update.telemetry();
+        output.telemetry.storage_after = project.storage_pressure();
         output.changed = true;
         return {};
     }

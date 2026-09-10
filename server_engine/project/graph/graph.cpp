@@ -1,6 +1,8 @@
 #include "graph.hpp"
 
 #include <cstdint>
+#include <type_traits>
+#include <limits>
 
 namespace cw::server {
 namespace {
@@ -52,6 +54,62 @@ void insert_identity_index(
         }
         if (slot.fingerprint == fingerprint && slot.handle <= identities.size() &&
             identities[slot.handle - 1] == identity) {
+            return;
+        }
+        position = (position + 1) & mask;
+    }
+}
+
+void insert_object_identity_index(
+    std::vector<graph_object_identity_index_slot>& slots,
+    std::span<const identity_ref> identities,
+    identity_ref identity,
+    std::uint32_t handle) noexcept {
+
+    const auto hash = identity_hash(identity);
+    const auto fingerprint = fold32(hash);
+    const auto mask = slots.size() - 1;
+    auto position = static_cast<std::size_t>(hash) & mask;
+    for (;;) {
+        auto& slot = slots[position];
+        if (slot.handle == 0) {
+            slot.fingerprint = fingerprint;
+            slot.handle = handle;
+            return;
+        }
+        if (slot.fingerprint == fingerprint && slot.handle <= identities.size() &&
+            identities[slot.handle - 1] == identity) {
+            return;
+        }
+        position = (position + 1) & mask;
+    }
+}
+
+[[nodiscard]] std::uint64_t endpoint_hash(object_endpoint endpoint) noexcept {
+    return mix64(
+        (static_cast<std::uint64_t>(endpoint.object.value()) << 32) ^
+        static_cast<std::uint64_t>(endpoint.member.value()));
+}
+
+void insert_link_index(
+    std::vector<graph_link_index_slot>& slots,
+    std::span<const link_record> links,
+    object_endpoint target,
+    std::uint32_t handle) noexcept {
+
+    const auto hash = endpoint_hash(target);
+    const auto fingerprint = fold32(hash);
+    const auto mask = slots.size() - 1;
+    auto position = static_cast<std::size_t>(hash) & mask;
+    for (;;) {
+        auto& slot = slots[position];
+        if (slot.handle == 0) {
+            slot.fingerprint = fingerprint;
+            slot.handle = handle;
+            return;
+        }
+        if (slot.fingerprint == fingerprint && slot.handle <= links.size() &&
+            links[slot.handle - 1].target == target) {
             return;
         }
         position = (position + 1) & mask;
@@ -136,6 +194,11 @@ type_handle graph::find_identity(identity_ref identity_value) const noexcept {
     return {};
 }
 
+type_handle graph::find_type(identity_ref identity_value) const noexcept {
+    const auto handle = find_identity(identity_value);
+    return find(handle) == nullptr ? type_handle{} : handle;
+}
+
 std::span<const member_record> graph::members(type_handle handle) const noexcept {
     const auto* entry = find(handle);
     if (entry == nullptr || entry->kind != graph_type_kind::record || !entry->definition)
@@ -160,12 +223,91 @@ std::span<const enum_value_record> graph::enum_values(type_handle handle) const 
     return {enum_value_records.data() + begin, count};
 }
 
-std::string_view graph::name(graph_name_ref value) const noexcept {
-    const auto offset = static_cast<std::size_t>(value.offset);
-    const auto length = static_cast<std::size_t>(value.length);
-    if (offset > names.size() || length > names.size() - offset || length == 0)
+member_index graph::find_member(type_handle handle, string_id name) const noexcept {
+    if (!name)
         return {};
-    return {names.data() + offset, length};
+    const auto values = members(handle);
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        if (values[index].name == name && index <= (std::numeric_limits<std::uint32_t>::max)())
+            return member_index::from_zero_based(static_cast<std::uint32_t>(index));
+    }
+    return {};
+}
+
+object_handle graph::object_at(std::size_t index) const noexcept {
+    if (index >= object_entries.size() || index >= 0xffffffffu || !object_entries[index].live())
+        return {};
+    return object_handle{static_cast<std::uint32_t>(index + 1)};
+}
+
+const object_entry* graph::find(object_handle handle) const noexcept {
+    if (!handle || handle.value() > object_entries.size())
+        return nullptr;
+    const auto& entry = object_entries[handle.value() - 1];
+    return entry.live() ? &entry : nullptr;
+}
+
+identity_ref graph::identity(object_handle handle) const noexcept {
+    return find(handle) == nullptr || handle.value() > object_identities.size()
+        ? nullptr
+        : object_identities[handle.value() - 1];
+}
+
+object_handle graph::find_object_identity(identity_ref identity_value) const noexcept {
+    if (identity_value == nullptr || object_identity_index.empty())
+        return {};
+    const auto hash = identity_hash(identity_value);
+    const auto fingerprint = fold32(hash);
+    const auto mask = object_identity_index.size() - 1;
+    auto position = static_cast<std::size_t>(hash) & mask;
+    for (std::size_t probe = 0; probe < object_identity_index.size(); ++probe) {
+        const auto& slot = object_identity_index[position];
+        if (slot.handle == 0)
+            return {};
+        if (slot.fingerprint == fingerprint && slot.handle <= object_identities.size() &&
+            object_identities[slot.handle - 1] == identity_value) {
+            return object_handle{slot.handle};
+        }
+        position = (position + 1) & mask;
+    }
+    return {};
+}
+
+object_handle graph::find_object(identity_ref identity_value) const noexcept {
+    const auto handle = find_object_identity(identity_value);
+    return find(handle) == nullptr ? object_handle{} : handle;
+}
+
+const link_record* graph::find(link_handle handle) const noexcept {
+    if (!handle || handle.value() > link_records.size())
+        return nullptr;
+    const auto& value = link_records[handle.value() - 1];
+    return value.live() ? &value : nullptr;
+}
+
+link_handle graph::find_link_raw(object_endpoint target) const noexcept {
+    if (!target.object || !target.member || link_index.empty())
+        return {};
+    const auto hash = endpoint_hash(target);
+    const auto fingerprint = fold32(hash);
+    const auto mask = link_index.size() - 1;
+    auto position = static_cast<std::size_t>(hash) & mask;
+    for (std::size_t probe = 0; probe < link_index.size(); ++probe) {
+        const auto& slot = link_index[position];
+        if (slot.handle == 0)
+            return {};
+        if (slot.fingerprint == fingerprint && slot.handle <= link_records.size() &&
+            link_records[slot.handle - 1].target == target) {
+            return link_handle{slot.handle};
+        }
+        position = (position + 1) & mask;
+    }
+    return {};
+}
+
+link_handle graph::find_link(object_endpoint target) const noexcept {
+    const auto handle = find_link_raw(target);
+    return find(handle) == nullptr ? link_handle{} : handle;
 }
 
 canonical_type_kind graph::kind(TypeRef type) const noexcept {
@@ -227,15 +369,74 @@ bool graph::derived(TypeRef type, derived_type_record& output) const noexcept {
     return true;
 }
 
+graph_storage_usage graph::storage_usage(
+    std::size_t live_members,
+    std::size_t live_enum_values) const noexcept {
+
+    graph_storage_usage output;
+    const auto add_vector = [&](const auto& values) noexcept {
+        using value_type = typename std::remove_reference_t<decltype(values)>::value_type;
+        output.retained_bytes += values.capacity() * sizeof(value_type);
+        output.reserve_bytes += (values.capacity() - values.size()) * sizeof(value_type);
+    };
+    const auto add_index = [&](const auto& values, std::size_t entries) noexcept {
+        using value_type = typename std::remove_reference_t<decltype(values)>::value_type;
+        output.retained_bytes += values.size() * sizeof(value_type);
+        const auto safe_entries = values.size() / 2;
+        if (safe_entries > entries)
+            output.reserve_bytes += (safe_entries - entries) * sizeof(value_type);
+    };
+    const auto stale_count = [](std::size_t physical, std::size_t live) noexcept {
+        return physical > live ? physical - live : std::size_t{0};
+    };
+
+    add_vector(types);
+    add_vector(identities);
+    add_vector(member_records);
+    add_vector(enum_value_records);
+    add_vector(object_entries);
+    add_vector(object_identities);
+    add_vector(link_records);
+    add_vector(canonical_types);
+    add_vector(named_refs);
+    add_vector(dependency_versions);
+    add_vector(reverse_dependency_heads);
+    add_vector(dependency_edges);
+
+    add_index(identity_index, identities.size());
+    add_index(object_identity_index, object_identities.size());
+    add_index(link_index, link_records.size());
+    add_index(derived_index, derived_index_entries);
+
+    const auto stale_types = stale_count(types.size(), live_type_count);
+    output.stale_bytes += stale_types * (
+        sizeof(type_entry) + sizeof(identity_ref) + sizeof(TypeRef) +
+        sizeof(std::uint32_t) + sizeof(std::uint32_t));
+    output.stale_bytes += stale_count(member_records.size(), live_members) * sizeof(member_record);
+    output.stale_bytes += stale_count(enum_value_records.size(), live_enum_values) * sizeof(enum_value_record);
+    output.stale_bytes += stale_count(object_entries.size(), live_object_count) *
+        (sizeof(object_entry) + sizeof(identity_ref));
+    output.stale_bytes += stale_count(link_records.size(), live_link_count) * sizeof(link_record);
+
+    // Every live record member can contribute at most one named-type dependency
+    // edge. Anything beyond that bound is certainly stale append-only history.
+    output.stale_bytes += stale_count(dependency_edges.size(), live_members) * sizeof(graph_dependency_edge);
+    return output;
+}
+
 void graph::publish_prepared(prepared_graph_generation& prepared) noexcept {
     types.swap(prepared.types);
     identities.swap(prepared.identities);
     member_records.swap(prepared.members);
     enum_value_records.swap(prepared.enum_values);
-    names.swap(prepared.names);
+    object_entries.swap(prepared.objects);
+    object_identities.swap(prepared.object_identities);
+    link_records.swap(prepared.links);
     canonical_types.swap(prepared.canonical_types);
 
     identity_index.swap(prepared.identity_index);
+    object_identity_index.swap(prepared.object_identity_index);
+    link_index.swap(prepared.link_index);
     intrinsic_refs = prepared.intrinsic_refs;
     named_refs.swap(prepared.named_refs);
     derived_index.swap(prepared.derived_index);
@@ -246,19 +447,25 @@ void graph::publish_prepared(prepared_graph_generation& prepared) noexcept {
     dependency_edges.swap(prepared.dependency_edges);
 
     live_type_count = prepared.live_type_count;
+    live_object_count = prepared.live_object_count;
+    live_link_count = prepared.live_link_count;
 }
 
 void graph::publish_prepared(prepared_graph_update& prepared) noexcept {
     const auto old_type_slots = types.size();
+    const auto old_object_slots = object_entries.size();
+    const auto old_link_slots = link_records.size();
     const auto canonical_base = canonical_types.size();
 
-    append_prepared(names, prepared.names);
     append_prepared(member_records, prepared.members);
     append_prepared(enum_value_records, prepared.enum_values);
     append_prepared(canonical_types, prepared.canonical_types);
 
     append_prepared(types, prepared.new_types);
     append_prepared(identities, prepared.new_identities);
+    append_prepared(object_entries, prepared.new_objects);
+    append_prepared(object_identities, prepared.new_object_identities);
+    append_prepared(link_records, prepared.new_links);
     for (std::size_t index = 0; index < prepared.new_types.size(); ++index) {
         named_refs.push_back({});
         dependency_versions.push_back(1);
@@ -267,6 +474,10 @@ void graph::publish_prepared(prepared_graph_update& prepared) noexcept {
 
     for (const auto& patch : prepared.type_patches)
         types[patch.handle - 1] = patch.value;
+    for (const auto& patch : prepared.object_patches)
+        object_entries[patch.handle - 1] = patch.value;
+    for (const auto& patch : prepared.link_patches)
+        link_records[patch.handle - 1] = patch.value;
 
     intrinsic_refs = prepared.intrinsic_refs;
     for (const auto& patch : prepared.named_ref_patches)
@@ -278,6 +489,25 @@ void graph::publish_prepared(prepared_graph_update& prepared) noexcept {
         for (std::size_t index = 0; index < prepared.new_identities.size(); ++index) {
             const auto handle = static_cast<std::uint32_t>(old_type_slots + index + 1);
             insert_identity_index(identity_index, identities, prepared.new_identities[index], handle);
+        }
+    }
+
+    if (prepared.replace_object_identity_index) {
+        object_identity_index.swap(prepared.rebuilt_object_identity_index);
+    } else {
+        for (std::size_t index = 0; index < prepared.new_object_identities.size(); ++index) {
+            const auto handle = static_cast<std::uint32_t>(old_object_slots + index + 1);
+            insert_object_identity_index(
+                object_identity_index, object_identities, prepared.new_object_identities[index], handle);
+        }
+    }
+
+    if (prepared.replace_link_index) {
+        link_index.swap(prepared.rebuilt_link_index);
+    } else {
+        for (std::size_t index = 0; index < prepared.new_links.size(); ++index) {
+            const auto handle = static_cast<std::uint32_t>(old_link_slots + index + 1);
+            insert_link_index(link_index, link_records, prepared.new_links[index].target, handle);
         }
     }
 
@@ -309,6 +539,8 @@ void graph::publish_prepared(prepared_graph_update& prepared) noexcept {
     }
 
     live_type_count = prepared.live_type_count;
+    live_object_count = prepared.live_object_count;
+    live_link_count = prepared.live_link_count;
 }
 
 } // namespace cw::server

@@ -10,8 +10,8 @@ namespace cw::server {
 // Provides read-only lookup over the immutable diagnostic descriptor catalog.
 class diagnostic_registry_view final {
 public:
-    constexpr explicit diagnostic_registry_view(std::span<const diagnostic_descriptor> descriptors) noexcept
-        : descriptors(descriptors) {}
+    constexpr explicit diagnostic_registry_view(std::span<const diagnostic_descriptor> values) noexcept
+        : descriptors(values) {}
 
     [[nodiscard]] constexpr const diagnostic_descriptor* find(diagnostic_id id) const noexcept {
         for (const auto& descriptor : descriptors) {

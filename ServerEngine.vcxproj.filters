@@ -12,8 +12,10 @@
     <ClCompile Include="server_engine\project\project_configuration_loader.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="server_engine\project\project_context.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="server_engine\project\project_build_orchestrator.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="server_engine\project\project_manager.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="server_engine\project\identity\identity_arena.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="server_engine\project\identity\identity_space.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="server_engine\project\string\string_table.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="server_engine\project\frontend\source_facts_validation.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="server_engine\project\frontend\include_discovery.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="server_engine\project\frontend\source_frontend_generation.cpp"><Filter>Source Files</Filter></ClCompile>
@@ -33,6 +35,8 @@
     <ClInclude Include="server_engine\status.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\operation.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\source_id.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\string_id.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\member_index.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\logging\log.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\diagnostics\diagnostic.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\diagnostics\diagnostic_buffer.hpp"><Filter>Header Files</Filter></ClInclude>
@@ -46,11 +50,14 @@
     <ClInclude Include="server_engine\project\project_configuration.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\project_configuration_loader.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\project_context.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\compiled_project_state.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\project_build_orchestrator.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\project_manager.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\identity\name_ref.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\identity\identity_node.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\identity\identity_arena.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\identity\identity_space.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\string\string_table.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\frontend\source_facts.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\frontend\source_facts_validation.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\frontend\parsed_source.hpp"><Filter>Header Files</Filter></ClInclude>
@@ -60,6 +67,8 @@
     <ClInclude Include="server_engine\project\builder\source_contribution.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\builder\generation_builder.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\graph\type_handle.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\graph\object_handle.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\graph\link_handle.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\graph\type_ref.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\graph\graph.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\source\source_hash.hpp"><Filter>Header Files</Filter></ClInclude>

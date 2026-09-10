@@ -5,6 +5,7 @@
 #include <limits>
 #include <new>
 #include <stdexcept>
+#include <system_error>
 #include <thread>
 #include <utility>
 
@@ -36,58 +37,174 @@ struct generation_source_state final {
 }
 
 template<class Function>
-void parallel_for(
+[[nodiscard]] status parallel_for(
     std::size_t count,
     std::size_t worker_limit,
     std::atomic<std::size_t>& max_active,
-    Function&& function) {
+    Function&& function) noexcept {
 
     if (count == 0)
-        return;
+        return {};
+
     const auto workers = (std::min)(count, (std::max)(std::size_t{1}, worker_limit));
     if (workers == 1) {
         max_active.store((std::max)(max_active.load(), std::size_t{1}), std::memory_order_relaxed);
-        for (std::size_t index = 0; index < count; ++index)
-            function(index);
-        return;
+        try {
+            for (std::size_t index = 0; index < count; ++index)
+                function(index);
+            return {};
+        }
+        catch (const std::bad_alloc&) {
+            return {status_code::not_available};
+        }
+        catch (const std::length_error&) {
+            return {status_code::not_available};
+        }
+        catch (const std::system_error&) {
+            return {status_code::not_available};
+        }
+        catch (...) {
+            return {status_code::initialization_failed};
+        }
     }
 
     std::atomic<std::size_t> next{0};
     std::atomic<std::size_t> active{0};
-    std::vector<std::thread> threads;
-    threads.reserve(workers);
-    for (std::size_t worker = 0; worker < workers; ++worker) {
-        threads.emplace_back([&] {
-            const auto now = active.fetch_add(1, std::memory_order_relaxed) + 1;
-            auto observed = max_active.load(std::memory_order_relaxed);
-            while (now > observed && !max_active.compare_exchange_weak(
-                observed, now, std::memory_order_relaxed, std::memory_order_relaxed)) {
-            }
-            for (;;) {
-                const auto index = next.fetch_add(1, std::memory_order_relaxed);
-                if (index >= count)
-                    break;
-                function(index);
-            }
-            active.fetch_sub(1, std::memory_order_relaxed);
-        });
+    std::atomic<status_code> worker_failure{status_code::ok};
+
+    try {
+        std::vector<std::jthread> threads;
+        threads.reserve(workers);
+        for (std::size_t worker = 0; worker < workers; ++worker) {
+            threads.emplace_back([&] {
+                const auto now = active.fetch_add(1, std::memory_order_relaxed) + 1;
+                auto observed = max_active.load(std::memory_order_relaxed);
+                while (now > observed && !max_active.compare_exchange_weak(
+                    observed, now, std::memory_order_relaxed, std::memory_order_relaxed)) {
+                }
+
+                try {
+                    for (;;) {
+                        if (worker_failure.load(std::memory_order_acquire) != status_code::ok)
+                            break;
+                        const auto index = next.fetch_add(1, std::memory_order_relaxed);
+                        if (index >= count)
+                            break;
+                        function(index);
+                    }
+                }
+                catch (const std::bad_alloc&) {
+                    worker_failure.store(status_code::not_available, std::memory_order_release);
+                }
+                catch (const std::length_error&) {
+                    worker_failure.store(status_code::not_available, std::memory_order_release);
+                }
+                catch (const std::system_error&) {
+                    worker_failure.store(status_code::not_available, std::memory_order_release);
+                }
+                catch (...) {
+                    worker_failure.store(status_code::initialization_failed, std::memory_order_release);
+                }
+
+                active.fetch_sub(1, std::memory_order_relaxed);
+            });
+        }
+        threads.clear();
     }
-    for (auto& thread : threads)
-        thread.join();
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+    catch (const std::system_error&) {
+        return {status_code::not_available};
+    }
+    catch (...) {
+        return {status_code::initialization_failed};
+    }
+
+    return {worker_failure.load(std::memory_order_acquire)};
 }
+
+
+[[nodiscard]] constexpr std::uint64_t edge_mix(std::uint64_t value) noexcept {
+    value ^= value >> 30;
+    value *= 0xbf58476d1ce4e5b9ULL;
+    value ^= value >> 27;
+    value *= 0x94d049bb133111ebULL;
+    return value ^ (value >> 31);
+}
+
+class source_edge_set final {
+public:
+    [[nodiscard]] status insert(
+        source_id owner,
+        source_id dependency,
+        bool& inserted) noexcept {
+
+        inserted = false;
+        if (!owner || !dependency)
+            return {status_code::invalid_argument};
+
+        if (slots.empty() || (count + 1) * 2 >= slots.size()) {
+            const auto capacity = slots.empty() ? std::size_t{16} : slots.size() * 2;
+            const auto result = grow(capacity);
+            if (!result.ok())
+                return result;
+        }
+
+        const auto key = (static_cast<std::uint64_t>(owner.value()) << 32) |
+            static_cast<std::uint64_t>(dependency.value());
+        const auto mask = slots.size() - 1;
+        auto position = static_cast<std::size_t>(edge_mix(key)) & mask;
+        for (;;) {
+            auto& slot = slots[position];
+            if (slot == 0) {
+                slot = key;
+                ++count;
+                inserted = true;
+                return {};
+            }
+            if (slot == key)
+                return {};
+            position = (position + 1) & mask;
+        }
+    }
+
+private:
+    [[nodiscard]] status grow(std::size_t capacity) noexcept {
+        try {
+            std::vector<std::uint64_t> replacement(capacity, 0);
+            const auto mask = replacement.size() - 1;
+            for (const auto key : slots) {
+                if (key == 0)
+                    continue;
+                auto position = static_cast<std::size_t>(edge_mix(key)) & mask;
+                while (replacement[position] != 0)
+                    position = (position + 1) & mask;
+                replacement[position] = key;
+            }
+            slots.swap(replacement);
+            return {};
+        }
+        catch (const std::bad_alloc&) {
+            return {status_code::not_available};
+        }
+        catch (const std::length_error&) {
+            return {status_code::not_available};
+        }
+    }
+
+    std::vector<std::uint64_t> slots;
+    std::size_t count = 0;
+};
 
 void merge_diagnostics(const diagnostic_buffer& from, diagnostic_buffer& to) {
     for (const auto& record : from.records())
         to.emit(record);
 }
 
-[[nodiscard]] bool contains_source(std::span<const source_id> values, source_id source) noexcept {
-    for (const auto value : values) {
-        if (value == source)
-            return true;
-    }
-    return false;
-}
 
 } // namespace
 
@@ -100,11 +217,18 @@ const source_frontend_entry* source_frontend_result::find(source_id source) cons
 }
 
 source_frontend_generation::source_frontend_generation(
+    project_semantic_services semantic_value,
+    source_manager_update& source_update,
+    std::size_t worker_limit_value) noexcept
+    : semantic(semantic_value), sources(source_update),
+      worker_limit(worker_limit_value == 0 ? default_workers() : worker_limit_value) {}
+
+source_frontend_generation::source_frontend_generation(
     project_context& project_value,
     source_manager_update& source_update,
     std::size_t worker_limit_value) noexcept
-    : project(project_value), sources(source_update),
-      worker_limit(worker_limit_value == 0 ? default_workers() : worker_limit_value) {}
+    : source_frontend_generation(
+          project_value.parser_services(), source_update, worker_limit_value) {}
 
 status source_frontend_generation::build(
     std::span<const std::filesystem::path> roots,
@@ -120,10 +244,11 @@ status source_frontend_generation::build(
         states.reserve(roots.size() * 2 + 8);
         std::vector<std::uint32_t> state_by_source(1,
             (std::numeric_limits<std::uint32_t>::max)());
-        std::vector<source_id> root_ids;
-        root_ids.reserve(roots.size());
+        std::size_t unique_roots = 0;
+        source_edge_set dependency_edges;
 
-        auto add_state = [&](source_id source) -> status {
+        auto add_state = [&](source_id source, bool& inserted) -> status {
+            inserted = false;
             if (!source)
                 return {status_code::invalid_argument};
             const auto source_index = static_cast<std::size_t>(source.value());
@@ -153,6 +278,7 @@ status source_frontend_generation::build(
             states.push_back(std::move(state));
             state_by_source[source_index] =
                 static_cast<std::uint32_t>(states.size() - 1);
+            inserted = true;
             return {};
         };
 
@@ -161,15 +287,16 @@ status source_frontend_generation::build(
             auto result = sources.resolve(root_path, source);
             if (!result.ok())
                 return result;
-            if (!contains_source(root_ids, source))
-                root_ids.push_back(source);
-            result = add_state(source);
+            bool inserted = false;
+            result = add_state(source, inserted);
             if (!result.ok())
                 return result;
+            if (inserted)
+                ++unique_roots;
         }
 
         source_frontend_summary summary;
-        summary.roots = static_cast<std::uint32_t>(root_ids.size());
+        summary.roots = static_cast<std::uint32_t>(unique_roots);
         summary.worker_limit = worker_limit;
         std::atomic<std::size_t> max_active{0};
 
@@ -187,10 +314,13 @@ status source_frontend_generation::build(
                     return result;
             }
 
-            parallel_for(wave_count, worker_limit, max_active, [&](std::size_t local) {
-                states[wave_begin + local].work_status =
-                    source_manager_update::execute_acquire(jobs[local], acquisition_results[local]);
-            });
+            auto parallel_result = parallel_for(
+                wave_count, worker_limit, max_active, [&](std::size_t local) {
+                    states[wave_begin + local].work_status =
+                        source_manager_update::execute_acquire(jobs[local], acquisition_results[local]);
+                });
+            if (!parallel_result.ok())
+                return parallel_result;
 
             for (std::size_t local = 0; local < wave_count; ++local) {
                 auto& state = states[wave_begin + local];
@@ -205,18 +335,21 @@ status source_frontend_generation::build(
                 ++summary.acquired;
             }
 
-            parallel_for(wave_count, worker_limit, max_active, [&](std::size_t local) {
-                auto& state = states[wave_begin + local];
-                std::vector<directive_span> directives;
-                auto result = lex_source(
-                    state.snapshot, operation, worker_diagnostics[local], state.tokens, &directives);
-                if (result.ok()) {
-                    result = discover_source_includes(
-                        state.snapshot, state.tokens, directives, operation,
-                        worker_diagnostics[local], state.include_directives);
-                }
-                state.work_status = result;
-            });
+            parallel_result = parallel_for(
+                wave_count, worker_limit, max_active, [&](std::size_t local) {
+                    auto& state = states[wave_begin + local];
+                    std::vector<directive_span> directives;
+                    auto result = lex_source(
+                        state.snapshot, operation, worker_diagnostics[local], state.tokens, &directives);
+                    if (result.ok()) {
+                        result = discover_source_includes(
+                            state.snapshot, state.tokens, directives, operation,
+                            worker_diagnostics[local], state.include_directives);
+                    }
+                    state.work_status = result;
+                });
+            if (!parallel_result.ok())
+                return parallel_result;
 
             for (std::size_t local = 0; local < wave_count; ++local) {
                 merge_diagnostics(worker_diagnostics[local], diagnostics);
@@ -237,9 +370,14 @@ status source_frontend_generation::build(
                     auto result = sources.resolve_include(source, path_text, dependency);
                     if (!result.ok())
                         return result;
-                    if (!contains_source(states[state_index].dependencies, dependency)) {
+                    bool edge_inserted = false;
+                    result = dependency_edges.insert(source, dependency, edge_inserted);
+                    if (!result.ok())
+                        return result;
+                    if (edge_inserted) {
                         states[state_index].dependencies.push_back(dependency);
-                        result = add_state(dependency);
+                        bool state_inserted = false;
+                        result = add_state(dependency, state_inserted);
                         if (!result.ok())
                             return result;
                     }
@@ -276,15 +414,15 @@ status source_frontend_generation::build(
                 ready.push_back(index);
         }
 
-        source_parser parser{project};
+        source_parser parser{semantic};
         std::size_t parsed_count = 0;
         while (!ready.empty()) {
             std::vector<diagnostic_buffer> worker_diagnostics(ready.size());
-            parallel_for(ready.size(), worker_limit, max_active, [&](std::size_t local) {
+            auto parallel_result = parallel_for(
+                ready.size(), worker_limit, max_active, [&](std::size_t local) {
                 auto& state = states[ready[local]];
                 std::vector<source_environment_import> environment_imports;
                 std::vector<const source_interface*> interface_imports;
-                std::vector<identity_ref> local_types;
                 try {
                     environment_imports.reserve(state.imports.size());
                     interface_imports.reserve(state.dependencies.size());
@@ -317,14 +455,9 @@ status source_frontend_generation::build(
                     }
 
                     const auto facts = state.parsed.facts();
-                    local_types.reserve(facts.records().size() + facts.enums().size());
-                    for (const auto& record : facts.records())
-                        local_types.push_back(record.identity);
-                    for (const auto& enum_fact : facts.enums())
-                        local_types.push_back(enum_fact.identity);
 
                     state.interface = std::make_unique<source_interface>();
-                    state.work_status = state.interface->initialize(local_types, interface_imports);
+                    state.work_status = state.interface->initialize(facts, interface_imports);
                 }
                 catch (const std::bad_alloc&) {
                     state.work_status = {status_code::not_available};
@@ -332,7 +465,9 @@ status source_frontend_generation::build(
                 catch (const std::length_error&) {
                     state.work_status = {status_code::not_available};
                 }
-            });
+                });
+            if (!parallel_result.ok())
+                return parallel_result;
 
             std::vector<std::uint32_t> next_ready;
             for (std::size_t local = 0; local < ready.size(); ++local) {
