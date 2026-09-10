@@ -17,10 +17,19 @@
 
 namespace cw::server {
 
+// Converts an external filesystem path into the canonical Source Manager spelling.
+// Callers that repeatedly resolve the same path should normalize once and use the
+// normalized lookup boundary instead of repeating filesystem/path construction.
+[[nodiscard]] status normalize_source_path(
+    const std::filesystem::path& input,
+    std::string& output) noexcept;
+
 struct source_record final {
-    source_id id{};
-    std::string normalized_path;
+    std::uint32_t path_offset = 0;
+    std::uint32_t path_length = 0;
 };
+
+static_assert(sizeof(source_record) == 8);
 
 enum class source_acquire_result_kind : std::uint8_t {
     unchanged,
@@ -47,8 +56,8 @@ struct source_acquire_result final {
 class source_manager_update;
 
 // Owns stable normalized-path -> source_id identity and committed immutable Source
-// revisions/dependencies. Updates are coordinator-owned; filesystem workers receive
-// immutable source_acquire_job values and never mutate Source Manager directly.
+// revisions/dependencies. Path identity uses a compact open-addressed hot index and
+// contiguous path arena; filesystem normalization is outside the hot lookup path.
 class source_manager final {
 public:
     source_manager() = default;
@@ -61,8 +70,23 @@ public:
     [[nodiscard]] std::size_t source_count() const noexcept { return records.size(); }
     [[nodiscard]] source_snapshot current(source_id source) const noexcept;
     [[nodiscard]] std::span<const source_id> includes(source_id source) const noexcept;
+
+    // Returned view remains valid until the next Source Manager publication.
     [[nodiscard]] std::string_view path(source_id source) const noexcept;
-    [[nodiscard]] status find(std::string_view normalized_path, source_id& output) const noexcept;
+
+    // Hot lookup boundary. normalized_path must already be produced by
+    // normalize_source_path() or come directly from Source Manager storage.
+    [[nodiscard]] status find(
+        std::string_view normalized_path,
+        source_id& output) const noexcept;
+
+    [[nodiscard]] std::size_t path_index_bytes() const noexcept {
+        return path_index.size() * sizeof(path_slot);
+    }
+
+    [[nodiscard]] std::size_t path_storage_bytes() const noexcept {
+        return path_storage.size();
+    }
 
     // Compatibility/test convenience: one transactional in-memory publication.
     [[nodiscard]] status publish_memory(
@@ -73,25 +97,33 @@ public:
 
 private:
     struct committed_source final {
-        source_record record;
         source_snapshot snapshot;
         std::vector<source_id> includes;
     };
 
+    // fingerprint is a folded XXH64 value. Full path comparison resolves the rare
+    // fingerprint collision; source==0 is the only empty bucket state.
     struct path_slot final {
-        std::uint64_t hash = 0;
+        std::uint32_t fingerprint = 0;
         source_id source{};
     };
 
+    static_assert(sizeof(path_slot) == 8);
+
     friend class source_manager_update;
 
-    [[nodiscard]] status rebuild_path_index(std::size_t additional, std::vector<path_slot>& output) const noexcept;
+    [[nodiscard]] status rebuild_path_index(
+        std::size_t additional,
+        std::vector<path_slot>& output) const noexcept;
+
     [[nodiscard]] status find_in_index(
         std::string_view normalized_path,
         std::span<const path_slot> index,
         source_id& output) const noexcept;
 
-    std::vector<committed_source> records;
+    std::vector<source_record> records;
+    std::vector<char> path_storage;
+    std::vector<committed_source> states;
     std::vector<path_slot> path_index;
 };
 
@@ -108,8 +140,15 @@ public:
     source_manager_update(source_manager_update&&) noexcept = default;
     source_manager_update& operator=(source_manager_update&&) noexcept = default;
 
+    // Cold external boundary: normalizes path then delegates to resolve_normalized().
     [[nodiscard]] status resolve(
         const std::filesystem::path& path,
+        source_id& output) noexcept;
+
+    // Hot path identity boundary. No filesystem operations, normalization, sorting,
+    // or allocation occur for an already-known Source.
+    [[nodiscard]] status resolve_normalized(
+        std::string_view normalized_path,
         source_id& output) noexcept;
 
     [[nodiscard]] status resolve_include(
@@ -162,16 +201,14 @@ private:
     };
 
     struct local_path_slot final {
-        std::uint64_t hash = 0;
+        std::uint32_t fingerprint = 0;
         std::uint32_t new_source_index = 0;
     };
 
+    static_assert(sizeof(local_path_slot) == 8);
+
     friend class source_manager;
     explicit source_manager_update(source_manager& owner_value) noexcept : owner(&owner_value) {}
-
-    [[nodiscard]] static status normalize_path(
-        const std::filesystem::path& input,
-        std::string& output) noexcept;
 
     [[nodiscard]] candidate_source* candidate(source_id source) noexcept;
     [[nodiscard]] const candidate_source* candidate(source_id source) const noexcept;
@@ -189,6 +226,7 @@ private:
     std::vector<id_slot> id_index;
     std::vector<local_path_slot> local_path_index;
     std::vector<source_manager::path_slot> prepared_path_index;
+    std::size_t prepared_path_storage_size = 0;
     bool prepared = false;
     bool committed = false;
 };

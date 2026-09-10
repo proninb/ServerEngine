@@ -3,6 +3,8 @@
 #include "../../diagnostics/diagnostic_descriptor.hpp"
 
 #include <algorithm>
+#include <bit>
+#include <cstring>
 #include <limits>
 #include <new>
 #include <stdexcept>
@@ -20,15 +22,103 @@ namespace {
     return value;
 }
 
+[[nodiscard]] std::uint64_t read64(const char* data) noexcept {
+    std::uint64_t value = 0;
+    std::memcpy(&value, data, sizeof(value));
+    return value;
+}
+
+[[nodiscard]] std::uint32_t read32(const char* data) noexcept {
+    std::uint32_t value = 0;
+    std::memcpy(&value, data, sizeof(value));
+    return value;
+}
+
+[[nodiscard]] constexpr std::uint64_t xxh64_round(
+    std::uint64_t accumulator,
+    std::uint64_t input) noexcept {
+
+    accumulator += input * 14029467366897019727ULL;
+    accumulator = std::rotl(accumulator, 31);
+    return accumulator * 11400714785074694791ULL;
+}
+
 [[nodiscard]] std::uint64_t hash_path(std::string_view value) noexcept {
-    std::uint64_t hash = 1469598103934665603ULL;
-    for (const char character : value) {
-        const auto byte = static_cast<unsigned char>(character);
-        hash ^= byte;
-        hash *= 1099511628211ULL;
+    constexpr std::uint64_t prime1 = 11400714785074694791ULL;
+    constexpr std::uint64_t prime2 = 14029467366897019727ULL;
+    constexpr std::uint64_t prime3 = 1609587929392839161ULL;
+    constexpr std::uint64_t prime4 = 9650029242287828579ULL;
+    constexpr std::uint64_t prime5 = 2870177450012600261ULL;
+
+    const char* position = value.data();
+    const char* const end = position + value.size();
+    std::uint64_t hash = 0;
+
+    if (value.size() >= 32) {
+        std::uint64_t lane1 = prime1 + prime2;
+        std::uint64_t lane2 = prime2;
+        std::uint64_t lane3 = 0;
+        std::uint64_t lane4 = 0 - prime1;
+        const char* const limit = end - 32;
+
+        do {
+            lane1 = xxh64_round(lane1, read64(position));
+            position += 8;
+            lane2 = xxh64_round(lane2, read64(position));
+            position += 8;
+            lane3 = xxh64_round(lane3, read64(position));
+            position += 8;
+            lane4 = xxh64_round(lane4, read64(position));
+            position += 8;
+        } while (position <= limit);
+
+        hash =
+            std::rotl(lane1, 1) +
+            std::rotl(lane2, 7) +
+            std::rotl(lane3, 12) +
+            std::rotl(lane4, 18);
+
+        const std::uint64_t lanes[] = {lane1, lane2, lane3, lane4};
+        for (const auto lane : lanes) {
+            hash ^= xxh64_round(0, lane);
+            hash = hash * prime1 + prime4;
+        }
     }
-    hash = mix64(hash);
-    return hash == 0 ? 1 : hash;
+    else {
+        hash = prime5;
+    }
+
+    hash += value.size();
+
+    while (position + 8 <= end) {
+        const auto lane = xxh64_round(0, read64(position));
+        hash ^= lane;
+        hash = std::rotl(hash, 27) * prime1 + prime4;
+        position += 8;
+    }
+
+    if (position + 4 <= end) {
+        hash ^= static_cast<std::uint64_t>(read32(position)) * prime1;
+        hash = std::rotl(hash, 23) * prime2 + prime3;
+        position += 4;
+    }
+
+    while (position < end) {
+        hash ^= static_cast<unsigned char>(*position++) * prime5;
+        hash = std::rotl(hash, 11) * prime1;
+    }
+
+    hash ^= hash >> 33;
+    hash *= prime2;
+    hash ^= hash >> 29;
+    hash *= prime3;
+    hash ^= hash >> 32;
+    return hash;
+}
+
+[[nodiscard]] constexpr std::uint32_t path_fingerprint(std::uint64_t hash) noexcept {
+    const auto folded = static_cast<std::uint32_t>(hash ^ (hash >> 32));
+    return folded == 0 ? 1U : folded;
 }
 
 [[nodiscard]] std::size_t next_capacity(std::size_t required) noexcept {
@@ -64,6 +154,35 @@ void emit_source_failure(
 
 } // namespace
 
+status normalize_source_path(
+    const std::filesystem::path& input,
+    std::string& output) noexcept {
+
+    output.clear();
+    if (input.empty())
+        return {status_code::invalid_argument};
+
+    try {
+        std::error_code error;
+        auto normalized = std::filesystem::absolute(input, error);
+        if (error)
+            return {status_code::io_failed};
+        normalized = normalized.lexically_normal();
+        output = normalized.generic_string();
+#ifdef _WIN32
+        if (output.size() >= 2 && output[1] == ':' && output[0] >= 'A' && output[0] <= 'Z')
+            output[0] = static_cast<char>(output[0] - 'A' + 'a');
+#endif
+        return output.empty() ? status{status_code::invalid_argument} : status{};
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+}
+
 status source_manager::find_in_index(
     std::string_view normalized_path,
     std::span<const path_slot> index,
@@ -74,22 +193,36 @@ status source_manager::find_in_index(
         return {status_code::not_found};
 
     const auto hash = hash_path(normalized_path);
+    const auto fingerprint = path_fingerprint(hash);
     const auto mask = index.size() - 1;
     auto position = static_cast<std::size_t>(hash) & mask;
+
     for (std::size_t probe = 0; probe < index.size(); ++probe) {
         const auto& slot = index[position];
         if (!slot.source)
             return {status_code::not_found};
-        if (slot.hash == hash) {
-            const auto source_index = static_cast<std::size_t>(slot.source.value() - 1);
-            if (source_index < records.size() &&
-                records[source_index].record.normalized_path == normalized_path) {
+
+        if (slot.fingerprint == fingerprint) {
+            // path_index is rebuilt from committed Source records, so a live slot
+            // always addresses one valid dense record. Avoid the public path()
+            // validation path here: this is the Source Manager hot identity loop.
+            const auto source_index =
+                static_cast<std::size_t>(slot.source.value() - 1);
+            const auto& record = records[source_index];
+            const auto length = static_cast<std::size_t>(record.path_length);
+            if (length == normalized_path.size() &&
+                std::memcmp(
+                    path_storage.data() + record.path_offset,
+                    normalized_path.data(),
+                    length) == 0) {
                 output = slot.source;
                 return {};
             }
         }
+
         position = (position + 1) & mask;
     }
+
     return {status_code::not_found};
 }
 
@@ -114,12 +247,14 @@ status source_manager::rebuild_path_index(
     try {
         output.assign(capacity, path_slot{});
         const auto mask = capacity - 1;
-        for (const auto& item : records) {
-            const auto hash = hash_path(item.record.normalized_path);
+        for (std::size_t index = 0; index < records.size(); ++index) {
+            const auto source = source_id{static_cast<std::uint32_t>(index + 1)};
+            const auto normalized = path(source);
+            const auto hash = hash_path(normalized);
             auto position = static_cast<std::size_t>(hash) & mask;
             while (output[position].source)
                 position = (position + 1) & mask;
-            output[position] = path_slot{hash, item.record.id};
+            output[position] = path_slot{path_fingerprint(hash), source};
         }
         return {};
     }
@@ -139,25 +274,33 @@ source_snapshot source_manager::current(source_id source) const noexcept {
     if (!source)
         return {};
     const auto index = static_cast<std::size_t>(source.value() - 1);
-    return index < records.size() ? records[index].snapshot : source_snapshot{};
+    return index < states.size() ? states[index].snapshot : source_snapshot{};
 }
 
 std::span<const source_id> source_manager::includes(source_id source) const noexcept {
     if (!source)
         return {};
     const auto index = static_cast<std::size_t>(source.value() - 1);
-    return index < records.size()
-        ? std::span<const source_id>{records[index].includes}
+    return index < states.size()
+        ? std::span<const source_id>{states[index].includes}
         : std::span<const source_id>{};
 }
 
 std::string_view source_manager::path(source_id source) const noexcept {
     if (!source)
         return {};
+
     const auto index = static_cast<std::size_t>(source.value() - 1);
-    return index < records.size()
-        ? std::string_view{records[index].record.normalized_path}
-        : std::string_view{};
+    if (index >= records.size())
+        return {};
+
+    const auto& record = records[index];
+    const auto offset = static_cast<std::size_t>(record.path_offset);
+    const auto length = static_cast<std::size_t>(record.path_length);
+    if (offset > path_storage.size() || length > path_storage.size() - offset)
+        return {};
+
+    return {path_storage.data() + offset, length};
 }
 
 status source_manager::publish_memory(
@@ -198,34 +341,6 @@ status source_manager::publish_memory(
         if (identity != nullptr)
             *identity = source;
         return {};
-    }
-    catch (const std::bad_alloc&) {
-        return {status_code::not_available};
-    }
-    catch (const std::length_error&) {
-        return {status_code::not_available};
-    }
-}
-
-status source_manager_update::normalize_path(
-    const std::filesystem::path& input,
-    std::string& output) noexcept {
-
-    if (input.empty())
-        return {status_code::invalid_argument};
-
-    try {
-        std::error_code error;
-        auto normalized = std::filesystem::absolute(input, error);
-        if (error)
-            return {status_code::io_failed};
-        normalized = normalized.lexically_normal();
-        output = normalized.generic_string();
-#ifdef _WIN32
-        if (output.size() >= 2 && output[1] == ':' && output[0] >= 'A' && output[0] <= 'Z')
-            output[0] = static_cast<char>(output[0] - 'A' + 'a');
-#endif
-        return output.empty() ? status{status_code::invalid_argument} : status{};
     }
     catch (const std::bad_alloc&) {
         return {status_code::not_available};
@@ -276,7 +391,7 @@ status source_manager_update::ensure_local_path_capacity(std::size_t required) n
             auto position = static_cast<std::size_t>(hash) & mask;
             while (replacement[position].new_source_index != 0)
                 position = (position + 1) & mask;
-            replacement[position] = local_path_slot{hash, index + 1};
+            replacement[position] = local_path_slot{path_fingerprint(hash), index + 1};
         }
         local_path_index.swap(replacement);
         return {};
@@ -303,7 +418,7 @@ status source_manager_update::find_local_path(
         const auto& slot = local_path_index[position];
         if (slot.new_source_index == 0)
             return {status_code::not_found};
-        if (slot.hash == hash) {
+        if (slot.fingerprint == path_fingerprint(hash)) {
             const auto index = static_cast<std::size_t>(slot.new_source_index - 1);
             if (index < new_sources.size() && new_sources[index].normalized_path == normalized) {
                 output = new_sources[index].source;
@@ -324,7 +439,7 @@ status source_manager_update::insert_local_path(std::uint32_t new_source_index) 
     auto position = static_cast<std::size_t>(hash) & mask;
     while (local_path_index[position].new_source_index != 0)
         position = (position + 1) & mask;
-    local_path_index[position] = local_path_slot{hash, new_source_index};
+    local_path_index[position] = local_path_slot{path_fingerprint(hash), new_source_index};
     return {};
 }
 
@@ -332,14 +447,23 @@ status source_manager_update::resolve(
     const std::filesystem::path& path_value,
     source_id& output) noexcept {
 
-    output = {};
-    if (owner == nullptr || committed)
-        return {status_code::invalid_argument};
-
     std::string normalized;
-    auto result = normalize_path(path_value, normalized);
-    if (!result.ok())
+    const auto result = normalize_source_path(path_value, normalized);
+    if (!result.ok()) {
+        output = {};
         return result;
+    }
+
+    return resolve_normalized(normalized, output);
+}
+
+status source_manager_update::resolve_normalized(
+    std::string_view normalized,
+    source_id& output) noexcept {
+
+    output = {};
+    if (owner == nullptr || committed || normalized.empty())
+        return {status_code::invalid_argument};
 
     if (owner->find(normalized, output).ok())
         return {};
@@ -352,16 +476,20 @@ status source_manager_update::resolve(
     }
 
     try {
-        result = ensure_local_path_capacity(new_sources.size() + 1);
+        auto result = ensure_local_path_capacity(new_sources.size() + 1);
         if (!result.ok())
             return result;
-        const auto value = static_cast<std::uint32_t>(owner->records.size() + new_sources.size() + 1);
-        new_sources.push_back(new_source{source_id{value}, std::move(normalized)});
+
+        const auto value = static_cast<std::uint32_t>(
+            owner->records.size() + new_sources.size() + 1);
+
+        new_sources.push_back(new_source{source_id{value}, std::string{normalized}});
         result = insert_local_path(static_cast<std::uint32_t>(new_sources.size()));
         if (!result.ok()) {
             new_sources.pop_back();
             return result;
         }
+
         output = source_id{value};
         prepared = false;
         return {};
@@ -379,7 +507,7 @@ std::string_view source_manager_update::path(source_id source) const noexcept {
         return {};
     const auto value = static_cast<std::size_t>(source.value());
     if (value <= owner->records.size())
-        return owner->records[value - 1].record.normalized_path;
+        return owner->path(source);
     const auto local = value - owner->records.size() - 1;
     return local < new_sources.size() ? std::string_view{new_sources[local].normalized_path} : std::string_view{};
 }
@@ -668,7 +796,10 @@ status source_manager_update::build_prepared_path_index() noexcept {
         auto position = static_cast<std::size_t>(hash) & mask;
         while (prepared_path_index[position].source)
             position = (position + 1) & mask;
-        prepared_path_index[position] = source_manager::path_slot{hash, item.source};
+        prepared_path_index[position] = source_manager::path_slot{
+            path_fingerprint(hash),
+            item.source,
+        };
     }
     return {};
 }
@@ -682,17 +813,37 @@ status source_manager_update::prepare_publish() noexcept {
     auto result = build_prepared_path_index();
     if (!result.ok())
         return result;
+
+    std::size_t added_path_bytes = 0;
+    for (const auto& item : new_sources) {
+        if (added_path_bytes >
+            (std::numeric_limits<std::size_t>::max)() - item.normalized_path.size()) {
+            return {status_code::not_available};
+        }
+        added_path_bytes += item.normalized_path.size();
+    }
+
+    if (owner->path_storage.size() >
+        static_cast<std::size_t>((std::numeric_limits<std::uint32_t>::max)()) - added_path_bytes) {
+        return {status_code::not_available};
+    }
+
     try {
         owner->records.reserve(owner->records.size() + new_sources.size());
+        owner->states.reserve(owner->states.size() + new_sources.size());
+        prepared_path_storage_size = owner->path_storage.size() + added_path_bytes;
+        owner->path_storage.reserve(prepared_path_storage_size);
         prepared = true;
         return {};
     }
     catch (const std::bad_alloc&) {
         prepared_path_index.clear();
+        prepared_path_storage_size = 0;
         return {status_code::not_available};
     }
     catch (const std::length_error&) {
         prepared_path_index.clear();
+        prepared_path_storage_size = 0;
         return {status_code::not_available};
     }
 }
@@ -701,21 +852,25 @@ void source_manager_update::publish_prepared() noexcept {
     if (!prepared || committed || owner == nullptr)
         return;
 
-    for (auto& item : new_sources) {
-        source_manager::committed_source committed_source;
-        committed_source.record.id = item.source;
-        committed_source.record.normalized_path = std::move(item.normalized_path);
-        owner->records.push_back(std::move(committed_source));
+    for (const auto& item : new_sources) {
+        const auto offset = static_cast<std::uint32_t>(owner->path_storage.size());
+        const auto length = static_cast<std::uint32_t>(item.normalized_path.size());
+        owner->path_storage.insert(
+            owner->path_storage.end(),
+            item.normalized_path.begin(),
+            item.normalized_path.end());
+        owner->records.push_back(source_record{offset, length});
+        owner->states.emplace_back();
     }
 
     for (auto& item : candidates) {
         const auto index = static_cast<std::size_t>(item.source.value() - 1);
-        if (index >= owner->records.size())
+        if (index >= owner->states.size())
             continue;
         if (item.has_snapshot)
-            owner->records[index].snapshot = std::move(item.snapshot);
+            owner->states[index].snapshot = std::move(item.snapshot);
         if (item.has_includes)
-            owner->records[index].includes = std::move(item.includes);
+            owner->states[index].includes = std::move(item.includes);
     }
 
     owner->path_index.swap(prepared_path_index);

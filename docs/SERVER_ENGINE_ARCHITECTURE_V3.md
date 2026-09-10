@@ -579,3 +579,20 @@ source_facts
     ↓
 all downstream stages use direct identity
 ```
+
+## SE-V3-06P Source Manager hot path
+
+Source path canonicalization and Source identity lookup are separate operations. External filesystem paths are normalized once; repeated Source identity operations consume the normalized generic path directly. The hot Source Manager path is therefore:
+
+```text
+normalized path bytes
+    -> XXH64
+    -> compact open-addressed bucket
+    -> source_id
+```
+
+The committed path index uses an 8-byte `{fingerprint, source_id}` bucket. Exact bytes in the contiguous path arena remain authoritative. A dense 8-byte `{offset,length}` record maps `source_id` back to its normalized spelling. Collision resolution performs exact byte comparison; the fingerprint is never identity.
+
+`source_manager_update::resolve(std::filesystem::path)` is the cold compatibility/external boundary. `resolve_normalized(std::string_view)` is the build-side hot boundary and performs no filesystem operation or normalization for an already known Source. Source Manager remains coordinator-owned and contains no mutex.
+
+SE-V3-06P performance gates compare this V3 implementation with the actual OLD production `unordered_map<std::filesystem::path, source_id>` path map and with the separate compact OLD layout-study candidate. V3 must beat the production OLD map; the experimental layout candidate is retained as a near-parity regression guard.

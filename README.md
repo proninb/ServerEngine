@@ -92,7 +92,7 @@ server.json
     -> create Project semantic identity root
 ```
 
-SE-V3-06R replaces the minimal 06B frontend mechanics with production-oriented Source Manager acquisition, SHA-256 snapshots, Lexer directive spans, quoted-include DAG discovery, dependency-ready parallel Parser scheduling, positional visibility, and direct `identity_ref` source interfaces. Generation Builder, Graph, persistence, Runtime, and SHM remain intentionally absent.
+SE-V3-06R replaces the minimal 06B frontend mechanics with production-oriented Source Manager acquisition, SHA-256 snapshots, Lexer directive spans, quoted-include DAG discovery, dependency-ready parallel Parser scheduling, positional visibility, and direct `identity_ref` source interfaces. SE-V3-06P then separates filesystem normalization from hot normalized-path identity lookup and applies the compact Source Manager path-index layout proven by benchmark. Generation Builder, Graph, persistence, Runtime, and SHM remain intentionally absent.
 
 ## Next implementation sequence
 
@@ -136,3 +136,9 @@ server_engine_source_manager_benchmark
 ```
 
 The default gate resolves and commits 100K and 1M normalized path identities and rejects superlinear scaling above exponent 1.50.
+
+## SE-V3-06P Source Manager Performance
+
+Filesystem path normalization is now an explicit cold boundary. Repeated Source identity work uses `resolve_normalized()` / `find()` over a compact 8-byte open-addressing bucket, dense 8-byte path records, a contiguous path arena, and XXH64 with a folded 32-bit fingerprint. The performance benchmark compares V3 directly against both the actual OLD production `unordered_map<filesystem::path, source_id>` shape and the separate compact OLD layout-study candidate. See `docs/SE_V3_06P_SOURCE_MANAGER_PERFORMANCE.md`.
+
+The benchmark must show V3 faster than the actual OLD production map for both normalized insertion and random lookup. The experimental OLD compact-layout candidate is retained as a stricter near-parity guard.

@@ -518,6 +518,37 @@ bool test_source_manager_transactional_identity() {
     return second.resolve("transactional.hpp", again).ok() && again == source;
 }
 
+bool test_source_manager_normalized_path_boundary() {
+    std::string normalized;
+    if (!normalize_source_path("hot/../hot/model.hpp", normalized).ok() || normalized.empty())
+        return false;
+
+    source_manager manager;
+    auto update = manager.begin_update();
+    source_id first;
+    source_id repeated;
+    if (!update.resolve_normalized(normalized, first).ok() || !first ||
+        !update.resolve_normalized(normalized, repeated).ok() || repeated != first ||
+        update.source_count() != 1) {
+        return false;
+    }
+
+    if (!update.commit().ok() || manager.source_count() != 1 ||
+        manager.path(first) != normalized || manager.path_index_bytes() == 0 ||
+        manager.path_storage_bytes() != normalized.size()) {
+        return false;
+    }
+
+    source_id found;
+    if (!manager.find(normalized, found).ok() || found != first)
+        return false;
+
+    auto second = manager.begin_update();
+    source_id existing;
+    return second.resolve_normalized(normalized, existing).ok() &&
+           existing == first && second.source_count() == 1;
+}
+
 bool test_source_manager_file_acquisition() {
     const auto path = std::filesystem::temp_directory_path() / "server_engine_v306r_source.hpp";
     {
@@ -1091,6 +1122,7 @@ constexpr std::array tests{
     test_case{"source_hash_sha256", &test_source_hash_sha256},
     test_case{"source_snapshot_immutability", &test_source_snapshot_immutability},
     test_case{"source_manager_transactional_identity", &test_source_manager_transactional_identity},
+    test_case{"source_manager_normalized_path_boundary", &test_source_manager_normalized_path_boundary},
     test_case{"source_manager_file_acquisition", &test_source_manager_file_acquisition},
     test_case{"lexer_include_discovery", &test_lexer_include_discovery},
     test_case{"parser_source_facts_producer", &test_parser_source_facts_producer},
