@@ -1,10 +1,12 @@
 #pragma once
 
-#include "../../string_id.hpp"
+#include "name_ref.hpp"
 
 #include <cstdint>
 
 namespace cw::server {
+
+class identity_space;
 
 enum class identity_kind : std::uint8_t {
     root,
@@ -12,32 +14,28 @@ enum class identity_kind : std::uint8_t {
     type,
 };
 
-// Project-lifetime semantic identity atom. It never contains generation-specific state or a Graph reference.
+// Project-lifetime semantic identity. It stores only WHO an entity is;
+// generation-specific definition, layout, handles, and Graph state live in G.
 class identity_node final {
 public:
     [[nodiscard]] constexpr const identity_node* parent() const noexcept { return parent_identity; }
-    [[nodiscard]] constexpr string_id name() const noexcept { return local_name; }
+    [[nodiscard]] constexpr name_ref name() const noexcept { return local_name; }
     [[nodiscard]] constexpr identity_kind kind() const noexcept { return semantic_kind; }
-    [[nodiscard]] constexpr std::uint32_t slot() const noexcept { return acceleration_slot; }
 
 private:
     struct construction_token {};
-    friend class identity_registry;
+    friend class identity_space;
 
-public:
     constexpr identity_node(
         construction_token,
         const identity_node* parent,
-        string_id name,
-        identity_kind kind,
-        std::uint32_t slot) noexcept
-        : parent_identity(parent), local_name(name), semantic_kind(kind), acceleration_slot(slot) {}
+        name_ref name,
+        identity_kind kind) noexcept
+        : parent_identity(parent), local_name(name), semantic_kind(kind) {}
 
-private:
     const identity_node* parent_identity = nullptr;
-    string_id local_name;
+    name_ref local_name{};
     identity_kind semantic_kind = identity_kind::root;
-    std::uint32_t acceleration_slot = 0;
 };
 
 using identity_ref = const identity_node*;

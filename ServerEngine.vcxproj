@@ -43,14 +43,13 @@
     <ClCompile Include="server_engine\config\server_configuration_loader.cpp" />
     <ClCompile Include="server_engine\project\project_configuration_loader.cpp" />
     <ClCompile Include="server_engine\project\project_context.cpp" />
-    <ClCompile Include="server_engine\project\string\string_registry.cpp" />
-    <ClCompile Include="server_engine\project\identity\identity_registry.cpp" />
+    <ClCompile Include="server_engine\project\identity\identity_arena.cpp" />
+    <ClCompile Include="server_engine\project\identity\identity_space.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="server_engine\status.hpp" />
     <ClInclude Include="server_engine\operation.hpp" />
     <ClInclude Include="server_engine\source_id.hpp" />
-    <ClInclude Include="server_engine\string_id.hpp" />
     <ClInclude Include="server_engine\logging\log.hpp" />
     <ClInclude Include="server_engine\diagnostics\diagnostic.hpp" />
     <ClInclude Include="server_engine\diagnostics\diagnostic_buffer.hpp" />
@@ -64,9 +63,10 @@
     <ClInclude Include="server_engine\project\project_configuration.hpp" />
     <ClInclude Include="server_engine\project\project_configuration_loader.hpp" />
     <ClInclude Include="server_engine\project\project_context.hpp" />
-    <ClInclude Include="server_engine\project\string\string_registry.hpp" />
+    <ClInclude Include="server_engine\project\identity\name_ref.hpp" />
     <ClInclude Include="server_engine\project\identity\identity_node.hpp" />
-    <ClInclude Include="server_engine\project\identity\identity_registry.hpp" />
+    <ClInclude Include="server_engine\project\identity\identity_arena.hpp" />
+    <ClInclude Include="server_engine\project\identity\identity_space.hpp" />
   </ItemGroup>
   <ItemGroup><None Include="server.json" /><None Include="project.json" /><None Include="docs\SERVER_ENGINE_ARCHITECTURE_V3.md" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

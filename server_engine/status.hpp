@@ -10,6 +10,7 @@ enum class status_code : std::uint32_t {
     configuration_failed,
     io_failed,
     invalid_argument,
+    semantic_conflict,
     not_found,
     persistence_failed,
     artifact_corrupt,

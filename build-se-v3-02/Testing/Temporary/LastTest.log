@@ -1,0 +1,18 @@
+Start testing: Sep 09 23:14 Eastern Daylight Time
+----------------------------------------------------------
+1/1 Testing: server_engine_foundation
+1/1 Test: server_engine_foundation
+Command: "C:/Boris/ServerEngine/build-se-v3-02/Release/server_engine_tests.exe"
+Directory: C:/Boris/ServerEngine/build-se-v3-02
+"server_engine_foundation" start time: Sep 09 23:14 Eastern Daylight Time
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.91 sec
+----------------------------------------------------------
+Test Passed.
+"server_engine_foundation" end time: Sep 09 23:14 Eastern Daylight Time
+"server_engine_foundation" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Sep 09 23:14 Eastern Daylight Time

@@ -50,6 +50,6 @@ int main(int argc, char** argv) {
     std::cout << "Server Engine foundation initialized\n";
     std::cout << "Project: " << context.configuration().name << '\n';
     std::cout << "Project items: " << context.configuration().project.size() << '\n';
-    std::cout << "Identity atoms: " << context.identities().size() << " (root only)\n";
+    std::cout << "Semantic identities: " << context.identity_count() << " (root only)\n";
     return 0;
 }

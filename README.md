@@ -2,34 +2,54 @@
 
 Clean Architecture V3 bootstrap for the Curtiss-Wright Server Engine project.
 
-This repository starts from the proven infrastructure contracts in `proninb/Server-Entry` (`main`) but deliberately does **not** carry the V2 Graph/Builder/Parser/stable-ID implementation forward.
+This repository reuses only proven foundation contracts from the former `Server-Entry` project. The V2 stable-ID, Builder, Graph, Parser, Runtime, and SHM implementations are not carried forward.
 
-## V3 foundation included
+## Current foundation
 
-- centralized diagnostics and deterministic diagnostic ordering;
+- centralized diagnostics;
 - strict transactional `server.json` loader;
 - strict transactional `project.json` loader;
 - Windows x64 / POSIX x64 ABI configuration;
-- minimal C++20 JSON SAX parser used by configuration loading;
-- Project Context skeleton;
-- Project-lifetime string registry;
-- Project-lifetime pointer identity registry;
-- stable-address `identity_node` atoms;
+- C++20 JSON SAX parser used by configuration loading;
+- Project Context;
+- Project Context-owned semantic identity space;
+- stable-address `identity_node` objects with Project-lifetime names;
+- one semantic declaration-resolution operation returning `identity_ref` directly;
 - no numeric semantic `stable_id`;
-- architecture baseline in `docs/SERVER_ENGINE_ARCHITECTURE_V3.md`;
-- CMake build/test path and Visual Studio 18 / v145 solution/project.
+- no Identity Registry or String Registry in the semantic path;
+- no `std::mutex` or `std::unordered_map` in Project semantic identity;
+- CMake and Visual Studio 18 / v145 builds.
 
-## Fundamental identity contract
+## SE-V3-02 semantic identity contract
 
-```text
-identity_node*   = semantic identity for one Project Context lifetime
-identity slot    = process-local acceleration only
-generation handle = location inside one immutable G generation
-serialized id    = file-local identity/reference during SAVE/LOAD
-SHM reference    = runtime-specific cross-process representation
+`project_context` owns Project-lifetime semantic identity.
+
+```cpp
+status project_context::resolve_declaration(
+    identity_ref parent,
+    std::string_view local_name,
+    identity_kind kind,
+    identity_ref& identity) noexcept;
 ```
 
-`identity_node` never contains a `graph*`, generation handle, definition, members, ABI layout, or any other generation-specific state.
+The operation returns the canonical `identity_ref` directly. The caller does not receive and must not depend on whether storage allocation occurred. There is no `created` flag.
+
+```text
+source-language semantic resolution
+              │
+              ▼
+        identity_node*
+              │
+              ├── Parser/source facts
+              ├── dependencies
+              └── Generation Builder
+```
+
+`identity_node*` means WHO. Generation-local handles mean WHERE in one `G`. Generation entries mean WHAT in that generation.
+
+`identity_node` never contains a Graph pointer, generation handle, definition state, ABI layout, members, or other generation-specific state.
+
+The backing arena is a storage primitive only. It owns stable Project-lifetime bytes and performs no name resolution, canonicalization, hashing, or identity lookup.
 
 ## Build
 
@@ -41,7 +61,7 @@ Open:
 ServerEngine.sln
 ```
 
-The project currently targets Visual Studio 18 toolset `v145`, C++20, x64.
+The project targets Visual Studio 18 toolset `v145`, C++20, x64.
 
 ### CMake
 
@@ -61,7 +81,7 @@ server_engine [server-configuration-path]
 
 If no path is supplied, `server.json` is used.
 
-The bootstrap currently performs:
+Current bootstrap flow:
 
 ```text
 server.json
@@ -69,22 +89,35 @@ server.json
     -> resolve project.json
     -> validate Project configuration
     -> create Project Context
-    -> create empty Project Identity Registry
+    -> create Project semantic identity root
 ```
 
-It intentionally does not yet create Source Manager, Parser, Generation Builder, Graph, persistence, Runtime, or SHM.
+Source Manager, Parser, Generation Builder, Graph, persistence, Runtime, and SHM are intentionally not implemented yet.
 
 ## Next implementation sequence
 
-1. Harden and benchmark Identity Registry / String Registry storage and concurrency.
-2. Define Source Manager V3 contracts and decide which V2 acquisition/persistence code is reusable without semantic coupling.
-3. Define Parser V3 output using direct `identity_ref` references.
-4. Implement Generation Builder and immutable `G0`.
-5. Implement dense generation handles and identity-slot-to-handle acceleration.
+1. Define Source Manager V3 ownership and dependency contracts.
+2. Integrate Parser semantic scope with `project_context::resolve_declaration()` so each source-language resolution returns `identity_ref` directly.
+3. Define transient source facts carrying direct identity references.
+4. Implement Generation Builder with zero name/identity lookup after semantic resolution.
+5. Implement immutable `G0` with dense generation-local handles.
 6. Implement `SAVE G0` / `LOAD G0` using file-local IDs; never serialize pointers.
 7. Implement sparse `Gn -> Gn+1` MVCC publication.
 8. Add client-query and SHM materialization boundaries.
 
 ## Provenance
 
-The Server configuration and Project configuration schemas, diagnostics concepts, status/operation/source identifiers, and strict loader behavior are based on the existing `proninb/Server-Entry` project. V3 source has been reorganized and cleaned so the new repository does not depend on the V2 `stable_id`, Builder, Graph, Frontend, Parser, Runtime, or SHM implementation.
+Configuration schemas, diagnostics concepts, status/operation/source identifiers, and strict loader behavior originate from the former `proninb/Server-Entry` foundation. V3 semantic identity is a new architecture.
+
+## SE-V3-03 identity scale benchmark
+
+Build `server_engine_identity_benchmark` and run `--gate` before attempting the full 10K/100K/1M matrix. The full benchmark intentionally uses a flat semantic scope so superlinear name-resolution behavior cannot be hidden by workload shape. See `docs/SE_V3_03_IDENTITY_SCALE_BENCHMARK.md`.
+
+
+## SE-V3-04 Semantic Scope Index
+
+Project semantic resolution uses one lock-free fixed bucket index instead of sibling-linear traversal. The 1M identity scale gate and concurrent arena memory-amplification gate must pass before Parser/Builder integration proceeds.
+
+## SE-V3-05 Identity Index Hardening
+
+`identity_space` exposes diagnostic-only collision-chain statistics without instrumenting the semantic hot path. Run `server_engine_identity_benchmark --hardening` to validate 1M sequential, patterned, same-prefix, and long identifiers, including exact canonical-pointer replay and structural collision/probe gates. After this gate passes, the Project semantic identity foundation is frozen and SE-V3-06 begins Source Manager + Parser integration.

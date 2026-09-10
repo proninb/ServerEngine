@@ -1,0 +1,7 @@
+C:\Boris\ServerEngine\server_engine\diagnostics\diagnostic_buffer.cpp;C:\Boris\ServerEngine\build-se-v3-02\server_engine_core.dir\Release\diagnostic_buffer.obj
+C:\Boris\ServerEngine\server_engine\json\json_parser.cpp;C:\Boris\ServerEngine\build-se-v3-02\server_engine_core.dir\Release\json_parser.obj
+C:\Boris\ServerEngine\server_engine\config\server_configuration_loader.cpp;C:\Boris\ServerEngine\build-se-v3-02\server_engine_core.dir\Release\server_configuration_loader.obj
+C:\Boris\ServerEngine\server_engine\project\project_configuration_loader.cpp;C:\Boris\ServerEngine\build-se-v3-02\server_engine_core.dir\Release\project_configuration_loader.obj
+C:\Boris\ServerEngine\server_engine\project\identity\identity_arena.cpp;C:\Boris\ServerEngine\build-se-v3-02\server_engine_core.dir\Release\identity_arena.obj
+C:\Boris\ServerEngine\server_engine\project\identity\identity_space.cpp;C:\Boris\ServerEngine\build-se-v3-02\server_engine_core.dir\Release\identity_space.obj
+C:\Boris\ServerEngine\server_engine\project\project_context.cpp;C:\Boris\ServerEngine\build-se-v3-02\server_engine_core.dir\Release\project_context.obj
