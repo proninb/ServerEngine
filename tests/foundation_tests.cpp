@@ -1374,6 +1374,245 @@ bool test_generation_builder_definition_conflict() {
            graph_value.type_count() == 0 && cache.statistics().sources == 0 && !builder.ready();
 }
 
+
+bool test_generation_builder_incremental_modify() {
+    project_configuration configuration;
+    project_context context{std::move(configuration)};
+    identity_ref a = nullptr;
+    identity_ref b = nullptr;
+    if (!context.resolve_declaration(context.identity_root(), "A", identity_kind::type, a).ok() ||
+        !context.resolve_declaration(context.identity_root(), "B", identity_kind::type, b).ok())
+        return false;
+
+    constexpr std::string_view empty_text = "x";
+    constexpr std::string_view member_text = "int x;";
+    const std::array<source_namespace_fact, 0> namespaces{};
+    const std::array<source_type_modifier, 0> modifiers{};
+    const std::array<source_enum_fact, 0> enums{};
+    const std::array<source_enum_value_fact, 0> values{};
+    const std::array<source_member_fact, 0> no_members{};
+
+    const std::array a0_records{
+        source_record_fact{a, {}, {0, 1}, source_record_declaration_kind::definition, source_record_kind::struct_type},
+    };
+    const std::array b0_records{
+        source_record_fact{b, {}, {0, 1}, source_record_declaration_kind::definition, source_record_kind::struct_type},
+    };
+    const std::array declarations{
+        source_declaration_ref{0, source_declaration_kind::record_type, {0, 1}},
+    };
+    const source_facts a0{source_id{1}, empty_text, namespaces, a0_records, no_members, modifiers, enums, values, declarations};
+    const source_facts b0{source_id{2}, empty_text, namespaces, b0_records, no_members, modifiers, enums, values, declarations};
+    const std::array initial{a0, b0};
+
+    source_contribution_cache cache;
+    graph graph_value;
+    diagnostic_buffer diagnostics;
+    generation_builder g0{cache, graph_value};
+    if (!g0.prepare_g0(initial, {}, operation_id{910}, diagnostics).ok())
+        return false;
+    g0.publish_prepared();
+    const auto a_handle = graph_value.type_at(0);
+    const auto b_handle = graph_value.type_at(1);
+    if (!a_handle || !b_handle || graph_value.generation() != 0)
+        return false;
+
+    const std::array members{
+        source_member_fact{
+            source_type_ref::builtin(intrinsic_type::signed_int, {}, {0, 3}),
+            {4, 1}, {0, 6}, source_member_access::public_access},
+    };
+    const std::array a1_records{
+        source_record_fact{a, {0, 1}, {0, 6}, source_record_declaration_kind::definition, source_record_kind::struct_type},
+    };
+    const std::array a1_declarations{
+        source_declaration_ref{0, source_declaration_kind::record_type, {0, 6}},
+    };
+    const source_facts a1{source_id{1}, member_text, namespaces, a1_records, members, modifiers, enums, values, a1_declarations};
+    const std::array replacements{a1};
+
+    diagnostic_buffer incremental_diagnostics;
+    generation_builder g1{cache, graph_value};
+    if (!g1.prepare_incremental(replacements, {}, {}, operation_id{911}, incremental_diagnostics).ok())
+        return false;
+    const auto telemetry = g1.telemetry();
+    if (telemetry.changed_sources != 1 || telemetry.changed_types != 1 ||
+        telemetry.graph_full_scans != 0 || telemetry.contribution_full_scans != 0)
+        return false;
+    g1.publish_prepared();
+
+    return graph_value.generation() == 1 && graph_value.type_count() == 2 &&
+        graph_value.type_at(0) == a_handle && graph_value.type_at(1) == b_handle &&
+        graph_value.members(a_handle).size() == 1 &&
+        graph_value.name(graph_value.members(a_handle)[0].name) == "x";
+}
+
+bool test_generation_builder_incremental_remove_add() {
+    project_configuration configuration;
+    project_context context{std::move(configuration)};
+    identity_ref a = nullptr;
+    if (!context.resolve_declaration(context.identity_root(), "A", identity_kind::type, a).ok())
+        return false;
+
+    constexpr std::string_view text = "x";
+    const std::array<source_namespace_fact, 0> namespaces{};
+    const std::array<source_member_fact, 0> members{};
+    const std::array<source_type_modifier, 0> modifiers{};
+    const std::array<source_enum_fact, 0> enums{};
+    const std::array<source_enum_value_fact, 0> values{};
+    const std::array records{
+        source_record_fact{a, {}, {0, 1}, source_record_declaration_kind::definition, source_record_kind::struct_type},
+    };
+    const std::array declarations{
+        source_declaration_ref{0, source_declaration_kind::record_type, {0, 1}},
+    };
+    const source_facts facts1{source_id{1}, text, namespaces, records, members, modifiers, enums, values, declarations};
+
+    source_contribution_cache cache;
+    graph graph_value;
+    diagnostic_buffer diagnostics;
+    generation_builder g0{cache, graph_value};
+    const std::array initial{facts1};
+    if (!g0.prepare_g0(initial, {}, operation_id{912}, diagnostics).ok())
+        return false;
+    g0.publish_prepared();
+    const auto original_handle = graph_value.type_at(0);
+    if (!original_handle)
+        return false;
+
+    const std::array removals{source_id{1}};
+    diagnostic_buffer remove_diagnostics;
+    generation_builder g1{cache, graph_value};
+    if (!g1.prepare_incremental({}, removals, {}, operation_id{913}, remove_diagnostics).ok())
+        return false;
+    g1.publish_prepared();
+    if (graph_value.generation() != 1 || graph_value.type_count() != 0 || graph_value.type_at(0))
+        return false;
+
+    const source_facts facts2{source_id{2}, text, namespaces, records, members, modifiers, enums, values, declarations};
+    const std::array replacements{facts2};
+    diagnostic_buffer add_diagnostics;
+    generation_builder g2{cache, graph_value};
+    if (!g2.prepare_incremental(replacements, {}, {}, operation_id{914}, add_diagnostics).ok())
+        return false;
+    if (g2.telemetry().graph_full_scans != 0 || g2.telemetry().added_types != 1)
+        return false;
+    g2.publish_prepared();
+
+    return graph_value.generation() == 2 && graph_value.type_count() == 1 &&
+        graph_value.type_at(0) == original_handle && graph_value.type_slot_count() == 1;
+}
+
+bool test_generation_builder_incremental_dangling_guard() {
+    project_configuration configuration;
+    project_context context{std::move(configuration)};
+    identity_ref a = nullptr;
+    identity_ref b = nullptr;
+    if (!context.resolve_declaration(context.identity_root(), "A", identity_kind::type, a).ok() ||
+        !context.resolve_declaration(context.identity_root(), "B", identity_kind::type, b).ok())
+        return false;
+
+    constexpr std::string_view a_text = "x";
+    constexpr std::string_view b_text = "A* b;";
+    const std::array<source_namespace_fact, 0> namespaces{};
+    const std::array<source_enum_fact, 0> enums{};
+    const std::array<source_enum_value_fact, 0> values{};
+    const std::array<source_member_fact, 0> no_members{};
+    const std::array<source_type_modifier, 0> no_modifiers{};
+    const std::array a_records{
+        source_record_fact{a, {}, {0, 1}, source_record_declaration_kind::definition, source_record_kind::struct_type},
+    };
+    const std::array declarations{
+        source_declaration_ref{0, source_declaration_kind::record_type, {0, 1}},
+    };
+    const source_facts a_facts{source_id{1}, a_text, namespaces, a_records, no_members, no_modifiers, enums, values, declarations};
+
+    const std::array modifiers{
+        source_type_modifier{0, source_type_modifier_kind::pointer},
+    };
+    const std::array b_members{
+        source_member_fact{
+            source_type_ref::semantic(a, {0, 1}, {0, 2}),
+            {3, 1}, {0, 5}, source_member_access::public_access},
+    };
+    const std::array b_records{
+        source_record_fact{b, {0, 1}, {0, 5}, source_record_declaration_kind::definition, source_record_kind::struct_type},
+    };
+    const std::array b_declarations{
+        source_declaration_ref{0, source_declaration_kind::record_type, {0, 5}},
+    };
+    const source_facts b_facts{source_id{2}, b_text, namespaces, b_records, b_members, modifiers, enums, values, b_declarations};
+    const std::array initial{a_facts, b_facts};
+
+    source_contribution_cache cache;
+    graph graph_value;
+    diagnostic_buffer diagnostics;
+    generation_builder g0{cache, graph_value};
+    if (!g0.prepare_g0(initial, {}, operation_id{915}, diagnostics).ok())
+        return false;
+    g0.publish_prepared();
+    const auto before_generation = graph_value.generation();
+    const auto before_types = graph_value.type_count();
+    const auto before_sources = cache.statistics().sources;
+
+    const std::array removals{source_id{1}};
+    diagnostic_buffer incremental_diagnostics;
+    generation_builder g1{cache, graph_value};
+    const auto result = g1.prepare_incremental({}, removals, {}, operation_id{916}, incremental_diagnostics);
+    return result.code == status_code::semantic_conflict && incremental_diagnostics.has_errors() &&
+        !g1.ready() && graph_value.generation() == before_generation &&
+        graph_value.type_count() == before_types && cache.statistics().sources == before_sources &&
+        g1.telemetry().validation_visited_types == 2;
+}
+
+bool test_generation_builder_incremental_conflict_rollback() {
+    project_configuration configuration;
+    project_context context{std::move(configuration)};
+    identity_ref a = nullptr;
+    if (!context.resolve_declaration(context.identity_root(), "A", identity_kind::type, a).ok())
+        return false;
+
+    constexpr std::string_view declaration_text = "struct A;";
+    constexpr std::string_view definition_text = "struct A{};";
+    const std::array<source_namespace_fact, 0> namespaces{};
+    const std::array<source_member_fact, 0> members{};
+    const std::array<source_type_modifier, 0> modifiers{};
+    const std::array<source_enum_fact, 0> enums{};
+    const std::array<source_enum_value_fact, 0> values{};
+    const std::array declaration_records{
+        source_record_fact{a, {}, {0, 9}, source_record_declaration_kind::declaration, source_record_kind::struct_type},
+    };
+    const std::array definition_records{
+        source_record_fact{a, {}, {0, 11}, source_record_declaration_kind::definition, source_record_kind::struct_type},
+    };
+    const std::array declaration_order{
+        source_declaration_ref{0, source_declaration_kind::record_type, {0, 9}},
+    };
+    const std::array definition_order{
+        source_declaration_ref{0, source_declaration_kind::record_type, {0, 11}},
+    };
+    const source_facts declaration{source_id{1}, declaration_text, namespaces, declaration_records, members, modifiers, enums, values, declaration_order};
+    const source_facts definition{source_id{2}, definition_text, namespaces, definition_records, members, modifiers, enums, values, definition_order};
+    const std::array initial{declaration, definition};
+
+    source_contribution_cache cache;
+    graph graph_value;
+    diagnostic_buffer diagnostics;
+    generation_builder g0{cache, graph_value};
+    if (!g0.prepare_g0(initial, {}, operation_id{917}, diagnostics).ok())
+        return false;
+    g0.publish_prepared();
+
+    const source_facts conflicting{source_id{1}, definition_text, namespaces, definition_records, members, modifiers, enums, values, definition_order};
+    const std::array replacements{conflicting};
+    diagnostic_buffer incremental_diagnostics;
+    generation_builder g1{cache, graph_value};
+    const auto result = g1.prepare_incremental(replacements, {}, {}, operation_id{918}, incremental_diagnostics);
+    return result.code == status_code::semantic_conflict && incremental_diagnostics.has_errors() &&
+        graph_value.generation() == 0 && graph_value.type_count() == 1 &&
+        cache.statistics().sources == 2 && !g1.ready();
+}
+
 using test_function = bool (*)();
 
 struct test_case {
@@ -1417,6 +1656,10 @@ constexpr std::array tests{
     test_case{"generation_builder_enum", &test_generation_builder_enum},
     test_case{"generation_builder_redeclaration", &test_generation_builder_redeclaration},
     test_case{"generation_builder_definition_conflict", &test_generation_builder_definition_conflict},
+    test_case{"generation_builder_incremental_modify", &test_generation_builder_incremental_modify},
+    test_case{"generation_builder_incremental_remove_add", &test_generation_builder_incremental_remove_add},
+    test_case{"generation_builder_incremental_dangling_guard", &test_generation_builder_incremental_dangling_guard},
+    test_case{"generation_builder_incremental_conflict_rollback", &test_generation_builder_incremental_conflict_rollback},
 };
 
 } // namespace

@@ -28,11 +28,22 @@ struct generation_build_telemetry final {
     std::uint64_t enum_values = 0;
     std::uint64_t canonical_type_refs = 0;
     std::uint64_t derived_type_refs = 0;
+
+    std::uint64_t changed_sources = 0;
+    std::uint64_t changed_types = 0;
+    std::uint64_t added_types = 0;
+    std::uint64_t removed_types = 0;
+    std::uint64_t validation_visited_types = 0;
+    std::uint64_t validation_visited_type_refs = 0;
+    std::uint64_t validation_dependency_edges = 0;
+    std::uint64_t graph_full_scans = 0;
+    std::uint64_t contribution_full_scans = 0;
 };
 
-// Builds one detached Graph generation directly from Parser-resolved identity_ref
-// values. No source-language/name lookup, stable ID allocation, String Registry,
-// semantic sorting, or committed Graph mutation occurs before publish_prepared().
+// Builds detached G0 or a sparse Gn -> Gn+1 candidate directly from Parser-
+// resolved identity_ref values. Builder performs no source-language/name lookup,
+// stable ID allocation, String Registry canonicalization, semantic sort, or
+// mutex-based shared mutation.
 class generation_builder final {
 public:
     generation_builder(
@@ -50,8 +61,18 @@ public:
         operation_id operation,
         diagnostic_buffer& diagnostics) noexcept;
 
-    // O(1) vector swaps only. Every allocation-sensitive operation and semantic
-    // validation has completed before this no-fail publication barrier.
+    // replacements are complete new facts for modified/added Sources. removals
+    // contain Sources absent from the candidate Project generation. A Source may
+    // appear in exactly one input set.
+    [[nodiscard]] status prepare_incremental(
+        std::span<const source_facts> replacements,
+        std::span<const source_id> removals,
+        const abi_configuration& abi,
+        operation_id operation,
+        diagnostic_buffer& diagnostics) noexcept;
+
+    // Publication performs only pre-reserved append/patch operations or detached
+    // swaps. All allocation-sensitive work and validation is complete beforehand.
     void publish_prepared() noexcept;
 
     [[nodiscard]] bool ready() const noexcept { return prepared; }
@@ -59,15 +80,30 @@ public:
     [[nodiscard]] const generation_build_telemetry& telemetry() const noexcept { return telemetry_value; }
 
 private:
+    enum class build_mode : std::uint8_t {
+        none,
+        rebuild,
+        incremental,
+    };
+
     [[nodiscard]] status prepare_graph(
         const abi_configuration& abi,
         operation_id operation,
         diagnostic_buffer& diagnostics) noexcept;
 
+    [[nodiscard]] status prepare_incremental_graph(
+        const abi_configuration& abi,
+        operation_id operation,
+        diagnostic_buffer& diagnostics) noexcept;
+
+    source_contribution_cache& contribution_cache;
     source_contribution_cache_update contributions;
+    source_contribution_sparse_update sparse_contributions;
     graph& target;
     prepared_graph_generation prepared_graph;
+    prepared_graph_update prepared_update;
     generation_build_telemetry telemetry_value{};
+    build_mode mode = build_mode::none;
     bool prepared = false;
     bool published_value = false;
 };

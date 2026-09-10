@@ -5,6 +5,7 @@
 #include "../frontend/source_facts.hpp"
 #include "../identity/identity_node.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -15,6 +16,9 @@
 namespace cw::server {
 
 class generation_builder;
+
+inline constexpr std::size_t graph_intrinsic_type_count =
+    static_cast<std::size_t>(intrinsic_type::nullptr_type) + 1;
 
 struct graph_name_ref final {
     std::uint32_t offset = 0;
@@ -34,8 +38,8 @@ enum class graph_type_kind : std::uint8_t {
     enumeration,
 };
 
-// Generation-local hot semantic state. identity_ref is intentionally stored in a
-// parallel cold array so execution-facing scans do not pull identity pointers.
+// Generation-local hot semantic state. A tombstone retains its historical
+// handle/identity mapping but is not a live type in the current generation.
 struct type_entry final {
     definition_range definition{};
     graph_type_kind kind = graph_type_kind::record;
@@ -46,6 +50,7 @@ struct type_entry final {
     [[nodiscard]] constexpr bool defined() const noexcept { return definition.valid(); }
     [[nodiscard]] constexpr bool enum_scoped() const noexcept { return (flags & 0x01u) != 0; }
     [[nodiscard]] constexpr bool enum_fixed_underlying() const noexcept { return (flags & 0x02u) != 0; }
+    [[nodiscard]] constexpr bool live() const noexcept { return (flags & 0x80u) != 0; }
 };
 
 static_assert(sizeof(type_entry) == 12);
@@ -68,6 +73,44 @@ struct enum_value_record final {
 
 static_assert(sizeof(enum_value_record) == 24);
 
+// Eight-byte acceleration slots retained by Graph so incremental Builder can
+// map already-resolved identity_ref directly to a historical type_handle.
+struct graph_identity_index_slot final {
+    std::uint32_t fingerprint = 0;
+    std::uint32_t handle = 0;
+};
+
+static_assert(sizeof(graph_identity_index_slot) == 8);
+
+struct graph_derived_index_slot final {
+    std::uint32_t fingerprint = 0;
+    std::uint32_t type_ref = 0;
+};
+
+static_assert(sizeof(graph_derived_index_slot) == 8);
+
+// Append-only reverse dependency edge. owner_version makes prior outgoing edges
+// stale in O(1) when a type definition changes; G0 reclaims stale history.
+struct graph_dependency_edge final {
+    std::uint32_t owner_handle = 0;
+    std::uint32_t next_for_target = 0;
+    std::uint32_t owner_version = 0;
+};
+
+static_assert(sizeof(graph_dependency_edge) == 12);
+
+// Canonical TypeRef payload shared by detached G0 and sparse incremental
+// candidates. Named records hold a type_handle; derived records hold child ref.
+struct graph_canonical_type_record final {
+    std::uint64_t payload = 0;
+    std::uint32_t child_or_handle = 0;
+    canonical_type_kind kind = canonical_type_kind::intrinsic;
+    std::uint8_t detail = 0;
+    std::uint16_t reserved = 0;
+};
+
+static_assert(sizeof(graph_canonical_type_record) == 16);
+
 // Detached complete storage for one generation. Generation Builder performs all
 // allocation and validation here; Graph publication is a no-fail swap only.
 class prepared_graph_generation final {
@@ -79,31 +122,94 @@ public:
     prepared_graph_generation& operator=(prepared_graph_generation&&) noexcept = default;
 
 private:
-    struct canonical_type_record final {
-        std::uint64_t payload = 0;
-        std::uint32_t child_or_handle = 0;
-        canonical_type_kind kind = canonical_type_kind::intrinsic;
-        std::uint8_t detail = 0;
-        std::uint16_t reserved = 0;
-    };
-
-    static_assert(sizeof(canonical_type_record) == 16);
-
     std::vector<type_entry> types;
     std::vector<identity_ref> identities;
     std::vector<member_record> members;
     std::vector<enum_value_record> enum_values;
     std::vector<char> names;
-    std::vector<canonical_type_record> canonical_types;
+    std::vector<graph_canonical_type_record> canonical_types;
+
+    std::vector<graph_identity_index_slot> identity_index;
+    std::array<TypeRef, graph_intrinsic_type_count> intrinsic_refs{};
+    std::vector<TypeRef> named_refs;
+    std::vector<graph_derived_index_slot> derived_index;
+    std::size_t derived_index_entries = 0;
+
+    std::vector<std::uint32_t> dependency_versions;
+    std::vector<std::uint32_t> reverse_dependency_heads;
+    std::vector<graph_dependency_edge> dependency_edges;
+
+    std::size_t live_type_count = 0;
     std::uint64_t generation = 0;
 
     friend class graph;
     friend class generation_builder;
 };
 
-// Owns one immutable committed semantic Graph generation. Graph maps generation-
-// local handles to Project-lifetime identity_ref; it never provides reverse
-// identity->generation lookup and never owns Project semantic identity.
+// Sparse prepared mutation of one committed Graph lineage. Only touched type
+// slots and append-only arenas are retained here. All owner capacity growth and
+// optional index rehashing are completed before publication.
+class prepared_graph_update final {
+public:
+    prepared_graph_update() = default;
+    prepared_graph_update(const prepared_graph_update&) = delete;
+    prepared_graph_update& operator=(const prepared_graph_update&) = delete;
+    prepared_graph_update(prepared_graph_update&&) noexcept = default;
+    prepared_graph_update& operator=(prepared_graph_update&&) noexcept = default;
+
+private:
+    struct type_patch final {
+        std::uint32_t handle = 0;
+        type_entry value{};
+    };
+
+    struct named_ref_patch final {
+        std::uint32_t handle = 0;
+        TypeRef value{};
+    };
+
+    struct dependency_version_patch final {
+        std::uint32_t handle = 0;
+        std::uint32_t version = 0;
+    };
+
+    struct pending_dependency_edge final {
+        std::uint32_t target_handle = 0;
+        std::uint32_t owner_handle = 0;
+        std::uint32_t owner_version = 0;
+    };
+
+    std::vector<type_patch> type_patches;
+    std::vector<type_entry> new_types;
+    std::vector<identity_ref> new_identities;
+
+    std::vector<member_record> members;
+    std::vector<enum_value_record> enum_values;
+    std::vector<char> names;
+    std::vector<graph_canonical_type_record> canonical_types;
+
+    std::array<TypeRef, graph_intrinsic_type_count> intrinsic_refs{};
+    std::vector<named_ref_patch> named_ref_patches;
+
+    std::vector<dependency_version_patch> dependency_version_patches;
+    std::vector<pending_dependency_edge> dependency_edges;
+
+    std::vector<graph_identity_index_slot> rebuilt_identity_index;
+    std::vector<graph_derived_index_slot> rebuilt_derived_index;
+    std::size_t derived_index_entries = 0;
+
+    std::size_t live_type_count = 0;
+    std::uint64_t generation = 0;
+    bool replace_identity_index = false;
+    bool replace_derived_index = false;
+
+    friend class graph;
+    friend class generation_builder;
+};
+
+// Owns one immutable committed semantic Graph generation. Graph owns only
+// generation state plus private acceleration indexes; Project semantic identity
+// remains owned by Project Context and has no reverse pointer into Graph.
 class graph final {
 public:
     graph() noexcept = default;
@@ -114,7 +220,8 @@ public:
     graph& operator=(graph&&) = delete;
 
     [[nodiscard]] std::uint64_t generation() const noexcept { return generation_value; }
-    [[nodiscard]] std::size_t type_count() const noexcept { return types.size(); }
+    [[nodiscard]] std::size_t type_count() const noexcept { return live_type_count; }
+    [[nodiscard]] std::size_t type_slot_count() const noexcept { return types.size(); }
     [[nodiscard]] std::size_t member_record_count() const noexcept { return member_records.size(); }
     [[nodiscard]] std::size_t enum_value_record_count() const noexcept { return enum_value_records.size(); }
     [[nodiscard]] std::size_t canonical_type_count() const noexcept {
@@ -136,16 +243,32 @@ public:
     [[nodiscard]] bool derived(TypeRef type, derived_type_record& output) const noexcept;
 
 private:
-    using canonical_type_record = prepared_graph_generation::canonical_type_record;
-
     void publish_prepared(prepared_graph_generation& prepared) noexcept;
+    void publish_prepared(prepared_graph_update& prepared) noexcept;
+
+    [[nodiscard]] type_handle find_identity(identity_ref identity) const noexcept;
+    [[nodiscard]] identity_ref identity_raw(type_handle handle) const noexcept;
+    [[nodiscard]] const type_entry* find_raw(type_handle handle) const noexcept;
+    [[nodiscard]] bool named_raw(TypeRef type, type_handle& output) const noexcept;
 
     std::vector<type_entry> types;
     std::vector<identity_ref> identities;
     std::vector<member_record> member_records;
     std::vector<enum_value_record> enum_value_records;
     std::vector<char> names;
-    std::vector<canonical_type_record> canonical_types;
+    std::vector<graph_canonical_type_record> canonical_types;
+
+    std::vector<graph_identity_index_slot> identity_index;
+    std::array<TypeRef, graph_intrinsic_type_count> intrinsic_refs{};
+    std::vector<TypeRef> named_refs;
+    std::vector<graph_derived_index_slot> derived_index;
+    std::size_t derived_index_entries = 0;
+
+    std::vector<std::uint32_t> dependency_versions;
+    std::vector<std::uint32_t> reverse_dependency_heads;
+    std::vector<graph_dependency_edge> dependency_edges;
+
+    std::size_t live_type_count = 0;
     std::uint64_t generation_value = 0;
 
     friend class generation_builder;
