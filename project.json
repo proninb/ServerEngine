@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "Example",
+  "project": [],
+  "configuration": {
+    "abi": {
+      "target": "windows-x64",
+      "pack": 8
+    }
+  }
+}
