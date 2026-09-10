@@ -1,6 +1,7 @@
 #include "../server_engine/config/server_configuration_loader.hpp"
 #include "../server_engine/project/project_configuration_loader.hpp"
 #include "../server_engine/project/project_context.hpp"
+#include "../server_engine/project/project_build_orchestrator.hpp"
 #include "../server_engine/project/frontend/source_facts_validation.hpp"
 #include "../server_engine/project/frontend/include_discovery.hpp"
 #include "../server_engine/project/frontend/source_frontend_generation.hpp"
@@ -1414,7 +1415,7 @@ bool test_generation_builder_incremental_modify() {
     g0.publish_prepared();
     const auto a_handle = graph_value.type_at(0);
     const auto b_handle = graph_value.type_at(1);
-    if (!a_handle || !b_handle || graph_value.generation() != 0)
+    if (!a_handle || !b_handle)
         return false;
 
     const std::array members{
@@ -1441,7 +1442,7 @@ bool test_generation_builder_incremental_modify() {
         return false;
     g1.publish_prepared();
 
-    return graph_value.generation() == 1 && graph_value.type_count() == 2 &&
+    return graph_value.type_count() == 2 &&
         graph_value.type_at(0) == a_handle && graph_value.type_at(1) == b_handle &&
         graph_value.members(a_handle).size() == 1 &&
         graph_value.name(graph_value.members(a_handle)[0].name) == "x";
@@ -1486,7 +1487,7 @@ bool test_generation_builder_incremental_remove_add() {
     if (!g1.prepare_incremental({}, removals, {}, operation_id{913}, remove_diagnostics).ok())
         return false;
     g1.publish_prepared();
-    if (graph_value.generation() != 1 || graph_value.type_count() != 0 || graph_value.type_at(0))
+    if (graph_value.type_count() != 0 || graph_value.type_at(0))
         return false;
 
     const source_facts facts2{source_id{2}, text, namespaces, records, members, modifiers, enums, values, declarations};
@@ -1499,7 +1500,7 @@ bool test_generation_builder_incremental_remove_add() {
         return false;
     g2.publish_prepared();
 
-    return graph_value.generation() == 2 && graph_value.type_count() == 1 &&
+    return graph_value.type_count() == 1 &&
         graph_value.type_at(0) == original_handle && graph_value.type_slot_count() == 1;
 }
 
@@ -1551,7 +1552,6 @@ bool test_generation_builder_incremental_dangling_guard() {
     if (!g0.prepare_g0(initial, {}, operation_id{915}, diagnostics).ok())
         return false;
     g0.publish_prepared();
-    const auto before_generation = graph_value.generation();
     const auto before_types = graph_value.type_count();
     const auto before_sources = cache.statistics().sources;
 
@@ -1560,7 +1560,7 @@ bool test_generation_builder_incremental_dangling_guard() {
     generation_builder g1{cache, graph_value};
     const auto result = g1.prepare_incremental({}, removals, {}, operation_id{916}, incremental_diagnostics);
     return result.code == status_code::semantic_conflict && incremental_diagnostics.has_errors() &&
-        !g1.ready() && graph_value.generation() == before_generation &&
+        !g1.ready() &&
         graph_value.type_count() == before_types && cache.statistics().sources == before_sources &&
         g1.telemetry().validation_visited_types == 2;
 }
@@ -1609,8 +1609,505 @@ bool test_generation_builder_incremental_conflict_rollback() {
     generation_builder g1{cache, graph_value};
     const auto result = g1.prepare_incremental(replacements, {}, {}, operation_id{918}, incremental_diagnostics);
     return result.code == status_code::semantic_conflict && incremental_diagnostics.has_errors() &&
-        graph_value.generation() == 0 && graph_value.type_count() == 1 &&
+        graph_value.type_count() == 1 &&
         cache.statistics().sources == 2 && !g1.ready();
+}
+
+
+
+[[nodiscard]] type_handle find_graph_type_by_name(const graph& graph_value, std::string_view name) {
+    for (std::size_t index = 0; index < graph_value.type_slot_count(); ++index) {
+        const auto handle = graph_value.type_at(index);
+        if (!handle)
+            continue;
+        const auto identity = graph_value.identity(handle);
+        if (identity != nullptr && identity->name().view() == name)
+            return handle;
+    }
+    return {};
+}
+
+bool test_project_build_orchestrator_full() {
+    const auto directory = std::filesystem::temp_directory_path() / "server_engine_v308_full";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto b_path = directory / "b.hpp";
+    const auto a_path = directory / "a.hpp";
+    { std::ofstream b(b_path); b << "struct B;"; }
+    { std::ofstream a(a_path); a << "#include \"b.hpp\"\nstruct A { B* value; };"; }
+
+    project_configuration configuration;
+    configuration.version = 1;
+    configuration.name = "E2E";
+    configuration.project.push_back(project_item_configuration{a_path, project_item_role::type});
+    project_context context{std::move(configuration)};
+    project_build_orchestrator orchestrator{context, 2};
+    diagnostic_buffer diagnostics;
+    project_build_result build;
+    const auto result = orchestrator.rebuild(operation_id{1001}, diagnostics, build);
+    if (!result.ok() || diagnostics.has_errors()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    std::string normalized_a;
+    std::string normalized_b;
+    source_id a_source;
+    source_id b_source;
+    const bool resolved = normalize_source_path(a_path, normalized_a).ok() &&
+        normalize_source_path(b_path, normalized_b).ok() &&
+        context.sources().find(normalized_a, a_source).ok() &&
+        context.sources().find(normalized_b, b_source).ok();
+
+    const auto a_handle = find_graph_type_by_name(context.compiled_graph(), "A");
+    const auto b_handle = find_graph_type_by_name(context.compiled_graph(), "B");
+    const auto b_dependents = context.sources().dependents(b_source);
+    const bool pass = resolved && a_source && b_source && a_source != b_source &&
+        context.sources().source_count() == 2 && context.compiled_graph().type_count() == 2 &&
+        a_handle && b_handle && context.frontend_cache().complete() &&
+        context.frontend_cache().interface(a_source) != nullptr &&
+        context.frontend_cache().interface(b_source) != nullptr &&
+        b_dependents.size() == 1 && b_dependents.front() == a_source &&
+        build.changed && build.telemetry.frontend.parsed == 2;
+
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+bool test_project_build_orchestrator_incremental() {
+    const auto directory = std::filesystem::temp_directory_path() / "server_engine_v308_incremental";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto b_path = directory / "b.hpp";
+    const auto a_path = directory / "a.hpp";
+    { std::ofstream b(b_path); b << "struct B;"; }
+    { std::ofstream a(a_path); a << "#include \"b.hpp\"\nstruct A { B* value; };"; }
+
+    project_configuration configuration;
+    configuration.version = 1;
+    configuration.name = "E2E";
+    configuration.project.push_back(project_item_configuration{a_path, project_item_role::type});
+    project_context context{std::move(configuration)};
+    project_build_orchestrator orchestrator{context, 2};
+    diagnostic_buffer diagnostics;
+    project_build_result full;
+    if (!orchestrator.rebuild(operation_id{1002}, diagnostics, full).ok() || diagnostics.has_errors()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    std::string normalized_b;
+    source_id b_source;
+    if (!normalize_source_path(b_path, normalized_b).ok() ||
+        !context.sources().find(normalized_b, b_source).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    const auto a_handle_before = find_graph_type_by_name(context.compiled_graph(), "A");
+    const auto b_handle_before = find_graph_type_by_name(context.compiled_graph(), "B");
+    { std::ofstream b(b_path, std::ios::trunc); b << "struct B { int count; };"; }
+
+    diagnostics.clear();
+    project_build_result update;
+    const std::array dirty{b_source};
+    const auto result = orchestrator.update(dirty, operation_id{1003}, diagnostics, update);
+    const auto a_handle_after = find_graph_type_by_name(context.compiled_graph(), "A");
+    const auto b_handle_after = find_graph_type_by_name(context.compiled_graph(), "B");
+    const auto b_members = context.compiled_graph().members(b_handle_after);
+
+    const bool pass = result.ok() && !diagnostics.has_errors() && update.changed &&
+        update.telemetry.frontend.dirty == 1 && update.telemetry.frontend.changed == 1 &&
+        update.telemetry.frontend.affected == 2 && update.telemetry.frontend.acquired == 1 &&
+        update.telemetry.frontend.parsed == 2 &&
+        update.telemetry.builder.graph_full_scans == 0 &&
+        update.telemetry.builder.contribution_full_scans == 0 &&
+        update.telemetry.sources.source_graph_full_scans == 0 &&
+        update.telemetry.sources.path_index_full_rebuilds == 0 &&
+        a_handle_before == a_handle_after && b_handle_before == b_handle_after &&
+        b_members.size() == 1 && context.compiled_graph().name(b_members.front().name) == "count";
+
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+bool test_project_build_orchestrator_no_change() {
+    const auto directory = std::filesystem::temp_directory_path() / "server_engine_v308_no_change";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto path = directory / "a.hpp";
+    { std::ofstream file(path); file << "struct A;"; }
+
+    project_configuration configuration;
+    configuration.version = 1;
+    configuration.name = "E2E";
+    configuration.project.push_back(project_item_configuration{path, project_item_role::type});
+    project_context context{std::move(configuration)};
+    project_build_orchestrator orchestrator{context, 1};
+    diagnostic_buffer diagnostics;
+    project_build_result full;
+    if (!orchestrator.rebuild(operation_id{1004}, diagnostics, full).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    std::string normalized;
+    source_id source;
+    if (!normalize_source_path(path, normalized).ok() || !context.sources().find(normalized, source).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    project_build_result update;
+    const std::array dirty{source};
+    const auto result = orchestrator.update(dirty, operation_id{1005}, diagnostics, update);
+    const bool pass = result.ok() && !update.changed &&
+        update.telemetry.frontend.changed == 0 && update.telemetry.frontend.parsed == 0 &&
+        context.compiled_graph().type_count() == 1;
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+bool test_project_build_orchestrator_failure_rollback() {
+    const auto directory = std::filesystem::temp_directory_path() / "server_engine_v308_rollback";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto path = directory / "a.hpp";
+    { std::ofstream file(path); file << "struct A { int value; };"; }
+
+    project_configuration configuration;
+    configuration.version = 1;
+    configuration.name = "E2E";
+    configuration.project.push_back(project_item_configuration{path, project_item_role::type});
+    project_context context{std::move(configuration)};
+    project_build_orchestrator orchestrator{context, 1};
+    diagnostic_buffer diagnostics;
+    project_build_result full;
+    if (!orchestrator.rebuild(operation_id{1006}, diagnostics, full).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    std::string normalized;
+    source_id source;
+    if (!normalize_source_path(path, normalized).ok() || !context.sources().find(normalized, source).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    const auto committed_snapshot = context.sources().current(source);
+    const auto handle = find_graph_type_by_name(context.compiled_graph(), "A");
+    const auto before_members = context.compiled_graph().members(handle).size();
+    const auto* before_interface = context.frontend_cache().interface(source);
+    { std::ofstream file(path, std::ios::trunc); file << "#define X 1\nstruct A { int changed; };"; }
+
+    diagnostics.clear();
+    project_build_result update;
+    const std::array dirty{source};
+    const auto result = orchestrator.update(dirty, operation_id{1007}, diagnostics, update);
+    const auto after_snapshot = context.sources().current(source);
+    const bool pass = !result.ok() && diagnostics.has_errors() &&
+        after_snapshot && committed_snapshot && after_snapshot.hash() == committed_snapshot.hash() &&
+        context.compiled_graph().members(handle).size() == before_members &&
+        context.frontend_cache().interface(source) == before_interface;
+
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+
+
+bool test_project_build_orchestrator_new_include() {
+    const auto directory = std::filesystem::temp_directory_path() / "server_engine_v308_new_include";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto a_path = directory / "a.hpp";
+    const auto b_path = directory / "b.hpp";
+    { std::ofstream a(a_path); a << "struct A;"; }
+    { std::ofstream b(b_path); b << "struct B;"; }
+
+    project_configuration configuration;
+    configuration.version = 1;
+    configuration.name = "E2E";
+    configuration.project.push_back(project_item_configuration{a_path, project_item_role::type});
+    project_context context{std::move(configuration)};
+    project_build_orchestrator orchestrator{context, 2};
+    diagnostic_buffer diagnostics;
+    project_build_result full;
+    if (!orchestrator.rebuild(operation_id{1008}, diagnostics, full).ok() ||
+        context.sources().source_count() != 1) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    std::string normalized_a;
+    source_id a_source;
+    if (!normalize_source_path(a_path, normalized_a).ok() ||
+        !context.sources().find(normalized_a, a_source).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    { std::ofstream a(a_path, std::ios::trunc); a << "#include \"b.hpp\"\nstruct A { B* value; };"; }
+    diagnostics.clear();
+    project_build_result update;
+    const std::array dirty{a_source};
+    const auto result = orchestrator.update(dirty, operation_id{1009}, diagnostics, update);
+
+    std::string normalized_b;
+    source_id b_source;
+    const bool resolved_b = normalize_source_path(b_path, normalized_b).ok() &&
+        context.sources().find(normalized_b, b_source).ok();
+    const auto b_dependents = context.sources().dependents(b_source);
+    const bool pass = result.ok() && !diagnostics.has_errors() && resolved_b &&
+        context.sources().source_count() == 2 && context.compiled_graph().type_count() == 2 &&
+        update.telemetry.frontend.acquired == 2 && update.telemetry.frontend.parsed == 2 &&
+        update.telemetry.sources.path_index_full_rebuilds == 0 &&
+        update.telemetry.sources.source_graph_full_scans == 0 &&
+        b_dependents.size() == 1 && b_dependents.front() == a_source &&
+        context.frontend_cache().interface(b_source) != nullptr;
+
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+bool test_project_build_orchestrator_remove_leaf() {
+    const auto directory = std::filesystem::temp_directory_path() / "server_engine_v308_remove_leaf";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto path = directory / "a.hpp";
+    { std::ofstream file(path); file << "struct A;"; }
+    project_configuration configuration;
+    configuration.version = 1;
+    configuration.name = "E2E";
+    configuration.project.push_back(project_item_configuration{path, project_item_role::type});
+    project_context context{std::move(configuration)};
+    project_build_orchestrator orchestrator{context, 1};
+    diagnostic_buffer diagnostics;
+    project_build_result full;
+    if (!orchestrator.rebuild(operation_id{1010}, diagnostics, full).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    std::string normalized;
+    source_id source;
+    if (!normalize_source_path(path, normalized).ok() || !context.sources().find(normalized, source).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+    std::filesystem::remove(path, error);
+    if (error) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    diagnostics.clear();
+    project_build_result update;
+    const std::array dirty{source};
+    const auto result = orchestrator.update(dirty, operation_id{1011}, diagnostics, update);
+    const bool pass = result.ok() && update.changed &&
+        context.compiled_graph().type_count() == 0 && !context.sources().current(source) &&
+        context.frontend_cache().interface(source) == nullptr &&
+        update.telemetry.frontend.changed == 1 && update.telemetry.frontend.affected == 1 &&
+        update.telemetry.sources.source_graph_full_scans == 0;
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+bool test_project_build_orchestrator_builder_conflict_rollback() {
+    const auto directory = std::filesystem::temp_directory_path() / "server_engine_v308_builder_rollback";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto a_path = directory / "a.hpp";
+    const auto b_path = directory / "b.hpp";
+    { std::ofstream b(b_path); b << "struct B {};"; }
+    { std::ofstream a(a_path); a << "#include \"b.hpp\"\nstruct A;"; }
+
+    project_configuration configuration;
+    configuration.version = 1;
+    configuration.name = "E2E";
+    configuration.project.push_back(project_item_configuration{a_path, project_item_role::type});
+    project_context context{std::move(configuration)};
+    project_build_orchestrator orchestrator{context, 2};
+    diagnostic_buffer diagnostics;
+    project_build_result full;
+    if (!orchestrator.rebuild(operation_id{1012}, diagnostics, full).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    std::string normalized_a;
+    source_id a_source;
+    if (!normalize_source_path(a_path, normalized_a).ok() ||
+        !context.sources().find(normalized_a, a_source).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    const auto committed_snapshot = context.sources().current(a_source);
+    const auto b_handle = find_graph_type_by_name(context.compiled_graph(), "B");
+    const auto before_types = context.compiled_graph().type_count();
+    const auto* before_interface = context.frontend_cache().interface(a_source);
+    { std::ofstream a(a_path, std::ios::trunc); a << "#include \"b.hpp\"\nstruct B {};"; }
+
+    diagnostics.clear();
+    project_build_result update;
+    const std::array dirty{a_source};
+    const auto result = orchestrator.update(dirty, operation_id{1013}, diagnostics, update);
+    const auto after_snapshot = context.sources().current(a_source);
+    const bool pass = result.code == status_code::semantic_conflict && diagnostics.has_errors() &&
+        committed_snapshot && after_snapshot && committed_snapshot.hash() == after_snapshot.hash() &&
+        context.compiled_graph().type_count() == before_types &&
+        find_graph_type_by_name(context.compiled_graph(), "B") == b_handle &&
+        context.frontend_cache().interface(a_source) == before_interface;
+
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+
+
+bool test_project_build_orchestrator_semantic_noop() {
+    const auto directory = std::filesystem::temp_directory_path() / "server_engine_v308_semantic_noop";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto path = directory / "a.hpp";
+    { std::ofstream file(path); file << "struct A;"; }
+    project_configuration configuration;
+    configuration.version = 1;
+    configuration.name = "E2E";
+    configuration.project.push_back(project_item_configuration{path, project_item_role::type});
+    project_context context{std::move(configuration)};
+    project_build_orchestrator orchestrator{context, 1};
+    diagnostic_buffer diagnostics;
+    project_build_result full;
+    if (!orchestrator.rebuild(operation_id{1014}, diagnostics, full).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    std::string normalized;
+    source_id source;
+    if (!normalize_source_path(path, normalized).ok() || !context.sources().find(normalized, source).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+    const auto handle = find_graph_type_by_name(context.compiled_graph(), "A");
+    const auto before_hash = context.sources().current(source).hash();
+    { std::ofstream file(path, std::ios::trunc); file << "\nstruct A;\n"; }
+
+    diagnostics.clear();
+    project_build_result update;
+    const std::array dirty{source};
+    const auto result = orchestrator.update(dirty, operation_id{1015}, diagnostics, update);
+    const bool pass = result.ok() && !diagnostics.has_errors() && update.changed &&
+        update.telemetry.frontend.changed == 1 && update.telemetry.frontend.parsed == 1 &&
+        update.telemetry.builder.changed_sources == 0 && update.telemetry.builder.changed_types == 0 &&
+        update.telemetry.builder_prepare_ns == 0 &&
+        context.compiled_graph().type_count() == 1 &&
+        find_graph_type_by_name(context.compiled_graph(), "A") == handle &&
+        context.sources().current(source).hash() != before_hash;
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+bool test_project_build_orchestrator_reverse_edge_replacement() {
+    const auto directory = std::filesystem::temp_directory_path() / "server_engine_v308_edge_replace";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto a_path = directory / "a.hpp";
+    const auto b_path = directory / "b.hpp";
+    const auto c_path = directory / "c.hpp";
+    { std::ofstream b(b_path); b << "struct B;"; }
+    { std::ofstream c(c_path); c << "struct C;"; }
+    { std::ofstream a(a_path); a << "#include \"b.hpp\"\nstruct A { B* value; };"; }
+
+    project_configuration configuration;
+    configuration.version = 1;
+    configuration.name = "E2E";
+    configuration.project.push_back(project_item_configuration{a_path, project_item_role::type});
+    configuration.project.push_back(project_item_configuration{c_path, project_item_role::type});
+    project_context context{std::move(configuration)};
+    project_build_orchestrator orchestrator{context, 2};
+    diagnostic_buffer diagnostics;
+    project_build_result full;
+    if (!orchestrator.rebuild(operation_id{1016}, diagnostics, full).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    std::string normalized_a;
+    std::string normalized_b;
+    std::string normalized_c;
+    source_id a_source;
+    source_id b_source;
+    source_id c_source;
+    if (!normalize_source_path(a_path, normalized_a).ok() ||
+        !normalize_source_path(b_path, normalized_b).ok() ||
+        !normalize_source_path(c_path, normalized_c).ok() ||
+        !context.sources().find(normalized_a, a_source).ok() ||
+        !context.sources().find(normalized_b, b_source).ok() ||
+        !context.sources().find(normalized_c, c_source).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+    if (context.sources().dependents(b_source).size() != 1 ||
+        context.sources().dependents(c_source).size() != 0) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    { std::ofstream a(a_path, std::ios::trunc); a << "#include \"c.hpp\"\nstruct A { C* value; };"; }
+    diagnostics.clear();
+    project_build_result update;
+    const std::array dirty{a_source};
+    const auto result = orchestrator.update(dirty, operation_id{1017}, diagnostics, update);
+    const auto b_dependents = context.sources().dependents(b_source);
+    const auto c_dependents = context.sources().dependents(c_source);
+    const bool pass = result.ok() && !diagnostics.has_errors() &&
+        b_dependents.empty() && c_dependents.size() == 1 && c_dependents.front() == a_source &&
+        update.telemetry.sources.reverse_edge_patches == 2 &&
+        update.telemetry.sources.path_index_full_rebuilds == 0 &&
+        update.telemetry.sources.source_graph_full_scans == 0;
+    std::filesystem::remove_all(directory, error);
+    return pass;
 }
 
 using test_function = bool (*)();
@@ -1660,6 +2157,15 @@ constexpr std::array tests{
     test_case{"generation_builder_incremental_remove_add", &test_generation_builder_incremental_remove_add},
     test_case{"generation_builder_incremental_dangling_guard", &test_generation_builder_incremental_dangling_guard},
     test_case{"generation_builder_incremental_conflict_rollback", &test_generation_builder_incremental_conflict_rollback},
+    test_case{"project_build_orchestrator_full", &test_project_build_orchestrator_full},
+    test_case{"project_build_orchestrator_incremental", &test_project_build_orchestrator_incremental},
+    test_case{"project_build_orchestrator_no_change", &test_project_build_orchestrator_no_change},
+    test_case{"project_build_orchestrator_failure_rollback", &test_project_build_orchestrator_failure_rollback},
+    test_case{"project_build_orchestrator_new_include", &test_project_build_orchestrator_new_include},
+    test_case{"project_build_orchestrator_remove_leaf", &test_project_build_orchestrator_remove_leaf},
+    test_case{"project_build_orchestrator_builder_conflict_rollback", &test_project_build_orchestrator_builder_conflict_rollback},
+    test_case{"project_build_orchestrator_semantic_noop", &test_project_build_orchestrator_semantic_noop},
+    test_case{"project_build_orchestrator_reverse_edge_replacement", &test_project_build_orchestrator_reverse_edge_replacement},
 };
 
 } // namespace

@@ -38,8 +38,8 @@ enum class graph_type_kind : std::uint8_t {
     enumeration,
 };
 
-// Generation-local hot semantic state. A tombstone retains its historical
-// handle/identity mapping but is not a live type in the current generation.
+// Graph-local hot semantic state. A tombstone retains its historical
+// handle/identity mapping but is not a live type in the current Graph.
 struct type_entry final {
     definition_range definition{};
     graph_type_kind kind = graph_type_kind::record;
@@ -56,7 +56,7 @@ struct type_entry final {
 static_assert(sizeof(type_entry) == 12);
 
 // Generation-local non-static instance member. Names live in the Graph name
-// arena; TypeRef is interpreted only in this same Graph generation.
+// arena; TypeRef is interpreted only in this same Graph.
 struct member_record final {
     graph_name_ref name{};
     TypeRef type{};
@@ -111,7 +111,7 @@ struct graph_canonical_type_record final {
 
 static_assert(sizeof(graph_canonical_type_record) == 16);
 
-// Detached complete storage for one generation. Generation Builder performs all
+// Detached complete Graph storage. Generation Builder performs all
 // allocation and validation here; Graph publication is a no-fail swap only.
 class prepared_graph_generation final {
 public:
@@ -140,7 +140,6 @@ private:
     std::vector<graph_dependency_edge> dependency_edges;
 
     std::size_t live_type_count = 0;
-    std::uint64_t generation = 0;
 
     friend class graph;
     friend class generation_builder;
@@ -199,7 +198,6 @@ private:
     std::size_t derived_index_entries = 0;
 
     std::size_t live_type_count = 0;
-    std::uint64_t generation = 0;
     bool replace_identity_index = false;
     bool replace_derived_index = false;
 
@@ -207,8 +205,8 @@ private:
     friend class generation_builder;
 };
 
-// Owns one immutable committed semantic Graph generation. Graph owns only
-// generation state plus private acceleration indexes; Project semantic identity
+// Owns the one current committed semantic Graph. Graph owns only compiled
+// state plus private acceleration indexes; Project semantic identity
 // remains owned by Project Context and has no reverse pointer into Graph.
 class graph final {
 public:
@@ -219,7 +217,6 @@ public:
     graph(graph&&) = delete;
     graph& operator=(graph&&) = delete;
 
-    [[nodiscard]] std::uint64_t generation() const noexcept { return generation_value; }
     [[nodiscard]] std::size_t type_count() const noexcept { return live_type_count; }
     [[nodiscard]] std::size_t type_slot_count() const noexcept { return types.size(); }
     [[nodiscard]] std::size_t member_record_count() const noexcept { return member_records.size(); }
@@ -269,7 +266,6 @@ private:
     std::vector<graph_dependency_edge> dependency_edges;
 
     std::size_t live_type_count = 0;
-    std::uint64_t generation_value = 0;
 
     friend class generation_builder;
 };

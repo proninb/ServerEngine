@@ -17,6 +17,8 @@ add_library(server_engine_core STATIC
     server_engine/project/frontend/source_facts_validation.cpp
     server_engine/project/frontend/include_discovery.cpp
     server_engine/project/frontend/source_frontend_generation.cpp
+    server_engine/project/frontend/source_frontend_incremental.cpp
+    server_engine/project/frontend/source_frontend_cache.cpp
     server_engine/project/builder/source_contribution.cpp
     server_engine/project/builder/generation_builder.cpp
     server_engine/project/graph/graph.cpp
@@ -27,6 +29,7 @@ add_library(server_engine_core STATIC
     server_engine/project/parser/source_environment.cpp
     server_engine/project/parser/source_parser.cpp
     server_engine/project/project_context.cpp
+    server_engine/project/project_build_orchestrator.cpp
 )
 
 target_include_directories(server_engine_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/server_engine)
@@ -52,16 +55,21 @@ target_link_libraries(server_engine_source_manager_benchmark PRIVATE server_engi
 add_executable(server_engine_generation_builder_benchmark benchmarks/generation_builder_benchmark.cpp)
 target_link_libraries(server_engine_generation_builder_benchmark PRIVATE server_engine_core Threads::Threads)
 
+add_executable(server_engine_project_build_benchmark benchmarks/project_build_benchmark.cpp)
+target_link_libraries(server_engine_project_build_benchmark PRIVATE server_engine_core Threads::Threads)
+
 if(MSVC)
     target_compile_options(server_engine_tests PRIVATE /W4 /permissive-)
     target_compile_options(server_engine_identity_benchmark PRIVATE /W4 /permissive-)
     target_compile_options(server_engine_source_manager_benchmark PRIVATE /W4 /permissive-)
     target_compile_options(server_engine_generation_builder_benchmark PRIVATE /W4 /permissive-)
+    target_compile_options(server_engine_project_build_benchmark PRIVATE /W4 /permissive-)
 else()
     target_compile_options(server_engine_tests PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(server_engine_identity_benchmark PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(server_engine_source_manager_benchmark PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(server_engine_generation_builder_benchmark PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(server_engine_project_build_benchmark PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 enable_testing()
@@ -105,3 +113,13 @@ add_test(NAME generation_builder_incremental_modify COMMAND server_engine_tests 
 add_test(NAME generation_builder_incremental_remove_add COMMAND server_engine_tests generation_builder_incremental_remove_add)
 add_test(NAME generation_builder_incremental_dangling_guard COMMAND server_engine_tests generation_builder_incremental_dangling_guard)
 add_test(NAME generation_builder_incremental_conflict_rollback COMMAND server_engine_tests generation_builder_incremental_conflict_rollback)
+
+add_test(NAME project_build_orchestrator_full COMMAND server_engine_tests project_build_orchestrator_full)
+add_test(NAME project_build_orchestrator_incremental COMMAND server_engine_tests project_build_orchestrator_incremental)
+add_test(NAME project_build_orchestrator_no_change COMMAND server_engine_tests project_build_orchestrator_no_change)
+add_test(NAME project_build_orchestrator_failure_rollback COMMAND server_engine_tests project_build_orchestrator_failure_rollback)
+add_test(NAME project_build_orchestrator_new_include COMMAND server_engine_tests project_build_orchestrator_new_include)
+add_test(NAME project_build_orchestrator_remove_leaf COMMAND server_engine_tests project_build_orchestrator_remove_leaf)
+add_test(NAME project_build_orchestrator_builder_conflict_rollback COMMAND server_engine_tests project_build_orchestrator_builder_conflict_rollback)
+add_test(NAME project_build_orchestrator_semantic_noop COMMAND server_engine_tests project_build_orchestrator_semantic_noop)
+add_test(NAME project_build_orchestrator_reverse_edge_replacement COMMAND server_engine_tests project_build_orchestrator_reverse_edge_replacement)

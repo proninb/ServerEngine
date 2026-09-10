@@ -10,8 +10,8 @@ namespace cw::server {
 class graph;
 class generation_builder;
 
-// Identifies one canonical type expression inside a committed Graph generation.
-// TypeRef is compact and generation-local; index zero is the invalid sentinel.
+// Identifies one canonical type expression inside the current committed Graph.
+// TypeRef is compact and Graph-local; index zero is the invalid sentinel.
 class TypeRef final {
 public:
     constexpr TypeRef() noexcept = default;

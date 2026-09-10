@@ -40,7 +40,7 @@ struct generation_build_telemetry final {
     std::uint64_t contribution_full_scans = 0;
 };
 
-// Builds detached G0 or a sparse Gn -> Gn+1 candidate directly from Parser-
+// Builds a detached full Graph or a sparse incremental candidate directly from Parser-
 // resolved identity_ref values. Builder performs no source-language/name lookup,
 // stable ID allocation, String Registry canonicalization, semantic sort, or
 // mutex-based shared mutation.
@@ -62,7 +62,7 @@ public:
         diagnostic_buffer& diagnostics) noexcept;
 
     // replacements are complete new facts for modified/added Sources. removals
-    // contain Sources absent from the candidate Project generation. A Source may
+    // contain Sources absent from the candidate Project state. A Source may
     // appear in exactly one input set.
     [[nodiscard]] status prepare_incremental(
         std::span<const source_facts> replacements,

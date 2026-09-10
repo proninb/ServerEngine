@@ -200,6 +200,122 @@ std::string_view source_contribution_cache::name(source_contribution_name_ref va
     return {committed.names.data() + offset, length};
 }
 
+bool source_contribution_cache::equivalent(const source_facts& facts) const noexcept {
+    const auto* source_state = state(facts.source());
+    if (source_state == nullptr)
+        return false;
+
+    const auto cached_types = types(facts.source());
+    const auto cached_members = members(source_state->members);
+    const auto cached_modifiers = modifiers(source_state->modifiers);
+    const auto cached_enum_values = enum_values(source_state->enum_values);
+
+    if (cached_members.size() != facts.members().size() ||
+        cached_modifiers.size() != facts.modifiers().size() ||
+        cached_enum_values.size() != facts.enum_values().size()) {
+        return false;
+    }
+
+    for (std::size_t index = 0; index < cached_modifiers.size(); ++index) {
+        if (cached_modifiers[index].kind != facts.modifiers()[index].kind ||
+            cached_modifiers[index].value != facts.modifiers()[index].value) {
+            return false;
+        }
+    }
+
+    for (std::size_t index = 0; index < cached_members.size(); ++index) {
+        const auto& cached = cached_members[index];
+        const auto& current = facts.members()[index];
+        if (cached.type.identity != current.type.identity ||
+            cached.type.intrinsic != current.type.intrinsic ||
+            cached.type.modifiers.count != current.type.modifiers.count ||
+            cached.access != current.access ||
+            name(cached.name) != facts.text(current.name)) {
+            return false;
+        }
+        if (cached.type.modifiers.begin < source_state->modifiers.begin ||
+            cached.type.modifiers.begin - source_state->modifiers.begin != current.type.modifiers.begin) {
+            return false;
+        }
+    }
+
+    for (std::size_t index = 0; index < cached_enum_values.size(); ++index) {
+        const auto& cached = cached_enum_values[index];
+        const auto& current = facts.enum_values()[index];
+        if (cached.value.intrinsic != current.value.intrinsic ||
+            cached.value.bits != current.value.bits ||
+            name(cached.name) != facts.text(current.name)) {
+            return false;
+        }
+    }
+
+    std::size_t type_position = 0;
+    const auto compare_record = [&](const source_record_fact& current) noexcept {
+        if (type_position >= cached_types.size())
+            return false;
+        const auto& cached = cached_types[type_position++];
+        if (cached.identity != current.identity ||
+            cached.kind != source_contribution_type_kind::record ||
+            cached.record_kind != current.record_kind ||
+            cached.definition() !=
+                (current.declaration_kind == source_record_declaration_kind::definition) ||
+            cached.definition_items.count != current.members.count ||
+            cached.definition_items.begin < source_state->members.begin ||
+            cached.definition_items.begin - source_state->members.begin != current.members.begin) {
+            return false;
+        }
+        return true;
+    };
+
+    const auto compare_enum = [&](const source_enum_fact& current) noexcept {
+        if (type_position >= cached_types.size())
+            return false;
+        const auto& cached = cached_types[type_position++];
+        if (cached.identity != current.identity ||
+            cached.kind != source_contribution_type_kind::enumeration ||
+            cached.explicit_underlying != current.explicit_underlying ||
+            cached.enum_scoped() != current.scoped ||
+            cached.definition() !=
+                (current.declaration_kind == source_enum_declaration_kind::definition) ||
+            cached.definition_items.count != current.enumerators.count ||
+            cached.definition_items.begin < source_state->enum_values.begin ||
+            cached.definition_items.begin - source_state->enum_values.begin != current.enumerators.begin) {
+            return false;
+        }
+        return true;
+    };
+
+    if (!facts.declarations().empty()) {
+        for (const auto& declaration : facts.declarations()) {
+            switch (declaration.kind) {
+            case source_declaration_kind::namespace_scope:
+                continue;
+            case source_declaration_kind::record_type:
+                if (declaration.index >= facts.records().size() ||
+                    !compare_record(facts.records()[declaration.index]))
+                    return false;
+                break;
+            case source_declaration_kind::enum_type:
+                if (declaration.index >= facts.enums().size() ||
+                    !compare_enum(facts.enums()[declaration.index]))
+                    return false;
+                break;
+            }
+        }
+    } else {
+        for (const auto& record : facts.records()) {
+            if (!compare_record(record))
+                return false;
+        }
+        for (const auto& enum_value : facts.enums()) {
+            if (!compare_enum(enum_value))
+                return false;
+        }
+    }
+
+    return type_position == cached_types.size();
+}
+
 const source_construction_state* source_contribution_cache::construction(type_handle handle) const noexcept {
     if (!handle || handle.value() >= committed.construction.size())
         return nullptr;

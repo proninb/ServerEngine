@@ -8,8 +8,8 @@ namespace cw::server {
 class graph;
 class generation_builder;
 
-// Identifies one user-type slot inside a committed Graph generation. The value
-// is generation-local and must not be persisted or compared across generations.
+// Identifies one user-type slot inside the current committed Graph. The value
+// is Graph-local and is not a persistent semantic identity.
 class type_handle final {
 public:
     constexpr type_handle() noexcept = default;

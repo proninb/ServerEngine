@@ -45,9 +45,9 @@ source-language semantic resolution
               └── Generation Builder
 ```
 
-`identity_node*` means WHO. Generation-local handles mean WHERE in one `G`. Generation entries mean WHAT in that generation.
+`identity_node*` means WHO. Graph-local handles mean WHERE in the single current compiled Graph. The Server retains no historical Graph versions.
 
-`identity_node` never contains a Graph pointer, generation handle, definition state, ABI layout, members, or other generation-specific state.
+`identity_node` never contains a Graph pointer, Graph-local handle, definition state, ABI layout, members, or other compiled Graph state.
 
 The backing arena is a storage primitive only. It owns stable Project-lifetime bytes and performs no name resolution, canonicalization, hashing, or identity lookup.
 
@@ -92,15 +92,16 @@ server.json
     -> create Project semantic identity root
 ```
 
-SE-V3-06R replaces the minimal 06B frontend mechanics with production-oriented Source Manager acquisition, SHA-256 snapshots, Lexer directive spans, quoted-include DAG discovery, dependency-ready parallel Parser scheduling, positional visibility, and direct `identity_ref` source interfaces. SE-V3-06P then separates filesystem normalization from hot normalized-path identity lookup and applies the compact Source Manager path-index layout proven by benchmark. SE-V3-07A+07B now adds flat SourceContribution provenance, a direct-identity Generation Builder, and immutable detached G0 Graph publication. Sparse incremental Graph construction, persistence, Runtime, and SHM remain intentionally absent.
+SE-V3-06R replaces the minimal 06B frontend mechanics with production-oriented Source Manager acquisition, SHA-256 snapshots, Lexer directive spans, quoted-include DAG discovery, dependency-ready parallel Parser scheduling, positional visibility, and direct `identity_ref` source interfaces. SE-V3-06P separates filesystem normalization from hot normalized-path identity lookup. SE-V3-07 adds flat SourceContribution provenance, direct-identity full Graph construction, and sparse incremental Graph updates. SE-V3-08 connects the complete filesystem → frontend → Builder → current Graph path, retains Parser-visible interfaces between builds, and maintains sparse reverse Source dependencies.
+
+The Server owns one current Graph only. There is no Graph generation counter, retained Graph history, or MVCC version-control layer. Full and incremental builds prepare all fallible work before a short no-fail publication boundary.
 
 ## Next implementation sequence
 
-1. Add sparse `Gn -> Gn+1` SourceContribution replacement and MVCC Graph publication.
-2. Add affected-closure validation and preserve unchanged generation storage where the incremental contract permits it.
-3. Port Source Manager persistence/change tracking after the live build path is frozen.
-4. Implement `SAVE G0` / `LOAD G0` using file-local identity IDs; never serialize pointers.
-5. Add Runtime and SHM materialization boundaries.
+1. Add Source change tracking as an acceleration layer feeding dirty `source_id` values into the proven incremental build API.
+2. Add compiled Graph persistence using file-local identity IDs; never serialize pointers.
+3. Add Runtime materialization and synchronize Runtime readers only around the short current-Graph publication boundary.
+4. Add SHM publication/materialization and external TCP/query control.
 
 ## Provenance
 
@@ -153,3 +154,9 @@ server_engine_generation_builder_benchmark --semantic 1000000
 ```
 
 The default gate requires one million real Project identities to materialize into G0 in under one second before publication.
+
+## SE-V3-08 Project Build Orchestration
+
+`project_context` now owns the Source Manager, persistent COLD Parser-interface cache, SourceContribution cache, and one current Graph. `project_build_orchestrator` performs full and incremental builds end to end. Incremental builds reacquire only dirty physical Sources, collect the committed reverse-dependent closure before replacing include edges, reparse dependents from committed snapshots without rereading them, and send only semantically changed SourceContributions to Generation Builder.
+
+Run `server_engine_project_build_benchmark --gate` to exercise real filesystem full build, one-file incremental update, and a common-header fanout case. Sparse gates require zero Source-graph/path-index/Builder full scans on normal incremental updates. See `docs/SE_V3_08_PROJECT_BUILD_ORCHESTRATION.md`.

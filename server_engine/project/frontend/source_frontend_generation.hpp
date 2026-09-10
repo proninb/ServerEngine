@@ -1,6 +1,7 @@
 #pragma once
 
 #include "include_discovery.hpp"
+#include "source_frontend_cache.hpp"
 #include "../parser/source_environment.hpp"
 #include "../parser/source_parser.hpp"
 #include "../source/source_manager.hpp"
@@ -14,12 +15,19 @@
 
 namespace cw::server {
 
+class project_build_orchestrator;
+
 struct source_frontend_summary final {
     std::uint32_t roots = 0;
+    std::uint32_t dirty = 0;
+    std::uint32_t changed = 0;
+    std::uint32_t affected = 0;
     std::uint32_t discovered = 0;
     std::uint32_t acquired = 0;
     std::uint32_t lexed = 0;
     std::uint32_t parsed = 0;
+    std::uint32_t reused_interfaces = 0;
+    std::size_t source_graph_visited = 0;
     std::size_t worker_limit = 0;
     std::size_t max_active_workers = 0;
 };
@@ -28,6 +36,7 @@ struct source_frontend_entry final {
     source_id source{};
     parsed_source parsed;
     std::unique_ptr<source_interface> interface;
+    bool removed = false;
 };
 
 // Owns the dependency-ready Parser products for one frontend generation. Interface
@@ -46,6 +55,7 @@ public:
 
 private:
     friend class source_frontend_generation;
+    friend class project_build_orchestrator;
     std::vector<source_frontend_entry> entries;
     source_frontend_summary statistics{};
 };
@@ -60,8 +70,20 @@ public:
         source_manager_update& source_update,
         std::size_t worker_limit = 0) noexcept;
 
+    source_frontend_generation(
+        project_context& project_value,
+        source_manager_update& source_update,
+        const source_frontend_cache& cache_value,
+        std::size_t worker_limit = 0) noexcept;
+
     [[nodiscard]] status build(
         std::span<const std::filesystem::path> roots,
+        operation_id operation,
+        diagnostic_buffer& diagnostics,
+        source_frontend_result& output) noexcept;
+
+    [[nodiscard]] status build_incremental(
+        std::span<const source_id> dirty_sources,
         operation_id operation,
         diagnostic_buffer& diagnostics,
         source_frontend_result& output) noexcept;
@@ -69,6 +91,7 @@ public:
 private:
     project_context& project;
     source_manager_update& sources;
+    const source_frontend_cache* cache = nullptr;
     std::size_t worker_limit = 1;
 };
 

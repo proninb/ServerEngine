@@ -15,7 +15,7 @@ enum class identity_kind : std::uint8_t {
 };
 
 // Project-lifetime semantic identity. It stores only WHO an entity is;
-// generation-specific definition, layout, handles, and Graph state live in G.
+// definition, layout, handles, and compiled state live only in the current Graph.
 class identity_node final {
 public:
     [[nodiscard]] constexpr const identity_node* parent() const noexcept { return parent_identity; }

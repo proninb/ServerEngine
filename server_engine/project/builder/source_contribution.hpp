@@ -116,6 +116,12 @@ public:
     [[nodiscard]] std::string_view name(source_contribution_name_ref value) const noexcept;
     [[nodiscard]] const source_construction_state* construction(type_handle handle) const noexcept;
     [[nodiscard]] const source_contribution_statistics& statistics() const noexcept { return statistics_value; }
+
+    // Compares Parser output directly with retained build provenance. This is a
+    // semantic-delta filter only: identity_ref equality and Source-local payload
+    // comparisons decide whether Builder replacement is necessary.
+    [[nodiscard]] bool equivalent(const source_facts& facts) const noexcept;
+
     [[nodiscard]] bool complete() const noexcept { return provenance_complete; }
 
     void invalidate() noexcept { provenance_complete = false; }

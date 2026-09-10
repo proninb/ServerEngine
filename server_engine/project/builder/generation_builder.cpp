@@ -892,7 +892,6 @@ status generation_builder::prepare_incremental_graph(
         }
 
         prepared_update = {};
-        prepared_update.generation = target.generation_value + 1;
         prepared_update.live_type_count = target.live_type_count;
         prepared_update.intrinsic_refs = target.intrinsic_refs;
         prepared_update.names.assign(
@@ -1648,7 +1647,6 @@ status generation_builder::prepare_graph(
 
     try {
         prepared_graph = {};
-        prepared_graph.generation = 0;
         prepared_graph.types.reserve(storage.types.size());
         prepared_graph.identities.reserve(storage.types.size());
         prepared_graph.members.reserve(storage.members.size());
@@ -2116,7 +2114,7 @@ status generation_builder::prepare_graph(
         result = {status_code::initialization_failed};
     }
 
-    emit_failure(result, {}, operation, "Generation G0 preparation failed", diagnostics);
+    emit_failure(result, {}, operation, "Full Graph preparation failed", diagnostics);
     return result;
 }
 

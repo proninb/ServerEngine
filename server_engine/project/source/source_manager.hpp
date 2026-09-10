@@ -53,6 +53,14 @@ struct source_acquire_result final {
     file_snapshot snapshot{};
 };
 
+
+struct source_manager_update_telemetry final {
+    std::uint64_t path_index_full_rebuilds = 0;
+    std::uint64_t source_graph_full_scans = 0;
+    std::uint64_t source_graph_visited = 0;
+    std::uint64_t reverse_edge_patches = 0;
+};
+
 class source_manager_update;
 
 // Owns stable normalized-path -> source_id identity and committed immutable Source
@@ -70,6 +78,13 @@ public:
     [[nodiscard]] std::size_t source_count() const noexcept { return records.size(); }
     [[nodiscard]] source_snapshot current(source_id source) const noexcept;
     [[nodiscard]] std::span<const source_id> includes(source_id source) const noexcept;
+    [[nodiscard]] std::span<const source_id> dependents(source_id source) const noexcept;
+
+    // Collects the transitive reverse dependency closure from committed edges.
+    // Work is proportional to affected Sources, not to the Project Source count.
+    [[nodiscard]] status collect_dependents(
+        source_id source,
+        std::vector<source_id>& output) const noexcept;
 
     // Returned view remains valid until the next Source Manager publication.
     [[nodiscard]] std::string_view path(source_id source) const noexcept;
@@ -99,6 +114,7 @@ private:
     struct committed_source final {
         source_snapshot snapshot;
         std::vector<source_id> includes;
+        std::vector<source_id> dependents;
     };
 
     // fingerprint is a folded XXH64 value. Full path comparison resolves the rare
@@ -170,8 +186,28 @@ public:
 
     [[nodiscard]] source_snapshot snapshot(source_id source) const noexcept;
     [[nodiscard]] std::span<const source_id> includes(source_id source) const noexcept;
+    [[nodiscard]] std::span<const source_id> dependents(source_id source) const noexcept;
+    [[nodiscard]] std::span<const source_id> changed_sources() const noexcept { return semantic_changes; }
+
+    // Collects the transitive reverse dependency closure from committed edges.
+    // Work is proportional to affected Sources, not to the Project Source count.
+    [[nodiscard]] status collect_dependents(
+        source_id source,
+        std::vector<source_id>& output) const noexcept;
+
+    // Full validation is used by full build. Sparse validation checks only paths
+    // reachable from Sources whose include edges changed.
+    [[nodiscard]] status validate_changed_source_graph(
+        std::span<const source_id> changed,
+        operation_id operation,
+        diagnostic_buffer& diagnostics,
+        std::size_t* visited_sources = nullptr) const noexcept;
+
     [[nodiscard]] std::string_view path(source_id source) const noexcept;
     [[nodiscard]] std::size_t source_count() const noexcept;
+    [[nodiscard]] const source_manager_update_telemetry& telemetry() const noexcept {
+        return telemetry_value;
+    }
 
     [[nodiscard]] status validate_source_graph(
         operation_id operation,
@@ -186,8 +222,10 @@ private:
         source_id source{};
         source_snapshot snapshot;
         std::vector<source_id> includes;
+        std::vector<source_id> dependents;
         bool has_snapshot = false;
         bool has_includes = false;
+        bool has_dependents = false;
     };
 
     struct new_source final {
@@ -205,6 +243,11 @@ private:
         std::uint32_t new_source_index = 0;
     };
 
+    struct prepared_path_insertion final {
+        std::size_t position = 0;
+        source_manager::path_slot slot{};
+    };
+
     static_assert(sizeof(local_path_slot) == 8);
 
     friend class source_manager;
@@ -218,7 +261,9 @@ private:
     [[nodiscard]] status find_local_path(std::string_view normalized, source_id& output) const noexcept;
     [[nodiscard]] status insert_local_path(std::uint32_t new_source_index) noexcept;
     [[nodiscard]] status build_prepared_path_index() noexcept;
+    [[nodiscard]] status build_sparse_path_insertions() noexcept;
     [[nodiscard]] bool valid_source(source_id source) const noexcept;
+    [[nodiscard]] status prepare_dependent_patches() noexcept;
 
     source_manager* owner = nullptr;
     std::vector<new_source> new_sources;
@@ -226,6 +271,9 @@ private:
     std::vector<id_slot> id_index;
     std::vector<local_path_slot> local_path_index;
     std::vector<source_manager::path_slot> prepared_path_index;
+    std::vector<prepared_path_insertion> prepared_path_insertions;
+    std::vector<source_id> semantic_changes;
+    mutable source_manager_update_telemetry telemetry_value{};
     std::size_t prepared_path_storage_size = 0;
     bool prepared = false;
     bool committed = false;

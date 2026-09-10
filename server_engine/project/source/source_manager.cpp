@@ -131,6 +131,126 @@ namespace {
     return capacity;
 }
 
+class sparse_source_set final {
+public:
+    [[nodiscard]] bool contains(source_id source) const noexcept {
+        if (!source || slots.empty())
+            return false;
+        const auto mask = slots.size() - 1;
+        auto position = static_cast<std::size_t>(mix64(source.value())) & mask;
+        for (;;) {
+            const auto slot = slots[position];
+            if (slot == 0)
+                return false;
+            if (slot == source.value())
+                return true;
+            position = (position + 1) & mask;
+        }
+    }
+
+    [[nodiscard]] status insert(source_id source, bool& inserted) noexcept {
+        inserted = false;
+        if (!source)
+            return {status_code::invalid_argument};
+        if (slots.empty() || (count + 1) * 2 >= slots.size()) {
+            const auto required = slots.empty() ? std::size_t{16} : slots.size() * 2;
+            auto result = grow(required);
+            if (!result.ok())
+                return result;
+        }
+
+        const auto mask = slots.size() - 1;
+        auto position = static_cast<std::size_t>(mix64(source.value())) & mask;
+        for (;;) {
+            auto& slot = slots[position];
+            if (slot == 0) {
+                slot = source.value();
+                ++count;
+                inserted = true;
+                return {};
+            }
+            if (slot == source.value())
+                return {};
+            position = (position + 1) & mask;
+        }
+    }
+
+private:
+    [[nodiscard]] status grow(std::size_t capacity) noexcept {
+        try {
+            std::vector<std::uint32_t> replacement(capacity, 0);
+            const auto mask = replacement.size() - 1;
+            for (const auto value : slots) {
+                if (value == 0)
+                    continue;
+                auto position = static_cast<std::size_t>(mix64(value)) & mask;
+                while (replacement[position] != 0)
+                    position = (position + 1) & mask;
+                replacement[position] = value;
+            }
+            slots.swap(replacement);
+            return {};
+        }
+        catch (const std::bad_alloc&) {
+            return {status_code::not_available};
+        }
+        catch (const std::length_error&) {
+            return {status_code::not_available};
+        }
+    }
+
+    std::vector<std::uint32_t> slots;
+    std::size_t count = 0;
+};
+
+class sparse_position_set final {
+public:
+    [[nodiscard]] status reserve(std::size_t count) noexcept {
+        if (count == 0)
+            return {};
+        const auto capacity = next_capacity(count * 2 + 1);
+        if (capacity == 0)
+            return {status_code::not_available};
+        try {
+            slots.assign(capacity, empty_value);
+            return {};
+        }
+        catch (const std::bad_alloc&) {
+            return {status_code::not_available};
+        }
+        catch (const std::length_error&) {
+            return {status_code::not_available};
+        }
+    }
+
+    [[nodiscard]] bool contains(std::size_t value) const noexcept {
+        if (slots.empty())
+            return false;
+        const auto mask = slots.size() - 1;
+        auto position = static_cast<std::size_t>(mix64(value)) & mask;
+        for (;;) {
+            const auto slot = slots[position];
+            if (slot == empty_value)
+                return false;
+            if (slot == value)
+                return true;
+            position = (position + 1) & mask;
+        }
+    }
+
+    void insert(std::size_t value) noexcept {
+        const auto mask = slots.size() - 1;
+        auto position = static_cast<std::size_t>(mix64(value)) & mask;
+        while (slots[position] != empty_value && slots[position] != value)
+            position = (position + 1) & mask;
+        slots[position] = value;
+    }
+
+private:
+    static constexpr std::size_t empty_value = (std::numeric_limits<std::size_t>::max)();
+    std::vector<std::size_t> slots;
+};
+
 
 void emit_source_failure(
     const diagnostic_descriptor& descriptor,
@@ -284,6 +404,62 @@ std::span<const source_id> source_manager::includes(source_id source) const noex
     return index < states.size()
         ? std::span<const source_id>{states[index].includes}
         : std::span<const source_id>{};
+}
+
+std::span<const source_id> source_manager::dependents(source_id source) const noexcept {
+    if (!source)
+        return {};
+    const auto index = static_cast<std::size_t>(source.value() - 1);
+    return index < states.size()
+        ? std::span<const source_id>{states[index].dependents}
+        : std::span<const source_id>{};
+}
+
+status source_manager::collect_dependents(
+    source_id source,
+    std::vector<source_id>& output) const noexcept {
+
+    output.clear();
+    if (!source || static_cast<std::size_t>(source.value()) > states.size())
+        return {status_code::invalid_argument};
+
+    try {
+        sparse_source_set visited;
+        bool inserted = false;
+        auto result = visited.insert(source, inserted);
+        if (!result.ok())
+            return result;
+
+        std::vector<source_id> queue;
+        for (const auto dependent : dependents(source)) {
+            result = visited.insert(dependent, inserted);
+            if (!result.ok())
+                return result;
+            if (inserted)
+                queue.push_back(dependent);
+        }
+
+        for (std::size_t cursor = 0; cursor < queue.size(); ++cursor) {
+            const auto current_source = queue[cursor];
+            output.push_back(current_source);
+            for (const auto dependent : dependents(current_source)) {
+                result = visited.insert(dependent, inserted);
+                if (!result.ok())
+                    return result;
+                if (inserted)
+                    queue.push_back(dependent);
+            }
+        }
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        output.clear();
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        output.clear();
+        return {status_code::not_available};
+    }
 }
 
 std::string_view source_manager::path(source_id source) const noexcept {
@@ -651,13 +827,25 @@ status source_manager_update::apply_acquire(source_acquire_result&& result) noex
         return {status_code::invalid_argument};
     if (result.kind == source_acquire_result_kind::unchanged)
         return {};
-    if (result.kind == source_acquire_result_kind::missing)
-        return {status_code::not_found};
+
+    const auto previous = snapshot(result.source);
+    const bool is_new_source = owner != nullptr &&
+        static_cast<std::size_t>(result.source.value()) > owner->records.size();
 
     candidate_source* item = nullptr;
     auto touch_result = touch(result.source, item);
     if (!touch_result.ok())
         return touch_result;
+
+    if (result.kind == source_acquire_result_kind::missing) {
+        if (is_new_source || !previous)
+            return {status_code::not_found};
+        item->snapshot = {};
+        item->has_snapshot = true;
+        semantic_changes.push_back(result.source);
+        prepared = false;
+        return {};
+    }
 
     try {
         auto storage = std::make_shared<source_snapshot::storage>();
@@ -666,8 +854,12 @@ status source_manager_update::apply_acquire(source_acquire_result&& result) noex
         storage->text = std::move(result.snapshot.bytes);
         storage->observation = result.snapshot.observation;
         storage->hash = result.snapshot.hash;
+
+        const bool semantic_change = !previous || previous.hash() != storage->hash;
         item->snapshot = source_snapshot{std::move(storage)};
         item->has_snapshot = true;
+        if (semantic_change)
+            semantic_changes.push_back(result.source);
         prepared = false;
         return {};
     }
@@ -720,6 +912,25 @@ std::span<const source_id> source_manager_update::includes(source_id source) con
     return owner != nullptr ? owner->includes(source) : std::span<const source_id>{};
 }
 
+std::span<const source_id> source_manager_update::dependents(source_id source) const noexcept {
+    if (const auto* item = candidate(source); item != nullptr && item->has_dependents)
+        return item->dependents;
+    return owner != nullptr ? owner->dependents(source) : std::span<const source_id>{};
+}
+
+status source_manager_update::collect_dependents(
+    source_id source,
+    std::vector<source_id>& output) const noexcept {
+
+    if (!valid_source(source) || owner == nullptr)
+        return {status_code::invalid_argument};
+    if (static_cast<std::size_t>(source.value()) > owner->source_count()) {
+        output.clear();
+        return {};
+    }
+    return owner->collect_dependents(source, output);
+}
+
 std::size_t source_manager_update::source_count() const noexcept {
     return owner != nullptr ? owner->records.size() + new_sources.size() : 0;
 }
@@ -728,7 +939,9 @@ status source_manager_update::validate_source_graph(
     operation_id operation,
     diagnostic_buffer& diagnostics) const noexcept {
 
+    ++telemetry_value.source_graph_full_scans;
     const auto count = source_count();
+    telemetry_value.source_graph_visited += count;
     try {
         std::vector<std::uint32_t> indegree(count + 1, 0);
         for (std::size_t value = 1; value <= count; ++value) {
@@ -784,9 +997,147 @@ status source_manager_update::validate_source_graph(
     }
 }
 
+status source_manager_update::validate_changed_source_graph(
+    std::span<const source_id> changed,
+    operation_id operation,
+    diagnostic_buffer& diagnostics,
+    std::size_t* visited_sources) const noexcept {
+
+    if (visited_sources != nullptr)
+        *visited_sources = 0;
+
+    std::size_t local_visited = 0;
+    try {
+        for (const auto root : changed) {
+            if (!valid_source(root))
+                return {status_code::invalid_argument};
+
+            sparse_source_set visited;
+            bool inserted = false;
+            auto result = visited.insert(root, inserted);
+            if (!result.ok())
+                return result;
+
+            std::vector<source_id> stack;
+            for (const auto dependency : includes(root))
+                stack.push_back(dependency);
+
+            while (!stack.empty()) {
+                const auto current_source = stack.back();
+                stack.pop_back();
+                if (current_source == root) {
+                    emit_source_failure(
+                        diagnostics::source_dependency_cycle, root, operation,
+                        "Source include dependency graph contains a cycle", diagnostics);
+                    return {status_code::semantic_conflict};
+                }
+
+                result = visited.insert(current_source, inserted);
+                if (!result.ok())
+                    return result;
+                if (!inserted)
+                    continue;
+                ++local_visited;
+                if (visited_sources != nullptr)
+                    ++*visited_sources;
+                for (const auto dependency : includes(current_source))
+                    stack.push_back(dependency);
+            }
+        }
+        telemetry_value.source_graph_visited += local_visited;
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+}
+
+status source_manager_update::prepare_dependent_patches() noexcept {
+    struct edge_patch final {
+        source_id target{};
+        source_id dependent{};
+        bool add = false;
+    };
+
+    try {
+        std::vector<edge_patch> patches;
+        const auto initial_candidate_count = candidates.size();
+        for (std::size_t index = 0; index < initial_candidate_count; ++index) {
+            const auto& item = candidates[index];
+            if (!item.has_includes)
+                continue;
+
+            const auto old_includes = owner != nullptr &&
+                static_cast<std::size_t>(item.source.value()) <= owner->states.size()
+                    ? owner->includes(item.source)
+                    : std::span<const source_id>{};
+            const std::span<const source_id> new_includes{item.includes};
+
+            sparse_source_set old_set;
+            sparse_source_set new_set;
+            bool inserted = false;
+            for (const auto dependency : old_includes) {
+                auto result = old_set.insert(dependency, inserted);
+                if (!result.ok())
+                    return result;
+            }
+            for (const auto dependency : new_includes) {
+                auto result = new_set.insert(dependency, inserted);
+                if (!result.ok())
+                    return result;
+            }
+            for (const auto dependency : old_includes) {
+                if (!new_set.contains(dependency))
+                    patches.push_back(edge_patch{dependency, item.source, false});
+            }
+            for (const auto dependency : new_includes) {
+                if (!old_set.contains(dependency))
+                    patches.push_back(edge_patch{dependency, item.source, true});
+            }
+        }
+
+        telemetry_value.reverse_edge_patches += patches.size();
+        for (const auto& patch : patches) {
+            candidate_source* target = nullptr;
+            auto result = touch(patch.target, target);
+            if (!result.ok())
+                return result;
+            if (!target->has_dependents) {
+                const auto committed_dependents = owner != nullptr
+                    ? owner->dependents(patch.target)
+                    : std::span<const source_id>{};
+                target->dependents.assign(
+                    committed_dependents.begin(), committed_dependents.end());
+                target->has_dependents = true;
+            }
+
+            const auto found = std::find(
+                target->dependents.begin(), target->dependents.end(), patch.dependent);
+            if (patch.add) {
+                if (found == target->dependents.end())
+                    target->dependents.push_back(patch.dependent);
+            } else if (found != target->dependents.end()) {
+                *found = target->dependents.back();
+                target->dependents.pop_back();
+            }
+        }
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+}
+
 status source_manager_update::build_prepared_path_index() noexcept {
     if (owner == nullptr)
         return {status_code::invalid_argument};
+    ++telemetry_value.path_index_full_rebuilds;
     auto result = owner->rebuild_path_index(new_sources.size(), prepared_path_index);
     if (!result.ok())
         return result;
@@ -804,45 +1155,99 @@ status source_manager_update::build_prepared_path_index() noexcept {
     return {};
 }
 
+status source_manager_update::build_sparse_path_insertions() noexcept {
+    prepared_path_insertions.clear();
+    if (owner == nullptr || new_sources.empty())
+        return {};
+    if (owner->path_index.empty())
+        return build_prepared_path_index();
+
+    const auto required_count = owner->records.size() + new_sources.size();
+    if (required_count > owner->path_index.size() / 2)
+        return {status_code::not_available};
+
+    try {
+        prepared_path_insertions.reserve(new_sources.size());
+        sparse_position_set reserved_positions;
+        auto result = reserved_positions.reserve(new_sources.size());
+        if (!result.ok())
+            return result;
+
+        const auto mask = owner->path_index.size() - 1;
+        for (const auto& item : new_sources) {
+            const auto hash = hash_path(item.normalized_path);
+            auto position = static_cast<std::size_t>(hash) & mask;
+            while (owner->path_index[position].source || reserved_positions.contains(position))
+                position = (position + 1) & mask;
+            reserved_positions.insert(position);
+            prepared_path_insertions.push_back(prepared_path_insertion{
+                position,
+                source_manager::path_slot{path_fingerprint(hash), item.source},
+            });
+        }
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        prepared_path_insertions.clear();
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        prepared_path_insertions.clear();
+        return {status_code::not_available};
+    }
+}
+
 status source_manager_update::prepare_publish() noexcept {
     if (owner == nullptr || committed)
         return {status_code::invalid_argument};
     if (prepared)
         return {};
 
-    auto result = build_prepared_path_index();
+    auto result = prepare_dependent_patches();
     if (!result.ok())
         return result;
 
     std::size_t added_path_bytes = 0;
-    for (const auto& item : new_sources) {
-        if (added_path_bytes >
-            (std::numeric_limits<std::size_t>::max)() - item.normalized_path.size()) {
+    if (!new_sources.empty()) {
+        result = owner->records.empty()
+            ? build_prepared_path_index()
+            : build_sparse_path_insertions();
+        if (!result.ok())
+            return result;
+
+        for (const auto& item : new_sources) {
+            if (added_path_bytes >
+                (std::numeric_limits<std::size_t>::max)() - item.normalized_path.size()) {
+                return {status_code::not_available};
+            }
+            added_path_bytes += item.normalized_path.size();
+        }
+
+        if (owner->path_storage.size() >
+            static_cast<std::size_t>((std::numeric_limits<std::uint32_t>::max)()) - added_path_bytes) {
             return {status_code::not_available};
         }
-        added_path_bytes += item.normalized_path.size();
-    }
-
-    if (owner->path_storage.size() >
-        static_cast<std::size_t>((std::numeric_limits<std::uint32_t>::max)()) - added_path_bytes) {
-        return {status_code::not_available};
     }
 
     try {
-        owner->records.reserve(owner->records.size() + new_sources.size());
-        owner->states.reserve(owner->states.size() + new_sources.size());
-        prepared_path_storage_size = owner->path_storage.size() + added_path_bytes;
-        owner->path_storage.reserve(prepared_path_storage_size);
+        if (!new_sources.empty()) {
+            owner->records.reserve(owner->records.size() + new_sources.size());
+            owner->states.reserve(owner->states.size() + new_sources.size());
+            prepared_path_storage_size = owner->path_storage.size() + added_path_bytes;
+            owner->path_storage.reserve(prepared_path_storage_size);
+        }
         prepared = true;
         return {};
     }
     catch (const std::bad_alloc&) {
         prepared_path_index.clear();
+        prepared_path_insertions.clear();
         prepared_path_storage_size = 0;
         return {status_code::not_available};
     }
     catch (const std::length_error&) {
         prepared_path_index.clear();
+        prepared_path_insertions.clear();
         prepared_path_storage_size = 0;
         return {status_code::not_available};
     }
@@ -871,9 +1276,16 @@ void source_manager_update::publish_prepared() noexcept {
             owner->states[index].snapshot = std::move(item.snapshot);
         if (item.has_includes)
             owner->states[index].includes = std::move(item.includes);
+        if (item.has_dependents)
+            owner->states[index].dependents = std::move(item.dependents);
     }
 
-    owner->path_index.swap(prepared_path_index);
+    if (!prepared_path_index.empty()) {
+        owner->path_index.swap(prepared_path_index);
+    } else {
+        for (const auto& insertion : prepared_path_insertions)
+            owner->path_index[insertion.position] = insertion.slot;
+    }
     committed = true;
 }
 

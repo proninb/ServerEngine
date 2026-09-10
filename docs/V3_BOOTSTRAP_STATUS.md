@@ -13,7 +13,7 @@
 - [x] Project-lifetime immutable identifier bytes
 - [x] Direct `identity_ref` result from declaration resolution
 - [x] Concurrent convergence of duplicate declarations to one published identity
-- [x] Identity contains no Graph/generation state
+- [x] Identity contains no compiled Graph state
 - [x] Foundation tests
 - [x] Sample Server/Project configuration
 - [x] Parser -> Generation Builder `source_facts` contract
@@ -29,10 +29,10 @@
 - [x] Lexer directive spans + quoted include DAG / positional visibility orchestration
 - [x] Dependency-ready parallel Parser -> `source_facts` production
 - [ ] Full Parser V3 language coverage
-- [ ] Generation Builder
-- [ ] immutable Graph generation
-- [ ] G0 persistence
-- [ ] sparse MVCC update
+- [x] Generation Builder full build
+- [x] sparse incremental current-Graph update
+- [x] end-to-end Project build orchestration
+- [ ] compiled Graph persistence
 - [ ] Runtime publication
 - [ ] SHM materialization
 - [ ] TCP/query service
@@ -45,8 +45,8 @@
 4. The public resolution API has no `created` result and exposes no allocation history.
 5. The identity backing arena performs allocation only; it does not canonicalize or resolve names.
 6. Concurrent declarations of the same semantic entity converge on one published pointer.
-7. `identity_node` contains no generation-specific state and never authoritatively references `G`.
-8. Generation-local handles are not Project semantic identity.
+7. `identity_node` contains no compiled Graph state and never authoritatively references the current Graph.
+8. Graph-local handles are not Project semantic identity.
 9. No Server pointer is serialized or used as SHM identity.
 10. Configuration publication is transactional: failed load never modifies the previous output configuration.
 11. No numeric Project `stable_id` exists in V3 core.

@@ -1,10 +1,10 @@
-# SE-V3-07C — Sparse Gn -> Gn+1 Generation Builder
+# SE-V3-07C — Sparse Incremental Generation Builder
 
 Status: implemented and regression-tested.
 
 ## Contract
 
-Incremental build replaces complete SourceContribution state for changed Sources and removes contributions for deleted Sources. The Builder subtracts the previous contribution, adds the candidate contribution, patches only touched generation-local type slots, and validates only the reverse dependency closure rooted at touched types.
+Incremental build replaces complete SourceContribution state for changed Sources and removes contributions for deleted Sources. The Builder subtracts the previous contribution, adds the candidate contribution, patches only touched Graph-local type slots, and validates only the reverse dependency closure rooted at touched types.
 
 Builder consumes Parser-resolved `identity_ref` values directly. It performs no semantic/name lookup, stable-ID allocation, String Registry canonicalization, semantic sorting, or mutex-based Graph mutation.
 
@@ -12,9 +12,9 @@ Builder consumes Parser-resolved `identity_ref` values directly. It performs no 
 
 Committed Graph and SourceContribution append arenas retain incremental headroom established by G0. Incremental prepare is forbidden from relocating committed O(N) arenas. If headroom is exhausted, the update fails closed with `status_code::not_available`; the caller must perform an explicit G0 rebuild. Publication uses only capacity-prepared append/patch operations and is no-fail.
 
-Historical type handles remain mapped to project-lifetime identities inside one incremental lineage. Removing the final declaration tombstones the generation-local type slot; reintroducing the same identity reactivates the historical handle. Explicit G0 rebuild may assign different generation-local handles.
+Type handles remain mapped to Project-lifetime identities across incremental updates of the current Graph. Removing the final declaration tombstones its Graph-local type slot; reintroducing the same identity reactivates that handle. A full rebuild may assign different Graph-local handles.
 
-Reverse dependency edges are append-only between explicit G0 rebuilds. Each owner type has a dependency version; replacing a definition increments the version, making prior outgoing edges stale in O(1). G0 rebuild reclaims stale edge history.
+Reverse dependency edges are append-only between explicit full rebuilds. Each owner type has a dependency version; replacing a definition increments the version, making prior outgoing edges stale in O(1). A full rebuild reclaims stale edge storage.
 
 ## Telemetry gates
 

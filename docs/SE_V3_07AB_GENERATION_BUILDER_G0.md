@@ -2,7 +2,7 @@
 
 ## Contract
 
-SE-V3-07A+07B closes the first Parser-to-Graph build path without reintroducing V2 semantic canonicalization. Parser supplies Project-lifetime `identity_ref` values in `source_facts`; Generation Builder materializes generation-local handles and TypeRefs directly from those identities.
+SE-V3-07A+07B closes the first Parser-to-Graph build path without reintroducing V2 semantic canonicalization. Parser supplies Project-lifetime `identity_ref` values in `source_facts`; Generation Builder materializes Graph-local handles and TypeRefs directly from those identities.
 
 ```text
 source_facts
@@ -25,15 +25,15 @@ Build provenance remains outside committed Graph. G0 uses a flat dense represent
 - one rebuild preflight/reserve before Source capture;
 - candidate state is detached until publication.
 
-This layout is intended to remain practical for the `1M Sources x 1 type` case and forms the provenance base for later sparse `Gn -> Gn+1` replacement.
+This layout is intended to remain practical for the `1M Sources x 1 type` case and forms the provenance base for sparse incremental Source replacement.
 
 ## Graph G0
 
-`type_handle` and `TypeRef` are four-byte generation-local addresses. `identity_ref` remains the Project-lifetime WHO and is stored only in a parallel identity array; hot `type_entry` records contain generation state only.
+`type_handle` and `TypeRef` are four-byte Graph-local addresses. `identity_ref` remains the Project-lifetime WHO and is stored only in a parallel identity array; hot `type_entry` records contain current compiled state only.
 
-G0 construction uses a build-local pointer index only to map already-resolved `identity_ref` to one generation-local `type_handle`. That operation is not semantic resolution: keys are exact identity pointers and equality is pointer equality.
+G0 construction uses a build-local pointer index only to map already-resolved `identity_ref` to one Graph-local `type_handle`. That operation is not semantic resolution: keys are exact identity pointers and equality is pointer equality.
 
-Definitions are materialized into compact one-based member or enum-value ranges. TypeRef index zero is invalid. Named TypeRefs refer directly to generation-local type handles; derived TypeRefs wrap an immediate child and preserve Parser modifier order.
+Definitions are materialized into compact one-based member or enum-value ranges. TypeRef index zero is invalid. Named TypeRefs refer directly to Graph-local type handles; derived TypeRefs wrap an immediate child and preserve Parser modifier order.
 
 ## Publication
 
@@ -55,4 +55,4 @@ That workload constructs one million types, one million self-pointer members, tw
 
 ## Next milestone
 
-SE-V3-07C adds sparse `Gn -> Gn+1` SourceContribution replacement and incremental Graph publication while preserving unchanged generation storage where allowed by the MVCC contract.
+SE-V3-07C adds sparse SourceContribution replacement and incremental publication into the single current Graph without retaining Graph history.

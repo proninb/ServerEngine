@@ -423,56 +423,50 @@ left.identity == right.identity
 
 Pointer numeric ordering is never semantic ordering.
 
-## 19. Committed Graph
+## 19. Current Graph
 
-Pointers are not a replacement for dense Graph handles.
-
-`G_n` should use generation-local compact handles for hot relations and cache density.
-
-Conceptually:
-
-```cpp
-struct type_entry {
-    std::uint32_t size = 0;
-    std::uint32_t alignment = 0;
-};
-```
-
-A cold/sidecar mapping may associate generation entities with Project identity:
+Pointers are not a replacement for dense Graph handles. The Server owns exactly one
+current compiled Graph. `type_handle` and `TypeRef` are compact addresses inside that
+current Graph; they are not Project semantic identity and are not persisted as such.
 
 ```text
-type_handle -> identity_ref
+identity_ref = WHO for Project lifetime
+type_handle  = WHERE in the current Graph
 ```
 
-The exact hot/cold layout is a later Graph milestone.
+Full build prepares detached complete storage. Incremental update prepares only sparse
+patches and append payload outside publication-sensitive code. No Graph history,
+MVCC generation set, generation number, or version-control state is retained.
 
-## 20. MVCC
+## 20. Publication
 
-Published `G_n` is immutable.
+All filesystem, parsing, semantic validation, allocation, and capacity preparation
+happens before publication. The Server then applies the already-prepared current-Graph
+update in a short no-fail publication boundary.
 
 ```text
-readers -> G_n
-builder -> constructs G_n+1 separately
-publish -> atomic generation replacement
+current Graph
+     ^
+     | runtime reads while build prepares elsewhere
+     |
+prepared build/update -> validate -> no-fail publish -> current Graph
 ```
 
-Publishing `G_n+1` does not mutate `G_n`.
-
-Project identity may be referenced by multiple retained generations simultaneously.
+The previous Graph state is not retained as a historical version after publication.
 
 ## 21. Failed builds
 
-A failed build must not mutate the currently published generation.
+A failed build must not mutate the currently published Graph.
 
-Project-level identity created while examining a failed build is semantically harmless because identity existence does not imply generation existence.
+Project-level identity created while examining a failed build is semantically harmless because identity existence does not imply presence in the current Graph.
 
 ```text
 identity exists in Project Context
         !=
-entity exists in current G
+entity exists in current Graph
 ```
 
-No generation facts are stored in the identity object.
+No compiled Graph facts are stored in the identity object.
 
 ## 22. SAVE / LOAD
 

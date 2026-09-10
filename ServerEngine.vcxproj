@@ -43,11 +43,14 @@
     <ClCompile Include="server_engine\config\server_configuration_loader.cpp" />
     <ClCompile Include="server_engine\project\project_configuration_loader.cpp" />
     <ClCompile Include="server_engine\project\project_context.cpp" />
+    <ClCompile Include="server_engine\project\project_build_orchestrator.cpp" />
     <ClCompile Include="server_engine\project\identity\identity_arena.cpp" />
     <ClCompile Include="server_engine\project\identity\identity_space.cpp" />
     <ClCompile Include="server_engine\project\frontend\source_facts_validation.cpp" />
     <ClCompile Include="server_engine\project\frontend\include_discovery.cpp" />
     <ClCompile Include="server_engine\project\frontend\source_frontend_generation.cpp" />
+    <ClCompile Include="server_engine\project\frontend\source_frontend_incremental.cpp" />
+    <ClCompile Include="server_engine\project\frontend\source_frontend_cache.cpp" />
     <ClCompile Include="server_engine\project\builder\source_contribution.cpp" />
     <ClCompile Include="server_engine\project\builder\generation_builder.cpp" />
     <ClCompile Include="server_engine\project\graph\graph.cpp" />
@@ -75,6 +78,7 @@
     <ClInclude Include="server_engine\project\project_configuration.hpp" />
     <ClInclude Include="server_engine\project\project_configuration_loader.hpp" />
     <ClInclude Include="server_engine\project\project_context.hpp" />
+    <ClInclude Include="server_engine\project\project_build_orchestrator.hpp" />
     <ClInclude Include="server_engine\project\identity\name_ref.hpp" />
     <ClInclude Include="server_engine\project\identity\identity_node.hpp" />
     <ClInclude Include="server_engine\project\identity\identity_arena.hpp" />
@@ -84,6 +88,7 @@
     <ClInclude Include="server_engine\project\frontend\parsed_source.hpp" />
     <ClInclude Include="server_engine\project\frontend\include_discovery.hpp" />
     <ClInclude Include="server_engine\project\frontend\source_frontend_generation.hpp" />
+    <ClInclude Include="server_engine\project\frontend\source_frontend_cache.hpp" />
     <ClInclude Include="server_engine\project\builder\source_contribution.hpp" />
     <ClInclude Include="server_engine\project\builder\generation_builder.hpp" />
     <ClInclude Include="server_engine\project\graph\type_handle.hpp" />
@@ -105,6 +110,7 @@
     <None Include="docs\SE_V3_06A_SOURCE_FACTS_CONTRACT.md" />
     <None Include="docs\SE_V3_06R_PRODUCTION_REUSE.md" />
     <None Include="docs\SE_V3_07AB_GENERATION_BUILDER_G0.md" />
+    <None Include="docs\SE_V3_08_PROJECT_BUILD_ORCHESTRATION.md" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

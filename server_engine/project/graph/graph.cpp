@@ -246,7 +246,6 @@ void graph::publish_prepared(prepared_graph_generation& prepared) noexcept {
     dependency_edges.swap(prepared.dependency_edges);
 
     live_type_count = prepared.live_type_count;
-    generation_value = prepared.generation;
 }
 
 void graph::publish_prepared(prepared_graph_update& prepared) noexcept {
@@ -310,7 +309,6 @@ void graph::publish_prepared(prepared_graph_update& prepared) noexcept {
     }
 
     live_type_count = prepared.live_type_count;
-    generation_value = prepared.generation;
 }
 
 } // namespace cw::server
