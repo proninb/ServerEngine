@@ -4,4 +4,58 @@
     <Filter Include="Source Files"><UniqueIdentifier>{69B8C41C-7C7B-4E1F-B388-EEAD8450F1F7}</UniqueIdentifier><Extensions>cpp;c</Extensions></Filter>
     <Filter Include="Header Files"><UniqueIdentifier>{E6D14675-A21C-4B62-86D9-0187E7D546C9}</UniqueIdentifier><Extensions>h;hpp</Extensions></Filter>
   </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="server_engine\main.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="server_engine\diagnostics\diagnostic_buffer.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="server_engine\json\json_parser.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="server_engine\config\server_configuration_loader.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="server_engine\project\project_configuration_loader.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="server_engine\project\project_context.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="server_engine\project\identity\identity_arena.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="server_engine\project\identity\identity_space.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="server_engine\project\frontend\source_facts_validation.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="server_engine\project\frontend\include_discovery.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="server_engine\project\frontend\source_frontend_generation.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="server_engine\project\source\source_hash.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="server_engine\project\source\file_snapshot.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="server_engine\project\source\source_manager.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="server_engine\project\parser\lexer.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="server_engine\project\parser\source_environment.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="server_engine\project\parser\source_parser.cpp"><Filter>Source Files</Filter></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="server_engine\status.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\operation.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\source_id.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\logging\log.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\diagnostics\diagnostic.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\diagnostics\diagnostic_buffer.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\diagnostics\diagnostic_descriptor.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\diagnostics\diagnostic_registry.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\json\json_parser.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\config\configuration_path.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\config\server_configuration.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\config\server_configuration_loader.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\project_root.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\project_configuration.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\project_configuration_loader.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\project_context.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\identity\name_ref.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\identity\identity_node.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\identity\identity_arena.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\identity\identity_space.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\frontend\source_facts.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\frontend\source_facts_validation.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\frontend\parsed_source.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\frontend\include_discovery.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\frontend\source_frontend_generation.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\source\source_hash.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\source\file_snapshot.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\source\source_snapshot.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\source\source_manager.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\parser\token.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\parser\lexer.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\parser\source_environment.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\parser\source_parser.hpp"><Filter>Header Files</Filter></ClInclude>
+  </ItemGroup>
 </Project>

@@ -48,9 +48,34 @@ inline constexpr diagnostic_descriptor project_configuration_read_failed{
     diagnostic_id{2005}, diagnostic_domain::project, diagnostic_severity::error,
     "project.configuration_read_failed", "Project configuration could not be read"};
 
+inline constexpr diagnostic_descriptor source_acquisition_failed{
+    diagnostic_id{3001}, diagnostic_domain::source, diagnostic_severity::error,
+    "source.acquisition_failed", "Source Manager could not acquire an immutable Source snapshot"};
+inline constexpr diagnostic_descriptor source_dependency_invalid{
+    diagnostic_id{3002}, diagnostic_domain::source, diagnostic_severity::error,
+    "source.dependency_invalid", "Source dependency references an invalid Source"};
+inline constexpr diagnostic_descriptor source_dependency_cycle{
+    diagnostic_id{3003}, diagnostic_domain::source, diagnostic_severity::error,
+    "source.dependency_cycle", "Source include dependency graph contains a cycle"};
+inline constexpr diagnostic_descriptor source_unsupported_directive{
+    diagnostic_id{3004}, diagnostic_domain::source, diagnostic_severity::error,
+    "source.unsupported_directive", "Source uses an unsupported preprocessing directive"};
+
 inline constexpr diagnostic_descriptor parser_invalid_source_facts{
     diagnostic_id{4001}, diagnostic_domain::parser, diagnostic_severity::error,
     "parser.invalid_source_facts", "Parser output violates the source_facts boundary contract"};
+inline constexpr diagnostic_descriptor parser_syntax_error{
+    diagnostic_id{4002}, diagnostic_domain::parser, diagnostic_severity::error,
+    "parser.syntax_error", "Source contains invalid syntax for the implemented language subset"};
+inline constexpr diagnostic_descriptor parser_unsupported_construct{
+    diagnostic_id{4003}, diagnostic_domain::parser, diagnostic_severity::error,
+    "parser.unsupported_construct", "Source uses a construct not implemented by the current Parser slice"};
+inline constexpr diagnostic_descriptor parser_unresolved_type{
+    diagnostic_id{4004}, diagnostic_domain::parser, diagnostic_severity::error,
+    "parser.unresolved_type", "Type name is not visible in the Source semantic environment"};
+inline constexpr diagnostic_descriptor parser_semantic_resolution_failed{
+    diagnostic_id{4005}, diagnostic_domain::parser, diagnostic_severity::error,
+    "parser.semantic_resolution_failed", "Parser semantic declaration resolution failed"};
 
 inline constexpr diagnostic_descriptor identity_initialization_failed{
     diagnostic_id{4501}, diagnostic_domain::identity, diagnostic_severity::fatal,

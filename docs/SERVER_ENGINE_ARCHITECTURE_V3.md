@@ -562,7 +562,9 @@ canonical pointer replay              PASS
 
 SE-V3-06A freezes `source_facts`, the Parser -> Generation Builder representation. Its structural validator confirms that no unresolved semantic reference can cross the boundary and that source/member/modifier ordering and dense ranges are well formed without performing name resolution.
 
-SE-V3-06B implements Source Manager immutable snapshot ownership and the minimal Parser producer around the frozen Project Context identity API.
+SE-V3-06R replaces the minimal SE-V3-06B frontend mechanics with production-oriented Source infrastructure adapted from `Server-Entry_OLD`: stable normalized-path `source_id`, immutable acquisition jobs, SHA-256 Source snapshots, compact Lexer tokens/directive spans, quoted-include DAG discovery, positional visibility, and dependency-ready parallel semantic waves. The OLD textual canonical-name/String Registry path is not imported.
+
+Parser receives no filesystem or preprocessing API. Source frontend removes the supported `#include "..."` / `#pragma once` directives before Parser invocation; unsupported directives and include-inside-scope fail closed. Parser declaration resolution returns Project-lifetime `identity_ref` directly, and type references use direct Parser/source-interface language lookup without a second Project Context canonicalization.
 
 The key integration path is:
 

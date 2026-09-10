@@ -42,6 +42,21 @@ enum class source_facts_error_code : std::uint8_t {
     modifier_partition,
     modifier_kind,
     modifier_value,
+    enum_identity_missing,
+    enum_identity_kind,
+    enum_declaration_kind,
+    enum_range,
+    enum_order,
+    enum_enumerator_range,
+    enum_declaration_has_values,
+    enum_value_partition,
+    enum_underlying_type,
+    enum_value_name_range,
+    enum_value_expression_range,
+    enum_value_type,
+    declaration_sequence_index,
+    declaration_sequence_order,
+    declaration_sequence_range,
 };
 
 enum class source_fact_category : std::uint8_t {
@@ -50,6 +65,9 @@ enum class source_fact_category : std::uint8_t {
     record_fact,
     member_fact,
     modifier_fact,
+    enum_fact,
+    enum_value_fact,
+    declaration_ref,
 };
 
 // Pinpoints one malformed Parser -> Builder contract record without carrying strings
@@ -131,6 +149,36 @@ struct source_facts_validation_error {
         return "type modifier has an unsupported modifier kind";
     case source_facts_error_code::modifier_value:
         return "type modifier payload violates its structural contract";
+    case source_facts_error_code::enum_identity_missing:
+        return "enum fact has no resolved identity";
+    case source_facts_error_code::enum_identity_kind:
+        return "enum fact identity is not a type identity";
+    case source_facts_error_code::enum_declaration_kind:
+        return "enum fact has an unsupported declaration kind";
+    case source_facts_error_code::enum_range:
+        return "enum declaration range is outside the Source snapshot";
+    case source_facts_error_code::enum_order:
+        return "enum facts are not in source declaration order";
+    case source_facts_error_code::enum_enumerator_range:
+        return "enum enumerator range is outside the flat enum-value array";
+    case source_facts_error_code::enum_declaration_has_values:
+        return "enum declaration carries definition enumerators";
+    case source_facts_error_code::enum_value_partition:
+        return "enum definitions do not form an exact lexical partition of enum values";
+    case source_facts_error_code::enum_underlying_type:
+        return "enum explicit underlying type is not an integral intrinsic type";
+    case source_facts_error_code::enum_value_name_range:
+        return "enum value name range is outside the Source snapshot";
+    case source_facts_error_code::enum_value_expression_range:
+        return "enum value expression range is outside the Source snapshot";
+    case source_facts_error_code::enum_value_type:
+        return "enum value carries a non-integral intrinsic type";
+    case source_facts_error_code::declaration_sequence_index:
+        return "declaration sequence does not reference each fact exactly once in per-kind order";
+    case source_facts_error_code::declaration_sequence_order:
+        return "declaration sequence is not in lexical source order";
+    case source_facts_error_code::declaration_sequence_range:
+        return "declaration sequence range does not match the referenced fact";
     }
     return "source facts validation failed";
 }

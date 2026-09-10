@@ -11,18 +11,14 @@
 
 namespace cw::server {
 
-// Byte range inside the immutable Source snapshot referenced by one source_facts packet.
-struct source_span {
+struct source_span final {
     std::uint32_t offset = 0;
     std::uint32_t length = 0;
 
-    [[nodiscard]] constexpr bool empty() const noexcept {
-        return length == 0;
-    }
+    [[nodiscard]] constexpr bool empty() const noexcept { return length == 0; }
 };
 
-// Dense range inside one of the flat arrays owned by the producer of source_facts.
-struct source_fact_range {
+struct source_fact_range final {
     std::uint32_t begin = 0;
     std::uint32_t count = 0;
 };
@@ -62,16 +58,15 @@ enum class source_type_modifier_kind : std::uint8_t {
     unbounded_array,
 };
 
-// One declarator transformation. Modifiers are applied from the base type outward,
-// left to right. value is used only by bounded_array and contains its element count.
-struct source_type_modifier {
+// Declarator transformation applied from base type outward, left to right.
+struct source_type_modifier final {
     std::uint64_t value = 0;
     source_type_modifier_kind kind = source_type_modifier_kind::pointer;
 };
 
-// Fully resolved source-language type reference. A base is either one Project
-// identity or one intrinsic Language/ABI code; unresolved identifier text is forbidden.
-struct source_type_ref {
+// Fully resolved source-language type reference. Exactly one base representation
+// is present: project semantic identity or intrinsic Language/ABI type code.
+struct source_type_ref final {
     identity_ref identity = nullptr;
     intrinsic_type intrinsic = intrinsic_type::none;
     source_fact_range modifiers{};
@@ -81,7 +76,6 @@ struct source_type_ref {
         identity_ref base,
         source_fact_range modifier_range,
         source_span source_spelling) noexcept {
-
         return source_type_ref{base, intrinsic_type::none, modifier_range, source_spelling};
     }
 
@@ -89,13 +83,11 @@ struct source_type_ref {
         intrinsic_type base,
         source_fact_range modifier_range,
         source_span source_spelling) noexcept {
-
         return source_type_ref{nullptr, base, modifier_range, source_spelling};
     }
 };
 
-// One namespace contribution in this Source. identity is already canonical Project identity.
-struct source_namespace_fact {
+struct source_namespace_fact final {
     identity_ref identity = nullptr;
     source_span declaration{};
 };
@@ -111,9 +103,7 @@ enum class source_record_kind : std::uint8_t {
     union_type,
 };
 
-// One C++ record declaration or definition. Definition members occupy one contiguous
-// lexical-order range in source_facts::members(); declarations have no members.
-struct source_record_fact {
+struct source_record_fact final {
     identity_ref identity = nullptr;
     source_fact_range members{};
     source_span declaration{};
@@ -127,18 +117,57 @@ enum class source_member_access : std::uint8_t {
     private_access,
 };
 
-// One non-static instance data member. name and declaration refer to the immutable
-// Source snapshot; type already contains a resolved semantic identity or intrinsic type.
-struct source_member_fact {
+struct source_member_fact final {
     source_type_ref type{};
     source_span name{};
     source_span declaration{};
     source_member_access access = source_member_access::public_access;
 };
 
-// Immutable zero-allocation Parser -> Generation Builder boundary. All spans and source
-// text are borrowed from build-lifetime storage; referenced identities remain valid for
-// the Project lifetime. This packet is transient process memory and is never serialized.
+// Parser-interpreted integer value. bits are the raw value representation and
+// intrinsic identifies the source-language integer category used by later ABI work.
+struct source_integral_constant final {
+    intrinsic_type intrinsic = intrinsic_type::signed_int;
+    std::uint64_t bits = 0;
+};
+
+struct source_enum_value_fact final {
+    source_span name{};
+    source_integral_constant value{};
+    source_span expression{};
+};
+
+enum class source_enum_declaration_kind : std::uint8_t {
+    declaration,
+    definition,
+};
+
+struct source_enum_fact final {
+    identity_ref identity = nullptr;
+    source_fact_range enumerators{};
+    source_span declaration{};
+    source_span underlying_spelling{};
+    intrinsic_type explicit_underlying = intrinsic_type::none;
+    source_enum_declaration_kind declaration_kind = source_enum_declaration_kind::declaration;
+    bool scoped = false;
+};
+
+enum class source_declaration_kind : std::uint8_t {
+    namespace_scope,
+    record_type,
+    enum_type,
+};
+
+// Preserves total lexical declaration order across separate flat fact arrays so
+// Generation Builder never sorts or reconstructs declaration ordering.
+struct source_declaration_ref final {
+    std::uint32_t index = 0;
+    source_declaration_kind kind = source_declaration_kind::record_type;
+    source_span declaration{};
+};
+
+// Immutable zero-allocation Parser -> Generation Builder boundary. Spans borrow
+// immutable Source bytes; identity_ref values remain valid for Project lifetime.
 class source_facts final {
 public:
     constexpr source_facts(
@@ -148,12 +177,27 @@ public:
         std::span<const source_record_fact> records,
         std::span<const source_member_fact> members,
         std::span<const source_type_modifier> modifiers) noexcept
+        : source_facts(source, source_text, namespaces, records, members, modifiers, {}, {}, {}) {}
+
+    constexpr source_facts(
+        source_id source,
+        std::string_view source_text,
+        std::span<const source_namespace_fact> namespaces,
+        std::span<const source_record_fact> records,
+        std::span<const source_member_fact> members,
+        std::span<const source_type_modifier> modifiers,
+        std::span<const source_enum_fact> enums,
+        std::span<const source_enum_value_fact> enum_values,
+        std::span<const source_declaration_ref> declarations) noexcept
         : source_value(source),
           source_text_value(source_text),
           namespaces_value(namespaces),
           records_value(records),
           members_value(members),
-          modifiers_value(modifiers) {}
+          modifiers_value(modifiers),
+          enums_value(enums),
+          enum_values_value(enum_values),
+          declarations_value(declarations) {}
 
     [[nodiscard]] constexpr source_id source() const noexcept { return source_value; }
     [[nodiscard]] constexpr std::string_view source_text() const noexcept { return source_text_value; }
@@ -161,6 +205,9 @@ public:
     [[nodiscard]] constexpr std::span<const source_record_fact> records() const noexcept { return records_value; }
     [[nodiscard]] constexpr std::span<const source_member_fact> members() const noexcept { return members_value; }
     [[nodiscard]] constexpr std::span<const source_type_modifier> modifiers() const noexcept { return modifiers_value; }
+    [[nodiscard]] constexpr std::span<const source_enum_fact> enums() const noexcept { return enums_value; }
+    [[nodiscard]] constexpr std::span<const source_enum_value_fact> enum_values() const noexcept { return enum_values_value; }
+    [[nodiscard]] constexpr std::span<const source_declaration_ref> declarations() const noexcept { return declarations_value; }
 
     [[nodiscard]] constexpr std::string_view text(source_span range) const noexcept {
         if (range.offset > source_text_value.size() ||
@@ -177,6 +224,9 @@ private:
     std::span<const source_record_fact> records_value;
     std::span<const source_member_fact> members_value;
     std::span<const source_type_modifier> modifiers_value;
+    std::span<const source_enum_fact> enums_value;
+    std::span<const source_enum_value_fact> enum_values_value;
+    std::span<const source_declaration_ref> declarations_value;
 };
 
 static_assert(std::is_trivially_copyable_v<source_span>);
@@ -186,6 +236,9 @@ static_assert(std::is_trivially_copyable_v<source_type_ref>);
 static_assert(std::is_trivially_copyable_v<source_namespace_fact>);
 static_assert(std::is_trivially_copyable_v<source_record_fact>);
 static_assert(std::is_trivially_copyable_v<source_member_fact>);
+static_assert(std::is_trivially_copyable_v<source_enum_fact>);
+static_assert(std::is_trivially_copyable_v<source_enum_value_fact>);
+static_assert(std::is_trivially_copyable_v<source_declaration_ref>);
 static_assert(sizeof(source_span) == 8);
 static_assert(sizeof(source_fact_range) == 8);
 

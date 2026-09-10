@@ -52,6 +52,12 @@ namespace {
         return "member";
     case source_fact_category::modifier_fact:
         return "modifier";
+    case source_fact_category::enum_fact:
+        return "enum";
+    case source_fact_category::enum_value_fact:
+        return "enum_value";
+    case source_fact_category::declaration_ref:
+        return "declaration";
     }
     return "unknown";
 }
@@ -261,6 +267,129 @@ status validate_source_facts(
         if ((bounded_array && item.value == 0) || (!bounded_array && item.value != 0)) {
             return fail(error, source_facts_error_code::modifier_value,
                 source_fact_category::modifier_fact, index);
+        }
+    }
+
+
+    const auto enum_values = facts.enum_values();
+    const auto enums = facts.enums();
+    std::size_t expected_enum_value_begin = 0;
+    std::uint32_t previous_enum_offset = 0;
+    for (std::size_t index = 0; index < enums.size(); ++index) {
+        const auto& item = enums[index];
+        if (item.identity == nullptr) {
+            return fail(error, source_facts_error_code::enum_identity_missing,
+                source_fact_category::enum_fact, index, item.declaration);
+        }
+        if (item.identity->kind() != identity_kind::type) {
+            return fail(error, source_facts_error_code::enum_identity_kind,
+                source_fact_category::enum_fact, index, item.declaration);
+        }
+        if (item.declaration.length == 0 || !valid_span(item.declaration, source_size)) {
+            return fail(error, source_facts_error_code::enum_range,
+                source_fact_category::enum_fact, index, item.declaration);
+        }
+        if (index != 0 && item.declaration.offset < previous_enum_offset) {
+            return fail(error, source_facts_error_code::enum_order,
+                source_fact_category::enum_fact, index, item.declaration);
+        }
+        previous_enum_offset = item.declaration.offset;
+        if (!valid_range(item.enumerators, enum_values.size())) {
+            return fail(error, source_facts_error_code::enum_enumerator_range,
+                source_fact_category::enum_fact, index, item.declaration);
+        }
+        if (item.enumerators.begin != expected_enum_value_begin) {
+            return fail(error, source_facts_error_code::enum_value_partition,
+                source_fact_category::enum_fact, index, item.declaration);
+        }
+        if (item.explicit_underlying != intrinsic_type::none &&
+            (!valid_intrinsic(item.explicit_underlying) ||
+             item.explicit_underlying >= intrinsic_type::float_type)) {
+            return fail(error, source_facts_error_code::enum_underlying_type,
+                source_fact_category::enum_fact, index, item.underlying_spelling);
+        }
+        if (item.declaration_kind == source_enum_declaration_kind::declaration) {
+            if (item.enumerators.count != 0) {
+                return fail(error, source_facts_error_code::enum_declaration_has_values,
+                    source_fact_category::enum_fact, index, item.declaration);
+            }
+            continue;
+        }
+        if (item.declaration_kind != source_enum_declaration_kind::definition) {
+            return fail(error, source_facts_error_code::enum_declaration_kind,
+                source_fact_category::enum_fact, index, item.declaration);
+        }
+        expected_enum_value_begin += item.enumerators.count;
+        const auto end = static_cast<std::size_t>(item.enumerators.begin) + item.enumerators.count;
+        for (std::size_t value_index = item.enumerators.begin; value_index < end; ++value_index) {
+            const auto& value = enum_values[value_index];
+            if (value.name.length == 0 || !valid_span(value.name, source_size) ||
+                !contains(item.declaration, value.name)) {
+                return fail(error, source_facts_error_code::enum_value_name_range,
+                    source_fact_category::enum_value_fact, value_index, value.name);
+            }
+            if (value.expression.length != 0 &&
+                (!valid_span(value.expression, source_size) || !contains(item.declaration, value.expression))) {
+                return fail(error, source_facts_error_code::enum_value_expression_range,
+                    source_fact_category::enum_value_fact, value_index, value.expression);
+            }
+            if (!valid_intrinsic(value.value.intrinsic) ||
+                value.value.intrinsic >= intrinsic_type::float_type) {
+                return fail(error, source_facts_error_code::enum_value_type,
+                    source_fact_category::enum_value_fact, value_index, value.expression);
+            }
+        }
+    }
+    if (expected_enum_value_begin != enum_values.size()) {
+        return fail(error, source_facts_error_code::enum_value_partition,
+            source_fact_category::packet, expected_enum_value_begin);
+    }
+
+    const auto declarations = facts.declarations();
+    if (!declarations.empty()) {
+        std::size_t next_namespace = 0;
+        std::size_t next_record = 0;
+        std::size_t next_enum = 0;
+        std::uint32_t previous_offset = 0;
+        for (std::size_t index = 0; index < declarations.size(); ++index) {
+            const auto& item = declarations[index];
+            if (index != 0 && item.declaration.offset < previous_offset) {
+                return fail(error, source_facts_error_code::declaration_sequence_order,
+                    source_fact_category::declaration_ref, index, item.declaration);
+            }
+            previous_offset = item.declaration.offset;
+            source_span expected{};
+            switch (item.kind) {
+            case source_declaration_kind::namespace_scope:
+                if (item.index != next_namespace || next_namespace >= namespaces.size()) {
+                    return fail(error, source_facts_error_code::declaration_sequence_index,
+                        source_fact_category::declaration_ref, index, item.declaration);
+                }
+                expected = namespaces[next_namespace++].declaration;
+                break;
+            case source_declaration_kind::record_type:
+                if (item.index != next_record || next_record >= records.size()) {
+                    return fail(error, source_facts_error_code::declaration_sequence_index,
+                        source_fact_category::declaration_ref, index, item.declaration);
+                }
+                expected = records[next_record++].declaration;
+                break;
+            case source_declaration_kind::enum_type:
+                if (item.index != next_enum || next_enum >= enums.size()) {
+                    return fail(error, source_facts_error_code::declaration_sequence_index,
+                        source_fact_category::declaration_ref, index, item.declaration);
+                }
+                expected = enums[next_enum++].declaration;
+                break;
+            }
+            if (expected.offset != item.declaration.offset || expected.length != item.declaration.length) {
+                return fail(error, source_facts_error_code::declaration_sequence_range,
+                    source_fact_category::declaration_ref, index, item.declaration);
+            }
+        }
+        if (next_namespace != namespaces.size() || next_record != records.size() || next_enum != enums.size()) {
+            return fail(error, source_facts_error_code::declaration_sequence_index,
+                source_fact_category::packet, declarations.size());
         }
     }
 

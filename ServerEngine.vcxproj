@@ -46,6 +46,14 @@
     <ClCompile Include="server_engine\project\identity\identity_arena.cpp" />
     <ClCompile Include="server_engine\project\identity\identity_space.cpp" />
     <ClCompile Include="server_engine\project\frontend\source_facts_validation.cpp" />
+    <ClCompile Include="server_engine\project\frontend\include_discovery.cpp" />
+    <ClCompile Include="server_engine\project\frontend\source_frontend_generation.cpp" />
+    <ClCompile Include="server_engine\project\source\source_hash.cpp" />
+    <ClCompile Include="server_engine\project\source\file_snapshot.cpp" />
+    <ClCompile Include="server_engine\project\source\source_manager.cpp" />
+    <ClCompile Include="server_engine\project\parser\lexer.cpp" />
+    <ClCompile Include="server_engine\project\parser\source_environment.cpp" />
+    <ClCompile Include="server_engine\project\parser\source_parser.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="server_engine\status.hpp" />
@@ -70,12 +78,24 @@
     <ClInclude Include="server_engine\project\identity\identity_space.hpp" />
     <ClInclude Include="server_engine\project\frontend\source_facts.hpp" />
     <ClInclude Include="server_engine\project\frontend\source_facts_validation.hpp" />
+    <ClInclude Include="server_engine\project\frontend\parsed_source.hpp" />
+    <ClInclude Include="server_engine\project\frontend\include_discovery.hpp" />
+    <ClInclude Include="server_engine\project\frontend\source_frontend_generation.hpp" />
+    <ClInclude Include="server_engine\project\source\source_hash.hpp" />
+    <ClInclude Include="server_engine\project\source\file_snapshot.hpp" />
+    <ClInclude Include="server_engine\project\source\source_snapshot.hpp" />
+    <ClInclude Include="server_engine\project\source\source_manager.hpp" />
+    <ClInclude Include="server_engine\project\parser\token.hpp" />
+    <ClInclude Include="server_engine\project\parser\lexer.hpp" />
+    <ClInclude Include="server_engine\project\parser\source_environment.hpp" />
+    <ClInclude Include="server_engine\project\parser\source_parser.hpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="server.json" />
     <None Include="project.json" />
     <None Include="docs\SERVER_ENGINE_ARCHITECTURE_V3.md" />
     <None Include="docs\SE_V3_06A_SOURCE_FACTS_CONTRACT.md" />
+    <None Include="docs\SE_V3_06R_PRODUCTION_REUSE.md" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

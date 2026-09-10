@@ -2,7 +2,7 @@
 
 Clean Architecture V3 bootstrap for the Curtiss-Wright Server Engine project.
 
-This repository reuses only proven foundation contracts from the former `Server-Entry` project. The V2 stable-ID, Builder, Graph, Parser, Runtime, and SHM implementations are not carried forward.
+This repository reuses proven implementation mechanisms from the former `Server-Entry_OLD` project only where they preserve V3 contracts. V2 stable-ID/String-Registry identity, Builder canonicalization, Graph identity, Runtime, and SHM implementations are not carried forward.
 
 ## Current foundation
 
@@ -92,18 +92,17 @@ server.json
     -> create Project semantic identity root
 ```
 
-Source Manager, Parser, Generation Builder, Graph, persistence, Runtime, and SHM are intentionally not implemented yet. The Parser -> Builder `source_facts` boundary is implemented and frozen in SE-V3-06A.
+SE-V3-06R replaces the minimal 06B frontend mechanics with production-oriented Source Manager acquisition, SHA-256 snapshots, Lexer directive spans, quoted-include DAG discovery, dependency-ready parallel Parser scheduling, positional visibility, and direct `identity_ref` source interfaces. Generation Builder, Graph, persistence, Runtime, and SHM remain intentionally absent.
 
 ## Next implementation sequence
 
-1. Implement Source Manager immutable Source snapshot ownership and dependency contracts.
-2. Implement the minimal Parser producer around `project_context::resolve_declaration()`.
-3. Emit the frozen `source_facts` representation with direct `identity_ref` type/namespace references.
-4. Implement Generation Builder with zero name/identity lookup after semantic resolution.
-5. Implement immutable `G0` with dense generation-local handles.
-6. Implement `SAVE G0` / `LOAD G0` using file-local IDs; never serialize pointers.
-7. Implement sparse `Gn -> Gn+1` MVCC publication.
-8. Add client-query and SHM materialization boundaries.
+1. Adapt the proven OLD SourceContribution + Graph construction algorithms to V3 `identity_ref` input.
+2. Implement Generation Builder with zero source-language name/identity lookup.
+3. Materialize immutable `G0` with dense generation-local handles and compact definition arenas.
+4. Add sparse `Gn -> Gn+1` SourceContribution replacement and MVCC publication.
+5. Port Source Manager persistence/change tracking after the live build path is frozen.
+6. Implement `SAVE G0` / `LOAD G0` using file-local identity IDs; never serialize pointers.
+7. Add Runtime and SHM materialization boundaries.
 
 ## Provenance
 
@@ -125,3 +124,15 @@ Project semantic resolution uses one lock-free fixed bucket index instead of sib
 ## SE-V3-06A Source Facts Contract
 
 The Parser -> Generation Builder boundary is now represented by immutable `source_facts`: direct Project `identity_ref` values for semantic entities, intrinsic Language/ABI codes for builtins, flat member/modifier arrays, and Source byte ranges for non-identity names and diagnostics. Unresolved names, `string_id`, numeric semantic IDs, and identity canonicalization do not cross this boundary. See `docs/SE_V3_06A_SOURCE_FACTS_CONTRACT.md`.
+
+## SE-V3-06R Production Source Frontend Reuse
+
+The live G0 Source frontend now adapts proven mechanisms from `Server-Entry_OLD`: immutable acquisition jobs, SHA-256 Source snapshots, compact lexical tokens/directive spans, include-DAG discovery, and dependency-ready semantic scheduling. V3 replaces OLD textual canonical-name/String-Registry flow with Project-lifetime `identity_ref` and a direct Parser-visible `source_interface`. The scheduler uses deterministic coordinator waves rather than the OLD mutex/condition-variable queues. See `docs/SE_V3_06R_PRODUCTION_REUSE.md`.
+
+Source Manager scaling can be checked independently with:
+
+```text
+server_engine_source_manager_benchmark
+```
+
+The default gate resolves and commits 100K and 1M normalized path identities and rejects superlinear scaling above exponent 1.50.

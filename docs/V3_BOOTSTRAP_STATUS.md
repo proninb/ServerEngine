@@ -25,8 +25,10 @@
 - [ ] numeric semantic `stable_id`
 - [ ] Identity Registry
 - [ ] String Registry in semantic identity
-- [ ] Source Manager V3
-- [ ] Parser V3
+- [x] Source Manager transactional path identity + immutable acquisition/snapshots
+- [x] Lexer directive spans + quoted include DAG / positional visibility orchestration
+- [x] Dependency-ready parallel Parser -> `source_facts` production
+- [ ] Full Parser V3 language coverage
 - [ ] Generation Builder
 - [ ] immutable Graph generation
 - [ ] G0 persistence
@@ -62,3 +64,24 @@
 8. Member names are zero-copy Source ranges and are not semantic identities.
 9. Validation is structural only and performs no name/identity lookup.
 10. The frozen Project semantic identity implementation is unchanged.
+
+## SE-V3-06B frontend integration gates
+
+1. Source Manager owns filesystem acquisition; Parser consumes immutable `source_snapshot` only.
+2. Publishing a new revision for one `source_id` does not invalidate existing snapshots.
+3. Parser declaration resolution returns canonical Project `identity_ref` directly.
+4. Type references perform one Parser language-scope lookup and do not invoke Project Context again.
+5. Cross-source visibility is supplied as direct visible `identity_ref` values.
+6. Parser output publication is transactional and is structurally validated before replacement.
+7. Lexer reports directive spans; frontend accepts only quoted `#include` and `#pragma once`, removes directives before Parser, and rejects unsupported directives/include-inside-scope.
+8. Dependency-ready semantic levels parse in parallel without a mutex/condition-variable scheduler; coordinator applies Source Manager changes deterministically.
+9. Parser production code contains no filesystem/file-I/O API, `std::unordered_map`, or sorting canonicalization.
+10. Frozen Project identity implementation remains byte-for-byte unchanged; source_facts is extended additively for enums and total declaration order.
+
+## SE-V3-06R production reuse integration
+
+1. Source acquisition/hash/include-DAG/Lexer scheduling mechanisms are adapted from the proven OLD implementation, not re-invented as a parallel semantic identity system.
+2. Source Manager path lookup is coordinator-owned and independently scale-gated at 100K/1M Sources.
+3. Shared/transitive includes resolve to one Source identity and direct canonical Project `identity_ref` values.
+4. V2 `stable_id`, `string_id`, String Registry canonicalization, Builder lookup, and mutex-based frontend queues are not imported.
+5. Source Manager persistence/change tracking and Graph/Builder reuse are deferred to subsequent milestones.
