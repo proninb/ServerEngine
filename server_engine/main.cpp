@@ -47,7 +47,7 @@ int main(int argc, char** argv) {
 
     project_context context{std::move(project)};
 
-    std::cout << "Server Entry V3 foundation initialized\n";
+    std::cout << "Server Engine foundation initialized\n";
     std::cout << "Project: " << context.configuration().name << '\n';
     std::cout << "Project items: " << context.configuration().project.size() << '\n';
     std::cout << "Identity atoms: " << context.identities().size() << " (root only)\n";

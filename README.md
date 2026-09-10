@@ -1,6 +1,6 @@
-# Server Entry V3
+# Server Engine
 
-Clean Architecture V3 bootstrap for the Curtiss-Wright Server Entry project.
+Clean Architecture V3 bootstrap for the Curtiss-Wright Server Engine project.
 
 This repository starts from the proven infrastructure contracts in `proninb/Server-Entry` (`main`) but deliberately does **not** carry the V2 Graph/Builder/Parser/stable-ID implementation forward.
 
@@ -16,7 +16,7 @@ This repository starts from the proven infrastructure contracts in `proninb/Serv
 - Project-lifetime pointer identity registry;
 - stable-address `identity_node` atoms;
 - no numeric semantic `stable_id`;
-- architecture baseline in `docs/SERVER_ENTRY_ARCHITECTURE_V3.md`;
+- architecture baseline in `docs/SERVER_ENGINE_ARCHITECTURE_V3.md`;
 - CMake build/test path and Visual Studio 18 / v145 solution/project.
 
 ## Fundamental identity contract
@@ -38,7 +38,7 @@ SHM reference    = runtime-specific cross-process representation
 Open:
 
 ```text
-ServerEntryV3.sln
+ServerEngine.sln
 ```
 
 The project currently targets Visual Studio 18 toolset `v145`, C++20, x64.
@@ -56,7 +56,7 @@ ctest --test-dir build --output-on-failure
 From the repository root:
 
 ```text
-server_entry_v3 [server-configuration-path]
+server_engine [server-configuration-path]
 ```
 
 If no path is supplied, `server.json` is used.

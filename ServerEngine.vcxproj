@@ -8,7 +8,7 @@
     <VCProjectVersion>18.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
     <ProjectGuid>{E213EE44-6DF4-4F6F-8CE0-A0D35DC00103}</ProjectGuid>
-    <RootNamespace>ServerEntryV3</RootNamespace>
+    <RootNamespace>ServerEngine</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -28,7 +28,7 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
-  <PropertyGroup><OutDir>$(SolutionDir)out\$(Configuration)\</OutDir><IntDir>$(SolutionDir)out\obj\$(Configuration)\</IntDir><TargetName>server_entry_v3</TargetName></PropertyGroup>
+  <PropertyGroup><OutDir>$(SolutionDir)out\$(Configuration)\</OutDir><IntDir>$(SolutionDir)out\obj\$(Configuration)\</IntDir><TargetName>server_engine</TargetName></PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile><WarningLevel>Level4</WarningLevel><SDLCheck>true</SDLCheck><ConformanceMode>true</ConformanceMode><LanguageStandard>stdcpp20</LanguageStandard></ClCompile>
   </ItemDefinitionGroup>
@@ -37,38 +37,38 @@
     <Link><EnableCOMDATFolding>true</EnableCOMDATFolding><OptimizeReferences>true</OptimizeReferences></Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="server_entry\main.cpp" />
-    <ClCompile Include="server_entry\diagnostics\diagnostic_buffer.cpp" />
-    <ClCompile Include="server_entry\json\json_parser.cpp" />
-    <ClCompile Include="server_entry\config\server_configuration_loader.cpp" />
-    <ClCompile Include="server_entry\project\project_configuration_loader.cpp" />
-    <ClCompile Include="server_entry\project\project_context.cpp" />
-    <ClCompile Include="server_entry\project\string\string_registry.cpp" />
-    <ClCompile Include="server_entry\project\identity\identity_registry.cpp" />
+    <ClCompile Include="server_engine\main.cpp" />
+    <ClCompile Include="server_engine\diagnostics\diagnostic_buffer.cpp" />
+    <ClCompile Include="server_engine\json\json_parser.cpp" />
+    <ClCompile Include="server_engine\config\server_configuration_loader.cpp" />
+    <ClCompile Include="server_engine\project\project_configuration_loader.cpp" />
+    <ClCompile Include="server_engine\project\project_context.cpp" />
+    <ClCompile Include="server_engine\project\string\string_registry.cpp" />
+    <ClCompile Include="server_engine\project\identity\identity_registry.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="server_entry\status.hpp" />
-    <ClInclude Include="server_entry\operation.hpp" />
-    <ClInclude Include="server_entry\source_id.hpp" />
-    <ClInclude Include="server_entry\string_id.hpp" />
-    <ClInclude Include="server_entry\logging\log.hpp" />
-    <ClInclude Include="server_entry\diagnostics\diagnostic.hpp" />
-    <ClInclude Include="server_entry\diagnostics\diagnostic_buffer.hpp" />
-    <ClInclude Include="server_entry\diagnostics\diagnostic_descriptor.hpp" />
-    <ClInclude Include="server_entry\diagnostics\diagnostic_registry.hpp" />
-    <ClInclude Include="server_entry\json\json_parser.hpp" />
-    <ClInclude Include="server_entry\config\configuration_path.hpp" />
-    <ClInclude Include="server_entry\config\server_configuration.hpp" />
-    <ClInclude Include="server_entry\config\server_configuration_loader.hpp" />
-    <ClInclude Include="server_entry\project\project_root.hpp" />
-    <ClInclude Include="server_entry\project\project_configuration.hpp" />
-    <ClInclude Include="server_entry\project\project_configuration_loader.hpp" />
-    <ClInclude Include="server_entry\project\project_context.hpp" />
-    <ClInclude Include="server_entry\project\string\string_registry.hpp" />
-    <ClInclude Include="server_entry\project\identity\identity_node.hpp" />
-    <ClInclude Include="server_entry\project\identity\identity_registry.hpp" />
+    <ClInclude Include="server_engine\status.hpp" />
+    <ClInclude Include="server_engine\operation.hpp" />
+    <ClInclude Include="server_engine\source_id.hpp" />
+    <ClInclude Include="server_engine\string_id.hpp" />
+    <ClInclude Include="server_engine\logging\log.hpp" />
+    <ClInclude Include="server_engine\diagnostics\diagnostic.hpp" />
+    <ClInclude Include="server_engine\diagnostics\diagnostic_buffer.hpp" />
+    <ClInclude Include="server_engine\diagnostics\diagnostic_descriptor.hpp" />
+    <ClInclude Include="server_engine\diagnostics\diagnostic_registry.hpp" />
+    <ClInclude Include="server_engine\json\json_parser.hpp" />
+    <ClInclude Include="server_engine\config\configuration_path.hpp" />
+    <ClInclude Include="server_engine\config\server_configuration.hpp" />
+    <ClInclude Include="server_engine\config\server_configuration_loader.hpp" />
+    <ClInclude Include="server_engine\project\project_root.hpp" />
+    <ClInclude Include="server_engine\project\project_configuration.hpp" />
+    <ClInclude Include="server_engine\project\project_configuration_loader.hpp" />
+    <ClInclude Include="server_engine\project\project_context.hpp" />
+    <ClInclude Include="server_engine\project\string\string_registry.hpp" />
+    <ClInclude Include="server_engine\project\identity\identity_node.hpp" />
+    <ClInclude Include="server_engine\project\identity\identity_registry.hpp" />
   </ItemGroup>
-  <ItemGroup><None Include="server.json" /><None Include="project.json" /><None Include="docs\SERVER_ENTRY_ARCHITECTURE_V3.md" /></ItemGroup>
+  <ItemGroup><None Include="server.json" /><None Include="project.json" /><None Include="docs\SERVER_ENGINE_ARCHITECTURE_V3.md" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
 </Project>

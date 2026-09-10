@@ -1,7 +1,7 @@
-#include "../server_entry/config/server_configuration_loader.hpp"
-#include "../server_entry/project/project_configuration_loader.hpp"
-#include "../server_entry/project/identity/identity_registry.hpp"
-#include "../server_entry/project/string/string_registry.hpp"
+#include "../server_engine/config/server_configuration_loader.hpp"
+#include "../server_engine/project/project_configuration_loader.hpp"
+#include "../server_engine/project/identity/identity_registry.hpp"
+#include "../server_engine/project/string/string_registry.hpp"
 
 #include <filesystem>
 #include <string_view>
