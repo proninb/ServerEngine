@@ -92,17 +92,15 @@ server.json
     -> create Project semantic identity root
 ```
 
-SE-V3-06R replaces the minimal 06B frontend mechanics with production-oriented Source Manager acquisition, SHA-256 snapshots, Lexer directive spans, quoted-include DAG discovery, dependency-ready parallel Parser scheduling, positional visibility, and direct `identity_ref` source interfaces. SE-V3-06P then separates filesystem normalization from hot normalized-path identity lookup and applies the compact Source Manager path-index layout proven by benchmark. Generation Builder, Graph, persistence, Runtime, and SHM remain intentionally absent.
+SE-V3-06R replaces the minimal 06B frontend mechanics with production-oriented Source Manager acquisition, SHA-256 snapshots, Lexer directive spans, quoted-include DAG discovery, dependency-ready parallel Parser scheduling, positional visibility, and direct `identity_ref` source interfaces. SE-V3-06P then separates filesystem normalization from hot normalized-path identity lookup and applies the compact Source Manager path-index layout proven by benchmark. SE-V3-07A+07B now adds flat SourceContribution provenance, a direct-identity Generation Builder, and immutable detached G0 Graph publication. Sparse incremental Graph construction, persistence, Runtime, and SHM remain intentionally absent.
 
 ## Next implementation sequence
 
-1. Adapt the proven OLD SourceContribution + Graph construction algorithms to V3 `identity_ref` input.
-2. Implement Generation Builder with zero source-language name/identity lookup.
-3. Materialize immutable `G0` with dense generation-local handles and compact definition arenas.
-4. Add sparse `Gn -> Gn+1` SourceContribution replacement and MVCC publication.
-5. Port Source Manager persistence/change tracking after the live build path is frozen.
-6. Implement `SAVE G0` / `LOAD G0` using file-local identity IDs; never serialize pointers.
-7. Add Runtime and SHM materialization boundaries.
+1. Add sparse `Gn -> Gn+1` SourceContribution replacement and MVCC Graph publication.
+2. Add affected-closure validation and preserve unchanged generation storage where the incremental contract permits it.
+3. Port Source Manager persistence/change tracking after the live build path is frozen.
+4. Implement `SAVE G0` / `LOAD G0` using file-local identity IDs; never serialize pointers.
+5. Add Runtime and SHM materialization boundaries.
 
 ## Provenance
 
@@ -142,3 +140,16 @@ The default gate resolves and commits 100K and 1M normalized path identities and
 Filesystem path normalization is now an explicit cold boundary. Repeated Source identity work uses `resolve_normalized()` / `find()` over a compact 8-byte open-addressing bucket, dense 8-byte path records, a contiguous path arena, and XXH64 with a folded 32-bit fingerprint. The performance benchmark compares V3 directly against both the actual OLD production `unordered_map<filesystem::path, source_id>` shape and the separate compact OLD layout-study candidate. See `docs/SE_V3_06P_SOURCE_MANAGER_PERFORMANCE.md`.
 
 The benchmark must show V3 faster than the actual OLD production map for both normalized insertion and random lookup. The experimental OLD compact-layout candidate is retained as a stricter near-parity guard.
+
+## SE-V3-07A+07B SourceContribution + Generation Builder G0
+
+Build provenance is now retained outside Graph in a flat `SourceContribution[source_id]` representation. Generation Builder consumes Parser-resolved `identity_ref` values directly, assigns dense generation-local `type_handle` values, materializes compact TypeRefs and definition arenas into detached G0 storage, validates it, and publishes through no-fail swaps. No V2 stable-ID/String-Registry/name-resolution path exists in Builder. See `docs/SE_V3_07AB_GENERATION_BUILDER_G0.md`.
+
+Run:
+
+```text
+server_engine_generation_builder_benchmark
+server_engine_generation_builder_benchmark --semantic 1000000
+```
+
+The default gate requires one million real Project identities to materialize into G0 in under one second before publication.

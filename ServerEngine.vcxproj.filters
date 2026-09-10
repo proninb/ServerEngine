@@ -16,6 +16,9 @@
     <ClCompile Include="server_engine\project\frontend\source_facts_validation.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="server_engine\project\frontend\include_discovery.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="server_engine\project\frontend\source_frontend_generation.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="server_engine\project\builder\source_contribution.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="server_engine\project\builder\generation_builder.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="server_engine\project\graph\graph.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="server_engine\project\source\source_hash.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="server_engine\project\source\file_snapshot.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="server_engine\project\source\source_manager.cpp"><Filter>Source Files</Filter></ClCompile>
@@ -49,6 +52,11 @@
     <ClInclude Include="server_engine\project\frontend\parsed_source.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\frontend\include_discovery.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\frontend\source_frontend_generation.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\builder\source_contribution.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\builder\generation_builder.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\graph\type_handle.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\graph\type_ref.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\graph\graph.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\source\source_hash.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\source\file_snapshot.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\source\source_snapshot.hpp"><Filter>Header Files</Filter></ClInclude>

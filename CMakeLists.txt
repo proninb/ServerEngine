@@ -17,6 +17,9 @@ add_library(server_engine_core STATIC
     server_engine/project/frontend/source_facts_validation.cpp
     server_engine/project/frontend/include_discovery.cpp
     server_engine/project/frontend/source_frontend_generation.cpp
+    server_engine/project/builder/source_contribution.cpp
+    server_engine/project/builder/generation_builder.cpp
+    server_engine/project/graph/graph.cpp
     server_engine/project/source/source_hash.cpp
     server_engine/project/source/file_snapshot.cpp
     server_engine/project/source/source_manager.cpp
@@ -46,14 +49,19 @@ target_link_libraries(server_engine_identity_benchmark PRIVATE server_engine_cor
 add_executable(server_engine_source_manager_benchmark benchmarks/source_manager_benchmark.cpp)
 target_link_libraries(server_engine_source_manager_benchmark PRIVATE server_engine_core Threads::Threads)
 
+add_executable(server_engine_generation_builder_benchmark benchmarks/generation_builder_benchmark.cpp)
+target_link_libraries(server_engine_generation_builder_benchmark PRIVATE server_engine_core Threads::Threads)
+
 if(MSVC)
     target_compile_options(server_engine_tests PRIVATE /W4 /permissive-)
     target_compile_options(server_engine_identity_benchmark PRIVATE /W4 /permissive-)
     target_compile_options(server_engine_source_manager_benchmark PRIVATE /W4 /permissive-)
+    target_compile_options(server_engine_generation_builder_benchmark PRIVATE /W4 /permissive-)
 else()
     target_compile_options(server_engine_tests PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(server_engine_identity_benchmark PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(server_engine_source_manager_benchmark PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(server_engine_generation_builder_benchmark PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 enable_testing()
@@ -88,3 +96,8 @@ add_test(NAME frontend_transitive_include_pipeline COMMAND server_engine_tests f
 add_test(NAME frontend_shared_include_identity COMMAND server_engine_tests frontend_shared_include_identity)
 add_test(NAME frontend_unsupported_directive COMMAND server_engine_tests frontend_unsupported_directive)
 add_test(NAME frontend_include_inside_scope COMMAND server_engine_tests frontend_include_inside_scope)
+add_test(NAME source_contribution_capture COMMAND server_engine_tests source_contribution_capture)
+add_test(NAME generation_builder_g0 COMMAND server_engine_tests generation_builder_g0)
+add_test(NAME generation_builder_enum COMMAND server_engine_tests generation_builder_enum)
+add_test(NAME generation_builder_redeclaration COMMAND server_engine_tests generation_builder_redeclaration)
+add_test(NAME generation_builder_definition_conflict COMMAND server_engine_tests generation_builder_definition_conflict)

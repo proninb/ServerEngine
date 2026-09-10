@@ -9,6 +9,9 @@
 #include "../server_engine/project/parser/lexer.hpp"
 #include "../server_engine/project/parser/source_environment.hpp"
 #include "../server_engine/project/parser/source_parser.hpp"
+#include "../server_engine/project/builder/source_contribution.hpp"
+#include "../server_engine/project/builder/generation_builder.hpp"
+#include "../server_engine/project/graph/graph.hpp"
 #include "../server_engine/diagnostics/diagnostic_descriptor.hpp"
 
 #include <array>
@@ -1101,6 +1104,276 @@ bool test_frontend_include_inside_scope() {
            diagnostics.records().back().id == diagnostics::source_unsupported_directive.id;
 }
 
+
+bool test_source_contribution_capture() {
+    project_configuration configuration;
+    project_context context{std::move(configuration)};
+
+    identity_ref a = nullptr;
+    identity_ref e = nullptr;
+    if (!context.resolve_declaration(context.identity_root(), "A", identity_kind::type, a).ok() ||
+        !context.resolve_declaration(context.identity_root(), "E", identity_kind::type, e).ok())
+        return false;
+
+    std::string text = "struct A { int value; }; enum E : unsigned int { X = 7 };";
+    const std::array<source_namespace_fact, 0> namespaces{};
+    const std::array<source_type_modifier, 0> modifiers{};
+    const std::array members{
+        source_member_fact{
+            source_type_ref::builtin(intrinsic_type::signed_int, {}, span_of(text, "int")),
+            span_of(text, "value"), span_of(text, "int value;"), source_member_access::public_access},
+    };
+    const std::array records{
+        source_record_fact{a, {0, 1}, span_of(text, "struct A { int value; };"),
+            source_record_declaration_kind::definition, source_record_kind::struct_type},
+    };
+    const std::array enum_values{
+        source_enum_value_fact{span_of(text, "X"),
+            source_integral_constant{intrinsic_type::signed_int, 7}, span_of(text, "7")},
+    };
+    const std::array enums{
+        source_enum_fact{e, {0, 1}, span_of(text, "enum E : unsigned int { X = 7 };"),
+            span_of(text, "unsigned int"), intrinsic_type::unsigned_int,
+            source_enum_declaration_kind::definition, false},
+    };
+    const std::array declarations{
+        source_declaration_ref{0, source_declaration_kind::record_type,
+            span_of(text, "struct A { int value; };")},
+        source_declaration_ref{0, source_declaration_kind::enum_type,
+            span_of(text, "enum E : unsigned int { X = 7 };")},
+    };
+
+    const source_facts facts{source_id{1}, text, namespaces, records, members, modifiers,
+        enums, enum_values, declarations};
+    source_contribution_cache cache;
+    auto update = cache.begin_rebuild();
+    diagnostic_buffer diagnostics;
+    if (!update.replace(facts, operation_id{900}, diagnostics).ok() ||
+        update.statistics().sources != 1 || update.statistics().type_declarations != 2 ||
+        update.statistics().members != 1 || update.statistics().enum_values != 1)
+        return false;
+
+    text.assign(text.size(), '?');
+    if (!update.prepare_publish().ok())
+        return false;
+    update.publish_prepared();
+
+    const auto* state = cache.state(source_id{1});
+    if (state == nullptr || cache.types(source_id{1}).size() != 2)
+        return false;
+    const auto captured_members = cache.members(state->members);
+    const auto captured_values = cache.enum_values(state->enum_values);
+    return captured_members.size() == 1 && captured_values.size() == 1 &&
+           cache.name(captured_members[0].name) == "value" &&
+           cache.name(captured_values[0].name) == "X" &&
+           cache.types(source_id{1})[0].identity == a &&
+           cache.types(source_id{1})[1].identity == e;
+}
+
+bool test_generation_builder_g0() {
+    project_configuration configuration;
+    project_context context{std::move(configuration)};
+
+    identity_ref b = nullptr;
+    identity_ref a = nullptr;
+    if (!context.resolve_declaration(context.identity_root(), "B", identity_kind::type, b).ok() ||
+        !context.resolve_declaration(context.identity_root(), "A", identity_kind::type, a).ok())
+        return false;
+
+    constexpr std::string_view text = "struct B; struct A { B* value; };";
+    const std::array<source_namespace_fact, 0> namespaces{};
+    const std::array modifiers{
+        source_type_modifier{0, source_type_modifier_kind::pointer},
+    };
+    const std::array members{
+        source_member_fact{
+            source_type_ref::semantic(b, {0, 1}, span_of(text, "B*")),
+            span_of(text, "value"), span_of(text, "B* value;"),
+            source_member_access::public_access},
+    };
+    const std::array records{
+        source_record_fact{b, {0, 0}, span_of(text, "struct B;"),
+            source_record_declaration_kind::declaration, source_record_kind::struct_type},
+        source_record_fact{a, {0, 1}, span_of(text, "struct A { B* value; };"),
+            source_record_declaration_kind::definition, source_record_kind::struct_type},
+    };
+    const std::array<source_enum_fact, 0> enums{};
+    const std::array<source_enum_value_fact, 0> enum_values{};
+    const std::array declarations{
+        source_declaration_ref{0, source_declaration_kind::record_type, span_of(text, "struct B;")},
+        source_declaration_ref{1, source_declaration_kind::record_type,
+            span_of(text, "struct A { B* value; };")},
+    };
+    const source_facts facts{source_id{1}, text, namespaces, records, members, modifiers,
+        enums, enum_values, declarations};
+    const std::array sources{facts};
+
+    source_contribution_cache cache;
+    graph graph_value;
+    generation_builder builder{cache, graph_value};
+    diagnostic_buffer diagnostics;
+    if (!builder.prepare_g0(sources, {}, operation_id{901}, diagnostics).ok() ||
+        diagnostics.has_errors() || !builder.ready())
+        return false;
+    if (graph_value.type_count() != 0 || cache.statistics().sources != 0)
+        return false;
+
+    builder.publish_prepared();
+    if (!builder.published() || graph_value.type_count() != 2 ||
+        graph_value.identity(graph_value.type_at(0)) != b ||
+        graph_value.identity(graph_value.type_at(1)) != a)
+        return false;
+
+    const auto a_handle = graph_value.type_at(1);
+    const auto a_members = graph_value.members(a_handle);
+    if (a_members.size() != 1 || graph_value.name(a_members[0].name) != "value")
+        return false;
+
+    derived_type_record pointer;
+    if (!graph_value.derived(a_members[0].type, pointer) ||
+        pointer.kind != derived_type_kind::pointer)
+        return false;
+    type_handle base;
+    if (!graph_value.named(pointer.child, base) || base != graph_value.type_at(0))
+        return false;
+
+    return cache.statistics().sources == 1 && cache.statistics().type_declarations == 2 &&
+           builder.telemetry().unique_types == 2 &&
+           builder.telemetry().canonical_type_refs == 2;
+}
+
+bool test_generation_builder_enum() {
+    project_configuration configuration;
+    project_context context{std::move(configuration)};
+    identity_ref e = nullptr;
+    if (!context.resolve_declaration(context.identity_root(), "E", identity_kind::type, e).ok())
+        return false;
+
+    constexpr std::string_view text = "enum E : unsigned int { X = 7, Y = 9 };";
+    const std::array<source_namespace_fact, 0> namespaces{};
+    const std::array<source_record_fact, 0> records{};
+    const std::array<source_member_fact, 0> members{};
+    const std::array<source_type_modifier, 0> modifiers{};
+    const std::array values{
+        source_enum_value_fact{span_of(text, "X"),
+            source_integral_constant{intrinsic_type::signed_int, 7}, span_of(text, "7")},
+        source_enum_value_fact{span_of(text, "Y"),
+            source_integral_constant{intrinsic_type::signed_int, 9}, span_of(text, "9")},
+    };
+    const std::array enums{
+        source_enum_fact{e, {0, 2}, source_span{0, static_cast<std::uint32_t>(text.size())},
+            span_of(text, "unsigned int"), intrinsic_type::unsigned_int,
+            source_enum_declaration_kind::definition, false},
+    };
+    const std::array declarations{
+        source_declaration_ref{0, source_declaration_kind::enum_type,
+            source_span{0, static_cast<std::uint32_t>(text.size())}},
+    };
+    const source_facts facts{source_id{1}, text, namespaces, records, members, modifiers,
+        enums, values, declarations};
+    const std::array sources{facts};
+
+    source_contribution_cache cache;
+    graph graph_value;
+    generation_builder builder{cache, graph_value};
+    diagnostic_buffer diagnostics;
+    if (!builder.prepare_g0(sources, {}, operation_id{902}, diagnostics).ok())
+        return false;
+    builder.publish_prepared();
+
+    const auto handle = graph_value.type_at(0);
+    const auto* entry = graph_value.find(handle);
+    const auto materialized = graph_value.enum_values(handle);
+    return entry != nullptr && entry->kind == graph_type_kind::enumeration && entry->defined() &&
+           entry->enum_fixed_underlying() && entry->enum_underlying == intrinsic_type::unsigned_int &&
+           materialized.size() == 2 && materialized[0].bits == 7 && materialized[1].bits == 9 &&
+           graph_value.name(materialized[0].name) == "X" && graph_value.name(materialized[1].name) == "Y";
+}
+
+bool test_generation_builder_redeclaration() {
+    project_configuration configuration;
+    project_context context{std::move(configuration)};
+    identity_ref a = nullptr;
+    if (!context.resolve_declaration(context.identity_root(), "A", identity_kind::type, a).ok())
+        return false;
+
+    constexpr std::string_view text1 = "struct A;";
+    constexpr std::string_view text2 = "class A {};";
+    const std::array<source_namespace_fact, 0> namespaces{};
+    const std::array<source_member_fact, 0> members{};
+    const std::array<source_type_modifier, 0> modifiers{};
+    const std::array<source_enum_fact, 0> enums{};
+    const std::array<source_enum_value_fact, 0> values{};
+    const std::array records1{
+        source_record_fact{a, {0, 0}, source_span{0, static_cast<std::uint32_t>(text1.size())},
+            source_record_declaration_kind::declaration, source_record_kind::struct_type},
+    };
+    const std::array records2{
+        source_record_fact{a, {0, 0}, source_span{0, static_cast<std::uint32_t>(text2.size())},
+            source_record_declaration_kind::definition, source_record_kind::class_type},
+    };
+    const std::array declarations1{
+        source_declaration_ref{0, source_declaration_kind::record_type,
+            source_span{0, static_cast<std::uint32_t>(text1.size())}},
+    };
+    const std::array declarations2{
+        source_declaration_ref{0, source_declaration_kind::record_type,
+            source_span{0, static_cast<std::uint32_t>(text2.size())}},
+    };
+    const source_facts facts1{source_id{1}, text1, namespaces, records1, members, modifiers,
+        enums, values, declarations1};
+    const source_facts facts2{source_id{2}, text2, namespaces, records2, members, modifiers,
+        enums, values, declarations2};
+    const std::array sources{facts1, facts2};
+
+    source_contribution_cache cache;
+    graph graph_value;
+    generation_builder builder{cache, graph_value};
+    diagnostic_buffer diagnostics;
+    if (!builder.prepare_g0(sources, {}, operation_id{903}, diagnostics).ok())
+        return false;
+    builder.publish_prepared();
+    const auto* entry = graph_value.find(graph_value.type_at(0));
+    return graph_value.type_count() == 1 && entry != nullptr && entry->defined() &&
+           entry->record_kind == source_record_kind::class_type;
+}
+
+bool test_generation_builder_definition_conflict() {
+    project_configuration configuration;
+    project_context context{std::move(configuration)};
+    identity_ref a = nullptr;
+    if (!context.resolve_declaration(context.identity_root(), "A", identity_kind::type, a).ok())
+        return false;
+
+    constexpr std::string_view text = "struct A {};";
+    const std::array<source_namespace_fact, 0> namespaces{};
+    const std::array<source_member_fact, 0> members{};
+    const std::array<source_type_modifier, 0> modifiers{};
+    const std::array<source_enum_fact, 0> enums{};
+    const std::array<source_enum_value_fact, 0> values{};
+    const std::array records{
+        source_record_fact{a, {0, 0}, source_span{0, static_cast<std::uint32_t>(text.size())},
+            source_record_declaration_kind::definition, source_record_kind::struct_type},
+    };
+    const std::array declarations{
+        source_declaration_ref{0, source_declaration_kind::record_type,
+            source_span{0, static_cast<std::uint32_t>(text.size())}},
+    };
+    const source_facts facts1{source_id{1}, text, namespaces, records, members, modifiers,
+        enums, values, declarations};
+    const source_facts facts2{source_id{2}, text, namespaces, records, members, modifiers,
+        enums, values, declarations};
+    const std::array sources{facts1, facts2};
+
+    source_contribution_cache cache;
+    graph graph_value;
+    generation_builder builder{cache, graph_value};
+    diagnostic_buffer diagnostics;
+    const auto result = builder.prepare_g0(sources, {}, operation_id{904}, diagnostics);
+    return result.code == status_code::semantic_conflict && diagnostics.has_errors() &&
+           graph_value.type_count() == 0 && cache.statistics().sources == 0 && !builder.ready();
+}
+
 using test_function = bool (*)();
 
 struct test_case {
@@ -1139,6 +1412,11 @@ constexpr std::array tests{
     test_case{"frontend_shared_include_identity", &test_frontend_shared_include_identity},
     test_case{"frontend_unsupported_directive", &test_frontend_unsupported_directive},
     test_case{"frontend_include_inside_scope", &test_frontend_include_inside_scope},
+    test_case{"source_contribution_capture", &test_source_contribution_capture},
+    test_case{"generation_builder_g0", &test_generation_builder_g0},
+    test_case{"generation_builder_enum", &test_generation_builder_enum},
+    test_case{"generation_builder_redeclaration", &test_generation_builder_redeclaration},
+    test_case{"generation_builder_definition_conflict", &test_generation_builder_definition_conflict},
 };
 
 } // namespace

@@ -48,6 +48,9 @@
     <ClCompile Include="server_engine\project\frontend\source_facts_validation.cpp" />
     <ClCompile Include="server_engine\project\frontend\include_discovery.cpp" />
     <ClCompile Include="server_engine\project\frontend\source_frontend_generation.cpp" />
+    <ClCompile Include="server_engine\project\builder\source_contribution.cpp" />
+    <ClCompile Include="server_engine\project\builder\generation_builder.cpp" />
+    <ClCompile Include="server_engine\project\graph\graph.cpp" />
     <ClCompile Include="server_engine\project\source\source_hash.cpp" />
     <ClCompile Include="server_engine\project\source\file_snapshot.cpp" />
     <ClCompile Include="server_engine\project\source\source_manager.cpp" />
@@ -81,6 +84,11 @@
     <ClInclude Include="server_engine\project\frontend\parsed_source.hpp" />
     <ClInclude Include="server_engine\project\frontend\include_discovery.hpp" />
     <ClInclude Include="server_engine\project\frontend\source_frontend_generation.hpp" />
+    <ClInclude Include="server_engine\project\builder\source_contribution.hpp" />
+    <ClInclude Include="server_engine\project\builder\generation_builder.hpp" />
+    <ClInclude Include="server_engine\project\graph\type_handle.hpp" />
+    <ClInclude Include="server_engine\project\graph\type_ref.hpp" />
+    <ClInclude Include="server_engine\project\graph\graph.hpp" />
     <ClInclude Include="server_engine\project\source\source_hash.hpp" />
     <ClInclude Include="server_engine\project\source\file_snapshot.hpp" />
     <ClInclude Include="server_engine\project\source\source_snapshot.hpp" />
@@ -96,6 +104,7 @@
     <None Include="docs\SERVER_ENGINE_ARCHITECTURE_V3.md" />
     <None Include="docs\SE_V3_06A_SOURCE_FACTS_CONTRACT.md" />
     <None Include="docs\SE_V3_06R_PRODUCTION_REUSE.md" />
+    <None Include="docs\SE_V3_07AB_GENERATION_BUILDER_G0.md" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
