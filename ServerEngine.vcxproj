@@ -45,6 +45,7 @@
     <ClCompile Include="server_engine\project\project_context.cpp" />
     <ClCompile Include="server_engine\project\identity\identity_arena.cpp" />
     <ClCompile Include="server_engine\project\identity\identity_space.cpp" />
+    <ClCompile Include="server_engine\project\frontend\source_facts_validation.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="server_engine\status.hpp" />
@@ -67,8 +68,15 @@
     <ClInclude Include="server_engine\project\identity\identity_node.hpp" />
     <ClInclude Include="server_engine\project\identity\identity_arena.hpp" />
     <ClInclude Include="server_engine\project\identity\identity_space.hpp" />
+    <ClInclude Include="server_engine\project\frontend\source_facts.hpp" />
+    <ClInclude Include="server_engine\project\frontend\source_facts_validation.hpp" />
   </ItemGroup>
-  <ItemGroup><None Include="server.json" /><None Include="project.json" /><None Include="docs\SERVER_ENGINE_ARCHITECTURE_V3.md" /></ItemGroup>
+  <ItemGroup>
+    <None Include="server.json" />
+    <None Include="project.json" />
+    <None Include="docs\SERVER_ENGINE_ARCHITECTURE_V3.md" />
+    <None Include="docs\SE_V3_06A_SOURCE_FACTS_CONTRACT.md" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
 </Project>

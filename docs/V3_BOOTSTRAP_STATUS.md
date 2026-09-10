@@ -16,6 +16,9 @@
 - [x] Identity contains no Graph/generation state
 - [x] Foundation tests
 - [x] Sample Server/Project configuration
+- [x] Parser -> Generation Builder `source_facts` contract
+- [x] Direct `identity_ref` / intrinsic type representation in source facts
+- [x] Structural source-facts validation and diagnostics
 
 ## Explicitly absent
 
@@ -46,3 +49,16 @@
 10. Configuration publication is transactional: failed load never modifies the previous output configuration.
 11. No numeric Project `stable_id` exists in V3 core.
 12. No `std::mutex` or `std::unordered_map` exists in the Project semantic identity path.
+
+## Frozen SE-V3-06A source-facts gates
+
+1. `source_facts` is immutable, non-owning, and transient.
+2. Project semantic references cross the Parser boundary only as `identity_ref`.
+3. Builtins cross the boundary only as intrinsic Language/ABI codes.
+4. Unresolved names, `string_id`, `stable_id`, and identity-registry keys are forbidden in Builder input.
+5. Member and modifier storage is flat and uses dense ranges.
+6. Type modifiers are applied base-outward, left to right.
+7. Source facts preserve source order; Generation Builder does not sort to recover it.
+8. Member names are zero-copy Source ranges and are not semantic identities.
+9. Validation is structural only and performs no name/identity lookup.
+10. The frozen Project semantic identity implementation is unchanged.

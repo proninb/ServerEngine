@@ -37,6 +37,7 @@ inline constexpr std::array diagnostic_descriptors{
     diagnostics::project_invalid_configuration,
     diagnostics::project_unsupported_configuration_version,
     diagnostics::project_configuration_read_failed,
+    diagnostics::parser_invalid_source_facts,
     diagnostics::identity_initialization_failed,
     diagnostics::generation_build_failed,
     diagnostics::persistence_save_failed,

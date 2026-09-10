@@ -92,13 +92,13 @@ server.json
     -> create Project semantic identity root
 ```
 
-Source Manager, Parser, Generation Builder, Graph, persistence, Runtime, and SHM are intentionally not implemented yet.
+Source Manager, Parser, Generation Builder, Graph, persistence, Runtime, and SHM are intentionally not implemented yet. The Parser -> Builder `source_facts` boundary is implemented and frozen in SE-V3-06A.
 
 ## Next implementation sequence
 
-1. Define Source Manager V3 ownership and dependency contracts.
-2. Integrate Parser semantic scope with `project_context::resolve_declaration()` so each source-language resolution returns `identity_ref` directly.
-3. Define transient source facts carrying direct identity references.
+1. Implement Source Manager immutable Source snapshot ownership and dependency contracts.
+2. Implement the minimal Parser producer around `project_context::resolve_declaration()`.
+3. Emit the frozen `source_facts` representation with direct `identity_ref` type/namespace references.
 4. Implement Generation Builder with zero name/identity lookup after semantic resolution.
 5. Implement immutable `G0` with dense generation-local handles.
 6. Implement `SAVE G0` / `LOAD G0` using file-local IDs; never serialize pointers.
@@ -121,3 +121,7 @@ Project semantic resolution uses one lock-free fixed bucket index instead of sib
 ## SE-V3-05 Identity Index Hardening
 
 `identity_space` exposes diagnostic-only collision-chain statistics without instrumenting the semantic hot path. Run `server_engine_identity_benchmark --hardening` to validate 1M sequential, patterned, same-prefix, and long identifiers, including exact canonical-pointer replay and structural collision/probe gates. After this gate passes, the Project semantic identity foundation is frozen and SE-V3-06 begins Source Manager + Parser integration.
+
+## SE-V3-06A Source Facts Contract
+
+The Parser -> Generation Builder boundary is now represented by immutable `source_facts`: direct Project `identity_ref` values for semantic entities, intrinsic Language/ABI codes for builtins, flat member/modifier arrays, and Source byte ranges for non-identity names and diagnostics. Unresolved names, `string_id`, numeric semantic IDs, and identity canonicalization do not cross this boundary. See `docs/SE_V3_06A_SOURCE_FACTS_CONTRACT.md`.

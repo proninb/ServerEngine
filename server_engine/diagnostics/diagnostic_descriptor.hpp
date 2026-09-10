@@ -48,9 +48,13 @@ inline constexpr diagnostic_descriptor project_configuration_read_failed{
     diagnostic_id{2005}, diagnostic_domain::project, diagnostic_severity::error,
     "project.configuration_read_failed", "Project configuration could not be read"};
 
+inline constexpr diagnostic_descriptor parser_invalid_source_facts{
+    diagnostic_id{4001}, diagnostic_domain::parser, diagnostic_severity::error,
+    "parser.invalid_source_facts", "Parser output violates the source_facts boundary contract"};
+
 inline constexpr diagnostic_descriptor identity_initialization_failed{
     diagnostic_id{4501}, diagnostic_domain::identity, diagnostic_severity::fatal,
-    "identity.initialization_failed", "Project identity registry initialization failed"};
+    "identity.initialization_failed", "Project semantic identity initialization failed"};
 
 inline constexpr diagnostic_descriptor generation_build_failed{
     diagnostic_id{5001}, diagnostic_domain::generation, diagnostic_severity::error,

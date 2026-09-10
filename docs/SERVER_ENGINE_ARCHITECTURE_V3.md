@@ -341,18 +341,26 @@ Builder never asks again what `B` means.
 
 ## 15. Source facts
 
-Transient source facts may carry Project-lifetime identity references directly.
+SE-V3-06A fixes the Parser -> Generation Builder boundary as an immutable non-owning `source_facts` view. Project semantic entities cross this boundary only as already-resolved `identity_ref` values. Builtin types use intrinsic Language/ABI codes and do not receive allocated Project identities.
+
+The v1 packet contains flat arrays for namespace contributions, C++ record declarations/definitions, non-static instance members, and type modifiers. Members and modifiers are addressed by dense `{begin,count}` ranges rather than nested containers. Member names and diagnostic locations are byte ranges into the immutable Source snapshot held alive by Build Context.
 
 Conceptually:
 
 ```cpp
 struct source_type_ref {
-    identity_ref base = nullptr;
-    type_modifiers modifiers;
+    identity_ref identity = nullptr;
+    intrinsic_type intrinsic = intrinsic_type::none;
+    source_fact_range modifiers;
+    source_span spelling;
 };
 ```
 
-The facts may be discarded after Generation Builder consumption. The referenced `identity_node` remains valid for the Project lifetime.
+Exactly one of `identity` or `intrinsic` identifies the base type. Modifier order is base-outward, left to right. Unresolved names, fully-qualified-name keys, `string_id`, and numeric semantic IDs are forbidden in this packet.
+
+Per-source facts preserve deterministic source order. Generation Builder never sorts a packet to recover source order and never performs semantic name/identity lookup.
+
+The facts and Source snapshot may be discarded after Generation Builder consumption. Referenced `identity_node` objects remain valid for the Project lifetime. `source_facts` itself is never serialized or published through SHM.
 
 ## 16. Build Context
 
@@ -550,11 +558,13 @@ p99 successful comparisons           <= 6
 canonical pointer replay              PASS
 ```
 
-## 26. Next architecture milestone
+## 26. SE-V3-06 frontend boundary
 
-SE-V3-06 defines Source Manager + Parser semantic-scope integration around the frozen Project Context identity API.
+SE-V3-06A freezes `source_facts`, the Parser -> Generation Builder representation. Its structural validator confirms that no unresolved semantic reference can cross the boundary and that source/member/modifier ordering and dense ranges are well formed without performing name resolution.
 
-The key test for that milestone is:
+SE-V3-06B implements Source Manager immutable snapshot ownership and the minimal Parser producer around the frozen Project Context identity API.
+
+The key integration path is:
 
 ```text
 identifier token
@@ -562,6 +572,8 @@ identifier token
 C++ semantic resolution exactly once
     ↓
 identity_ref
+    ↓
+source_facts
     ↓
 all downstream stages use direct identity
 ```
