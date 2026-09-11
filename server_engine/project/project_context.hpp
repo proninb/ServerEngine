@@ -11,6 +11,7 @@ namespace cw::server {
 
 class project_build_orchestrator;
 class project_manager;
+class project_access;
 
 struct project_storage_pressure final {
     std::size_t retained_bytes = 0;
@@ -68,8 +69,8 @@ private:
     friend class project_context;
 };
 
-// Internal owner of one Project configuration plus one replaceable compiled state.
-// External readers obtain project_read_view only while project_read_guard is held.
+// Internal owner of one Project configuration plus one compiled construction state.
+// READY readers obtain project_read_view only while project_access is held.
 class project_context final {
 public:
     explicit project_context(project_configuration configuration);
@@ -212,7 +213,7 @@ private:
 };
 
 // Read-only façade. Any pointer/span/string_view obtained through it is valid only
-// while the owning project_read_guard remains alive.
+// while the owning project_access remains alive.
 class project_read_view final {
 public:
     project_read_view() noexcept = default;
@@ -270,7 +271,7 @@ private:
     const project_context* project = nullptr;
 
     friend class project_manager;
-    friend class project_read_guard;
+    friend class project_access;
 };
 
 } // namespace cw::server

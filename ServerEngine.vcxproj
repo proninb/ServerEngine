@@ -121,6 +121,7 @@
     <None Include="docs\SE_V3_07AB_GENERATION_BUILDER_G0.md" />
     <None Include="docs\SE_V3_08_PROJECT_BUILD_ORCHESTRATION.md" />
     <None Include="docs\SE_V3_09_COMPLETE_GRAPH.md" />
+    <None Include="docs\SE_V3_10A_READY_LIFECYCLE.md" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

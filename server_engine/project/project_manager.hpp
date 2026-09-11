@@ -5,31 +5,137 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
-#include <mutex>
-#include <shared_mutex>
-#include <span>
+#include <utility>
 
 namespace cw::server {
 
 class project_manager;
 
-// Holds a shared lifecycle lock for one read/query operation scope. Every pointer,
-// span and string_view obtained through the guard becomes invalid when the guard
-// is released; LOAD replacement, REBUILD publication, UPDATE and UNLOAD exclude it.
-class project_read_guard final {
-public:
-    project_read_guard() noexcept = default;
+enum class project_lifecycle_state : std::uint8_t {
+    unloaded,
+    constructing,
+    ready,
+    draining,
+};
 
-    project_read_guard(const project_read_guard&) = delete;
-    project_read_guard& operator=(const project_read_guard&) = delete;
+struct project_stop_request final {
+    using function_type = void (*)(void*) noexcept;
 
-    project_read_guard(project_read_guard&&) noexcept = default;
-    project_read_guard& operator=(project_read_guard&&) noexcept = default;
+    void* context = nullptr;
+    function_type function = nullptr;
+
+    void operator()() const noexcept {
+        if (function != nullptr)
+            function(context);
+    }
 
     [[nodiscard]] explicit operator bool() const noexcept {
-        return view.valid();
+        return function != nullptr;
+    }
+};
+
+// Admission/drain primitive for READY Project work. The coordinator closes
+// admission before requesting Runtime/background stop, then waits for the
+// task count to reach zero. Graph access itself never takes a lock.
+class project_activity_gate final {
+public:
+    project_activity_gate() noexcept = default;
+
+    project_activity_gate(const project_activity_gate&) = delete;
+    project_activity_gate& operator=(const project_activity_gate&) = delete;
+
+private:
+    static constexpr std::uint64_t closed_mask = std::uint64_t{1} << 63;
+    static constexpr std::uint64_t count_mask = ~closed_mask;
+
+    [[nodiscard]] bool try_enter() noexcept {
+        auto value = state.load(std::memory_order_acquire);
+        for (;;) {
+            if ((value & closed_mask) != 0)
+                return false;
+            if ((value & count_mask) == count_mask)
+                return false;
+
+            if (state.compare_exchange_weak(
+                    value,
+                    value + 1,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                return true;
+            }
+        }
+    }
+
+    void leave() noexcept {
+        const auto previous = state.fetch_sub(1, std::memory_order_acq_rel);
+        if ((previous & count_mask) == 1)
+            state.notify_all();
+    }
+
+    void open() noexcept {
+        state.store(0, std::memory_order_release);
+        state.notify_all();
+    }
+
+    void close() noexcept {
+        state.fetch_or(closed_mask, std::memory_order_acq_rel);
+        state.notify_all();
+    }
+
+    void wait_drained() noexcept {
+        auto value = state.load(std::memory_order_acquire);
+        while ((value & count_mask) != 0) {
+            state.wait(value, std::memory_order_acquire);
+            value = state.load(std::memory_order_acquire);
+        }
+    }
+
+    [[nodiscard]] std::uint64_t active_count() const noexcept {
+        return state.load(std::memory_order_acquire) & count_mask;
+    }
+
+    mutable std::atomic<std::uint64_t> state{closed_mask};
+
+    friend class project_access;
+    friend class project_manager;
+};
+
+// Move-only lifetime token for one QUERY/RUN/SAVE task. Any Project pointer,
+// span, string_view or Graph view obtained through this token must not escape
+// the token lifetime.
+class project_access final {
+public:
+    project_access() noexcept = default;
+
+    ~project_access() noexcept {
+        reset();
+    }
+
+    project_access(const project_access&) = delete;
+    project_access& operator=(const project_access&) = delete;
+
+    project_access(project_access&& other) noexcept
+        : gate(std::exchange(other.gate, nullptr)),
+          view(other.view) {
+        other.view = {};
+    }
+
+    project_access& operator=(project_access&& other) noexcept {
+        if (this == &other)
+            return *this;
+
+        reset();
+        gate = std::exchange(other.gate, nullptr);
+        view = other.view;
+        other.view = {};
+        return *this;
+    }
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return gate != nullptr && view.valid();
     }
 
     [[nodiscard]] const project_read_view* operator->() const noexcept {
@@ -40,69 +146,77 @@ public:
         return view;
     }
 
-private:
-    project_read_guard(
-        std::shared_lock<std::shared_mutex>&& lock_value,
-        const project_context& project) noexcept
-        : lock(std::move(lock_value)), view(project) {}
+    void reset() noexcept {
+        auto* owned_gate = std::exchange(gate, nullptr);
+        view = {};
+        if (owned_gate != nullptr)
+            owned_gate->leave();
+    }
 
-    std::shared_lock<std::shared_mutex> lock;
+private:
+    project_access(
+        project_activity_gate& gate_value,
+        const project_context& project) noexcept
+        : gate(&gate_value),
+          view(project) {}
+
+    project_activity_gate* gate = nullptr;
     project_read_view view;
 
     friend class project_manager;
 };
 
-// Owns the optional loaded Project and serializes all Project writers. LOAD and
-// REBUILD construct detached state; UPDATE prepares against current state while
-// readers remain active. Only the no-fail publication/replacement boundary takes
-// the exclusive lifecycle lock.
+// Coordinator-owned lifecycle. Construction is legal only from UNLOADED.
+// A successful construction opens one immutable READY Project. UNLOAD first
+// closes admission, then requests stop, drains task tokens, and destroys state.
 class project_manager final {
 public:
     project_manager() noexcept = default;
+    ~project_manager() noexcept;
 
     project_manager(const project_manager&) = delete;
     project_manager& operator=(const project_manager&) = delete;
 
-    [[nodiscard]] status load(
+    [[nodiscard]] status rebuild(
         const std::filesystem::path& configuration_path,
         operation_id operation,
         diagnostic_buffer& diagnostics,
         project_build_result& output,
         std::size_t worker_limit = 0) noexcept;
 
-    [[nodiscard]] status load(
+    [[nodiscard]] status rebuild(
         project_configuration configuration,
         operation_id operation,
         diagnostic_buffer& diagnostics,
         project_build_result& output,
         std::size_t worker_limit = 0) noexcept;
 
-    [[nodiscard]] status rebuild(
-        operation_id operation,
-        diagnostic_buffer& diagnostics,
-        project_build_result& output,
-        std::size_t worker_limit = 0) noexcept;
+    [[nodiscard]] status acquire(project_access& output) const noexcept;
 
-    [[nodiscard]] status update(
-        std::span<const source_id> dirty_sources,
-        operation_id operation,
-        diagnostic_buffer& diagnostics,
-        project_build_result& output,
-        std::size_t worker_limit = 0) noexcept;
+    [[nodiscard]] status unload(project_stop_request stop = {}) noexcept;
 
-    [[nodiscard]] status read(project_read_guard& output) const noexcept;
+    [[nodiscard]] project_lifecycle_state state() const noexcept {
+        return lifecycle.load(std::memory_order_acquire);
+    }
 
-    void unload() noexcept;
-
-    [[nodiscard]] bool loaded() const noexcept {
-        return loaded_state.load(std::memory_order_acquire);
+    [[nodiscard]] bool ready() const noexcept {
+        return state() == project_lifecycle_state::ready;
     }
 
 private:
-    mutable std::shared_mutex state_mutex;
-    std::mutex writer_mutex;
+    [[nodiscard]] bool reserve_construction() noexcept;
+    void abandon_construction() noexcept;
+
+    [[nodiscard]] status rebuild_reserved(
+        project_configuration configuration,
+        operation_id operation,
+        diagnostic_buffer& diagnostics,
+        project_build_result& output,
+        std::size_t worker_limit) noexcept;
+
+    mutable project_activity_gate activity;
     std::unique_ptr<project_context> project;
-    std::atomic_bool loaded_state{false};
+    std::atomic<project_lifecycle_state> lifecycle{project_lifecycle_state::unloaded};
 };
 
 } // namespace cw::server

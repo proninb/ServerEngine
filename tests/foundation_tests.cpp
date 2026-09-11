@@ -24,6 +24,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 namespace {
@@ -2470,8 +2471,9 @@ bool test_complete_graph_duplicate_new_link_rollback() {
 }
 
 
-bool test_project_manager_load_unload() {
-    const auto directory = std::filesystem::temp_directory_path() / "server_engine_v309_project_lifecycle";
+bool test_project_manager_rebuild_ready_unload() {
+    const auto directory = std::filesystem::temp_directory_path() /
+        "server_engine_v310a_ready_lifecycle";
     std::error_code error;
     std::filesystem::remove_all(directory, error);
     std::filesystem::create_directories(directory, error);
@@ -2480,145 +2482,62 @@ bool test_project_manager_load_unload() {
 
     const auto model_path = directory / "model.hpp";
     const auto project_path = directory / "project.json";
-    const auto bad_project_path = directory / "bad_project.json";
     { std::ofstream file(model_path); file << "struct IO { int value; }; IO A;"; }
     {
         std::ofstream file(project_path);
-        file << R"({"version":1,"name":"Loaded","project":[{"path":"model.hpp","role":"type"}],"configuration":{"abi":{"target":"windows-x64","pack":8}}})";
-    }
-    {
-        std::ofstream file(bad_project_path);
-        file << R"({"version":1,"name":"Bad","project":[{"path":"missing.hpp","role":"type"}],"configuration":{"abi":{"target":"windows-x64","pack":8}}})";
+        file << R"({"version":1,"name":"Ready","project":[{"path":"model.hpp","role":"type"}],"configuration":{"abi":{"target":"windows-x64","pack":8}}})";
     }
 
     project_manager manager;
     diagnostic_buffer diagnostics;
     project_build_result build;
-    if (!manager.load(project_path, operation_id{1140}, diagnostics, build, 1).ok() ||
-        diagnostics.has_errors() || !manager.loaded()) {
+    if (!manager.rebuild(project_path, operation_id{1140}, diagnostics, build, 2).ok() ||
+        diagnostics.has_errors() || !build.rebuilt ||
+        manager.state() != project_lifecycle_state::ready) {
         std::filesystem::remove_all(directory, error);
         return false;
     }
 
-    project_read_guard first_read;
-    if (!manager.read(first_read).ok() || !first_read) {
-        std::filesystem::remove_all(directory, error);
-        return false;
-    }
-    object_handle object_before;
-    if (!first_read->find_object("A", object_before).ok()) {
-        std::filesystem::remove_all(directory, error);
-        return false;
-    }
-    first_read = {};
-
-    diagnostics.clear();
-    project_build_result failed;
-    const auto failed_result = manager.load(
-        bad_project_path, operation_id{1141}, diagnostics, failed, 1);
-    if (failed_result.ok() || !manager.loaded()) {
+    project_access access;
+    object_handle object;
+    if (!manager.acquire(access).ok() || !access ||
+        !access->find_object("A", object).ok()) {
         std::filesystem::remove_all(directory, error);
         return false;
     }
 
-    project_read_guard after_failed_load;
-    object_handle object_after;
-    if (!manager.read(after_failed_load).ok() || !after_failed_load ||
-        !after_failed_load->find_object("A", object_after).ok() || object_after != object_before) {
+    project_build_result second;
+    const auto invalid = manager.rebuild(
+        project_path, operation_id{1141}, diagnostics, second, 1);
+    if (invalid.code != status_code::invalid_state ||
+        manager.state() != project_lifecycle_state::ready) {
         std::filesystem::remove_all(directory, error);
         return false;
     }
-    after_failed_load = {};
 
-    manager.unload();
-    project_read_guard after_unload;
-    const bool pass = !manager.loaded() &&
-        manager.read(after_unload).code == status_code::not_found && !after_unload;
+    access.reset();
+    if (!manager.unload().ok() ||
+        manager.state() != project_lifecycle_state::unloaded) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    project_access after;
+    const bool pass =
+        manager.acquire(after).code == status_code::not_found && !after;
+
     std::filesystem::remove_all(directory, error);
     return pass;
 }
 
+bool test_project_access_move_only() {
+    static_assert(!std::is_copy_constructible_v<project_access>);
+    static_assert(!std::is_copy_assignable_v<project_access>);
+    static_assert(std::is_nothrow_move_constructible_v<project_access>);
+    static_assert(std::is_nothrow_move_assignable_v<project_access>);
 
-bool test_project_read_guard_publication_barrier() {
-    const auto directory = std::filesystem::temp_directory_path() / "server_engine_v309_read_guard";
-    std::error_code error;
-    std::filesystem::remove_all(directory, error);
-    std::filesystem::create_directories(directory, error);
-    if (error)
-        return false;
-
-    const auto path = directory / "model.hpp";
-    { std::ofstream file(path); file << "struct A { int first; };"; }
-
-    project_configuration configuration;
-    configuration.version = 1;
-    configuration.name = "ReadGuard";
-    configuration.project.push_back(project_item_configuration{path, project_item_role::type});
-
-    project_manager manager;
-    diagnostic_buffer diagnostics;
-    project_build_result loaded;
-    if (!manager.load(std::move(configuration), operation_id{1150}, diagnostics, loaded, 2).ok()) {
-        std::filesystem::remove_all(directory, error);
-        return false;
-    }
-
-    project_read_guard read;
-    if (!manager.read(read).ok() || !read) {
-        std::filesystem::remove_all(directory, error);
-        return false;
-    }
-
-    std::string normalized;
-    source_id source;
-    type_handle before;
-    if (!normalize_source_path(path, normalized).ok() ||
-        !read->sources().find(normalized, source).ok() ||
-        !read->find_type("A", before).ok() ||
-        read->compiled_graph().members(before).size() != 1) {
-        std::filesystem::remove_all(directory, error);
-        return false;
-    }
-
-    { std::ofstream file(path, std::ios::trunc); file << "struct A { int first; int second; };"; }
-
-    std::atomic_bool started{false};
-    std::atomic_bool finished{false};
-    status update_status;
-    project_build_result updated;
-    std::thread worker([&] {
-        diagnostic_buffer worker_diagnostics;
-        const std::array dirty{source};
-        started.store(true, std::memory_order_release);
-        update_status = manager.update(
-            dirty, operation_id{1151}, worker_diagnostics, updated, 2);
-        finished.store(true, std::memory_order_release);
-    });
-
-    while (!started.load(std::memory_order_acquire))
-        std::this_thread::yield();
-    std::this_thread::sleep_for(std::chrono::milliseconds{30});
-
-    const bool blocked = !finished.load(std::memory_order_acquire) &&
-        read->compiled_graph().members(before).size() == 1;
-    read = {};
-    worker.join();
-
-    project_read_guard after;
-    type_handle after_handle;
-    const bool published = update_status.ok() && updated.changed &&
-        manager.read(after).ok() && after &&
-        after->find_type("A", after_handle).ok() &&
-        after->compiled_graph().members(after_handle).size() == 2;
-
-    after = {};
-    manager.unload();
-    std::filesystem::remove_all(directory, error);
-    return blocked && published;
-}
-
-bool test_project_rebuild_failure_preserves_current() {
-    const auto directory = std::filesystem::temp_directory_path() / "server_engine_v309_rebuild_rollback";
+    const auto directory = std::filesystem::temp_directory_path() /
+        "server_engine_v310a_access_move";
     std::error_code error;
     std::filesystem::remove_all(directory, error);
     std::filesystem::create_directories(directory, error);
@@ -2630,106 +2549,49 @@ bool test_project_rebuild_failure_preserves_current() {
 
     project_configuration configuration;
     configuration.version = 1;
-    configuration.name = "RebuildRollback";
-    configuration.project.push_back(project_item_configuration{path, project_item_role::type});
+    configuration.name = "AccessMove";
+    configuration.project.push_back(
+        project_item_configuration{path, project_item_role::type});
 
     project_manager manager;
     diagnostic_buffer diagnostics;
-    project_build_result loaded;
-    if (!manager.load(std::move(configuration), operation_id{1160}, diagnostics, loaded, 1).ok()) {
+    project_build_result build;
+    if (!manager.rebuild(
+            std::move(configuration), operation_id{1150}, diagnostics, build, 1).ok()) {
         std::filesystem::remove_all(directory, error);
         return false;
     }
 
-    { std::ofstream file(path, std::ios::trunc); file << "#define BROKEN 1\nstruct A { int changed; };"; }
-    diagnostics.clear();
-    project_build_result rebuilt;
-    const auto result = manager.rebuild(operation_id{1161}, diagnostics, rebuilt, 1);
-
-    project_read_guard read;
-    type_handle type;
-    const bool pass = !result.ok() && manager.loaded() &&
-        manager.read(read).ok() && read &&
-        read->find_type("A", type).ok() &&
-        read->compiled_graph().members(type).size() == 1;
-
-    read = {};
-    manager.unload();
-    std::filesystem::remove_all(directory, error);
-    return pass;
-}
-
-bool test_project_update_rebuild_required_fallback() {
-    const auto directory = std::filesystem::temp_directory_path() / "server_engine_v309_rebuild_fallback";
-    std::error_code error;
-    std::filesystem::remove_all(directory, error);
-    std::filesystem::create_directories(directory, error);
-    if (error)
-        return false;
-
-    const auto root_path = directory / "root.hpp";
-    { std::ofstream file(root_path); file << "struct Root;"; }
-
-    project_configuration configuration;
-    configuration.version = 1;
-    configuration.name = "Fallback";
-    configuration.project.push_back(project_item_configuration{root_path, project_item_role::type});
-
-    project_manager manager;
-    diagnostic_buffer diagnostics;
-    project_build_result loaded;
-    if (!manager.load(std::move(configuration), operation_id{1170}, diagnostics, loaded, 2).ok()) {
+    project_access first;
+    if (!manager.acquire(first).ok() || !first) {
         std::filesystem::remove_all(directory, error);
         return false;
     }
 
-    source_id root_source;
-    {
-        project_read_guard read;
-        std::string normalized;
-        if (!manager.read(read).ok() || !read ||
-            !normalize_source_path(root_path, normalized).ok() ||
-            !read->sources().find(normalized, root_source).ok()) {
-            std::filesystem::remove_all(directory, error);
-            return false;
-        }
+    project_access second{std::move(first)};
+    if (first || !second) {
+        std::filesystem::remove_all(directory, error);
+        return false;
     }
 
-    constexpr std::size_t added_count = 70;
-    for (std::size_t index = 0; index < added_count; ++index) {
-        std::ofstream file(directory / ("type_" + std::to_string(index) + ".hpp"));
-        file << "struct T" << index << ";";
-    }
-    {
-        std::ofstream file(root_path, std::ios::trunc);
-        for (std::size_t index = 0; index < added_count; ++index)
-            file << "#include \"type_" << index << ".hpp\"\n";
-        file << "struct Root;";
+    project_access third;
+    third = std::move(second);
+    if (second || !third) {
+        std::filesystem::remove_all(directory, error);
+        return false;
     }
 
-    diagnostics.clear();
-    project_build_result updated;
-    const std::array dirty{root_source};
-    const auto result = manager.update(dirty, operation_id{1171}, diagnostics, updated, 2);
+    third.reset();
+    const bool pass = manager.unload().ok() &&
+        manager.state() == project_lifecycle_state::unloaded;
 
-    project_read_guard read;
-    type_handle last_type;
-    const bool pass = result.ok() && updated.rebuilt && !diagnostics.has_errors() &&
-        manager.read(read).ok() && read &&
-        read->sources().source_count() == added_count + 1 &&
-        read->compiled_graph().type_count() == added_count + 1 &&
-        read->find_type("T69", last_type).ok();
-
-    read = {};
-    manager.unload();
     std::filesystem::remove_all(directory, error);
     return pass;
 }
 
-
-bool test_project_update_rebuild_unload_cleanup() {
+bool test_project_unload_stop_before_wait() {
     const auto directory = std::filesystem::temp_directory_path() /
-        "server_engine_v309_update_rebuild_unload";
+        "server_engine_v310a_stop_before_wait";
     std::error_code error;
     std::filesystem::remove_all(directory, error);
     std::filesystem::create_directories(directory, error);
@@ -2737,160 +2599,105 @@ bool test_project_update_rebuild_unload_cleanup() {
         return false;
 
     const auto path = directory / "model.hpp";
-    { std::ofstream file(path); file << "struct OldType { int value; };"; }
+    { std::ofstream file(path); file << "struct A { int value; };"; }
 
     project_configuration configuration;
     configuration.version = 1;
-    configuration.name = "UpdateRebuildUnload";
-    configuration.project.push_back(project_item_configuration{path, project_item_role::type});
+    configuration.name = "StopBeforeWait";
+    configuration.project.push_back(
+        project_item_configuration{path, project_item_role::type});
 
     project_manager manager;
     diagnostic_buffer diagnostics;
-    project_build_result loaded;
-    if (!manager.load(std::move(configuration), operation_id{1190}, diagnostics, loaded, 1).ok()) {
+    project_build_result build;
+    if (!manager.rebuild(
+            std::move(configuration), operation_id{1160}, diagnostics, build, 1).ok()) {
         std::filesystem::remove_all(directory, error);
         return false;
     }
 
-    source_id source;
-    {
-        project_read_guard read;
-        std::string normalized;
-        type_handle old_type;
-        if (!manager.read(read).ok() || !read ||
-            !normalize_source_path(path, normalized).ok() ||
-            !read->sources().find(normalized, source).ok() ||
-            !read->find_type("OldType", old_type).ok()) {
-            std::filesystem::remove_all(directory, error);
-            return false;
+    std::atomic_bool started{false};
+    std::atomic_bool stop_requested{false};
+    std::atomic_bool worker_failed{false};
+    std::atomic_bool released{false};
+
+    std::thread worker([&] {
+        project_access access;
+        if (!manager.acquire(access).ok() || !access) {
+            worker_failed.store(true, std::memory_order_release);
+            return;
         }
+
+        started.store(true, std::memory_order_release);
+        while (!stop_requested.load(std::memory_order_acquire))
+            std::this_thread::yield();
+
+        access.reset();
+        released.store(true, std::memory_order_release);
+    });
+
+    while (!started.load(std::memory_order_acquire) &&
+           !worker_failed.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
     }
 
-    { std::ofstream file(path, std::ios::trunc); file << "struct NewType { int value; };"; }
-    diagnostics.clear();
-    project_build_result updated;
-    const std::array dirty{source};
-    if (!manager.update(dirty, operation_id{1191}, diagnostics, updated, 1).ok() || !updated.changed) {
+    if (worker_failed.load(std::memory_order_acquire)) {
+        worker.join();
         std::filesystem::remove_all(directory, error);
         return false;
     }
 
-    std::size_t identities_after_update = 0;
-    std::size_t strings_after_update = 0;
-    {
-        project_read_guard read;
-        type_handle new_type;
-        type_handle removed_type;
-        if (!manager.read(read).ok() || !read ||
-            !read->find_type("NewType", new_type).ok() ||
-            read->find_type("OldType", removed_type).ok()) {
-            std::filesystem::remove_all(directory, error);
-            return false;
-        }
-        identities_after_update = read->identity_count();
-        strings_after_update = read->string_table_stats().strings;
-    }
+    project_stop_request stop{
+        &stop_requested,
+        [](void* context) noexcept {
+            static_cast<std::atomic_bool*>(context)->store(
+                true, std::memory_order_release);
+        },
+    };
 
-    diagnostics.clear();
-    project_build_result rebuilt;
-    if (!manager.rebuild(operation_id{1192}, diagnostics, rebuilt, 1).ok()) {
-        std::filesystem::remove_all(directory, error);
-        return false;
-    }
+    const auto unload_result = manager.unload(stop);
+    worker.join();
 
-    {
-        project_read_guard read;
-        type_handle new_type;
-        type_handle removed_type;
-        if (!manager.read(read).ok() || !read ||
-            !read->find_type("NewType", new_type).ok() ||
-            read->find_type("OldType", removed_type).ok() ||
-            read->identity_count() >= identities_after_update ||
-            read->string_table_stats().strings >= strings_after_update) {
-            std::filesystem::remove_all(directory, error);
-            return false;
-        }
-    }
+    const bool pass = unload_result.ok() &&
+        stop_requested.load(std::memory_order_acquire) &&
+        released.load(std::memory_order_acquire) &&
+        manager.state() == project_lifecycle_state::unloaded;
 
-    manager.unload();
-    project_read_guard after_unload;
-    const bool pass = !manager.loaded() &&
-        manager.read(after_unload).code == status_code::not_found && !after_unload;
     std::filesystem::remove_all(directory, error);
     return pass;
 }
 
-bool test_project_update_rebuild_failure_preserves_current() {
-    const auto directory = std::filesystem::temp_directory_path() / "server_engine_v309_fallback_rollback";
+bool test_project_rebuild_failure_returns_unloaded() {
+    const auto directory = std::filesystem::temp_directory_path() /
+        "server_engine_v310a_failed_construction";
     std::error_code error;
     std::filesystem::remove_all(directory, error);
     std::filesystem::create_directories(directory, error);
     if (error)
         return false;
 
-    const auto main_path = directory / "main.hpp";
-    const auto other_path = directory / "other.hpp";
-    { std::ofstream file(main_path); file << "struct Main;"; }
-    { std::ofstream file(other_path); file << "struct Other;"; }
+    const auto path = directory / "model.hpp";
+    { std::ofstream file(path); file << "#define BROKEN 1\nstruct A { int value; };"; }
 
     project_configuration configuration;
     configuration.version = 1;
-    configuration.name = "FallbackRollback";
-    configuration.project.push_back(project_item_configuration{main_path, project_item_role::type});
-    configuration.project.push_back(project_item_configuration{other_path, project_item_role::type});
+    configuration.name = "FailedConstruction";
+    configuration.project.push_back(
+        project_item_configuration{path, project_item_role::type});
 
     project_manager manager;
     diagnostic_buffer diagnostics;
-    project_build_result loaded;
-    if (!manager.load(std::move(configuration), operation_id{1180}, diagnostics, loaded, 2).ok()) {
-        std::filesystem::remove_all(directory, error);
-        return false;
-    }
+    project_build_result build;
+    const auto result = manager.rebuild(
+        std::move(configuration), operation_id{1170}, diagnostics, build, 1);
 
-    source_id main_source;
-    {
-        project_read_guard read;
-        std::string normalized;
-        if (!manager.read(read).ok() || !read ||
-            !normalize_source_path(main_path, normalized).ok() ||
-            !read->sources().find(normalized, main_source).ok()) {
-            std::filesystem::remove_all(directory, error);
-            return false;
-        }
-    }
+    project_access access;
+    const bool pass = !result.ok() &&
+        diagnostics.has_errors() &&
+        manager.state() == project_lifecycle_state::unloaded &&
+        manager.acquire(access).code == status_code::not_found &&
+        !access;
 
-    constexpr std::size_t added_count = 70;
-    for (std::size_t index = 0; index < added_count; ++index) {
-        std::ofstream file(directory / ("new_" + std::to_string(index) + ".hpp"));
-        file << "struct N" << index << ";";
-    }
-    {
-        std::ofstream file(main_path, std::ios::trunc);
-        for (std::size_t index = 0; index < added_count; ++index)
-            file << "#include \"new_" << index << ".hpp\"\n";
-        file << "struct Main;";
-    }
-    { std::ofstream file(other_path, std::ios::trunc); file << "#define BROKEN 1\nstruct Other;"; }
-
-    diagnostics.clear();
-    project_build_result updated;
-    const std::array dirty{main_source};
-    const auto result = manager.update(dirty, operation_id{1181}, diagnostics, updated, 2);
-
-    project_read_guard read;
-    type_handle main_type;
-    type_handle other_type;
-    type_handle new_type;
-    const bool pass = !result.ok() && manager.loaded() &&
-        manager.read(read).ok() && read &&
-        read->sources().source_count() == 2 &&
-        read->compiled_graph().type_count() == 2 &&
-        read->find_type("Main", main_type).ok() &&
-        read->find_type("Other", other_type).ok() &&
-        read->find_type("N69", new_type).code == status_code::not_found;
-
-    read = {};
-    manager.unload();
     std::filesystem::remove_all(directory, error);
     return pass;
 }
@@ -2957,12 +2764,10 @@ constexpr std::array tests{
     test_case{"complete_graph_incremental_link_retarget", &test_complete_graph_incremental_link_retarget},
     test_case{"complete_graph_object_reactivation", &test_complete_graph_object_reactivation},
     test_case{"complete_graph_duplicate_new_link_rollback", &test_complete_graph_duplicate_new_link_rollback},
-    test_case{"project_manager_load_unload", &test_project_manager_load_unload},
-    test_case{"project_read_guard_publication_barrier", &test_project_read_guard_publication_barrier},
-    test_case{"project_rebuild_failure_preserves_current", &test_project_rebuild_failure_preserves_current},
-    test_case{"project_update_rebuild_required_fallback", &test_project_update_rebuild_required_fallback},
-    test_case{"project_update_rebuild_failure_preserves_current", &test_project_update_rebuild_failure_preserves_current},
-    test_case{"project_update_rebuild_unload_cleanup", &test_project_update_rebuild_unload_cleanup},
+    test_case{"project_manager_rebuild_ready_unload", &test_project_manager_rebuild_ready_unload},
+    test_case{"project_access_move_only", &test_project_access_move_only},
+    test_case{"project_unload_stop_before_wait", &test_project_unload_stop_before_wait},
+    test_case{"project_rebuild_failure_returns_unloaded", &test_project_rebuild_failure_returns_unloaded},
 };
 
 } // namespace

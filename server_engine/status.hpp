@@ -16,6 +16,7 @@ enum class status_code : std::uint32_t {
     artifact_corrupt,
     rebuild_required,
     not_available,
+    invalid_state,
 };
 
 struct status {

@@ -2,7 +2,6 @@
 
 #include <chrono>
 #include <new>
-#include <mutex>
 #include <stdexcept>
 #include <vector>
 
@@ -76,6 +75,14 @@ using build_clock = std::chrono::steady_clock;
 
 
 } // namespace
+
+status project_build_orchestrator::construct(
+    operation_id operation,
+    diagnostic_buffer& diagnostics,
+    project_build_result& output) noexcept {
+
+    return rebuild_current(operation, diagnostics, output);
+}
 
 status project_build_orchestrator::rebuild(
     operation_id operation,
@@ -174,16 +181,11 @@ status project_build_orchestrator::rebuild_current(
         const auto interface_publish_begin = build_clock::now();
         build_clock::time_point publish_end;
         build_clock::time_point interface_publish_end;
-        {
-            std::unique_lock<std::shared_mutex> publication_lock;
-            if (publication_mutex != nullptr)
-                publication_lock = std::unique_lock<std::shared_mutex>{*publication_mutex};
-            source_update.publish_prepared();
-            builder.publish_prepared();
-            publish_end = build_clock::now();
-            cache_update.publish_prepared();
-            interface_publish_end = build_clock::now();
-        }
+        source_update.publish_prepared();
+        builder.publish_prepared();
+        publish_end = build_clock::now();
+        cache_update.publish_prepared();
+        interface_publish_end = build_clock::now();
         output.telemetry.publication_ns = elapsed_ns(publish_begin, publish_end);
         output.telemetry.interface_publish_ns =
             elapsed_ns(interface_publish_begin, interface_publish_end);
@@ -245,12 +247,7 @@ status project_build_orchestrator::update(
                 return result;
 
             const auto publish_begin = build_clock::now();
-            {
-                std::unique_lock<std::shared_mutex> publication_lock;
-                if (publication_mutex != nullptr)
-                    publication_lock = std::unique_lock<std::shared_mutex>{*publication_mutex};
-                source_update.publish_prepared();
-            }
+            source_update.publish_prepared();
             const auto publish_end = build_clock::now();
             output.telemetry.publication_ns = elapsed_ns(publish_begin, publish_end);
             output.telemetry.total_ns = elapsed_ns(total_begin, publish_end);
@@ -308,16 +305,11 @@ status project_build_orchestrator::update(
         const auto interface_publish_begin = build_clock::now();
         build_clock::time_point publish_end;
         build_clock::time_point interface_publish_end;
-        {
-            std::unique_lock<std::shared_mutex> publication_lock;
-            if (publication_mutex != nullptr)
-                publication_lock = std::unique_lock<std::shared_mutex>{*publication_mutex};
-            source_update.publish_prepared();
-            builder.publish_prepared();
-            publish_end = build_clock::now();
-            cache_update.publish_prepared();
-            interface_publish_end = build_clock::now();
-        }
+        source_update.publish_prepared();
+        builder.publish_prepared();
+        publish_end = build_clock::now();
+        cache_update.publish_prepared();
+        interface_publish_end = build_clock::now();
         output.telemetry.publication_ns = elapsed_ns(publish_begin, publish_end);
         output.telemetry.interface_publish_ns =
             elapsed_ns(interface_publish_begin, interface_publish_end);

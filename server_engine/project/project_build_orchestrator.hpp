@@ -6,7 +6,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <shared_mutex>
 #include <span>
 
 namespace cw::server {
@@ -33,20 +32,26 @@ struct project_build_result final {
     bool rebuilt = false;
 };
 
-// Coordinates one complete Project build. Authoritative Source Manager,
-// SourceContribution and Graph candidates are fully prepared before a fixed no-fail
-// publication barrier. Parser interfaces are reconstructable COLD acceleration
-// state and publish only after that barrier succeeds.
+// Coordinates Project construction before READY. No Project readers exist while
+// construct() executes, so publication is an internal ownership boundary rather
+// than a reader/writer synchronization boundary. update() remains a low-level
+// construction primitive for incremental Builder tests and future BUILD storage.
 class project_build_orchestrator final {
 public:
     explicit project_build_orchestrator(
         project_context& project_value,
-        std::size_t worker_limit_value = 0,
-        std::shared_mutex* publication_mutex_value = nullptr) noexcept
+        std::size_t worker_limit_value = 0) noexcept
         : project(project_value),
-          publication_mutex(publication_mutex_value),
           worker_limit(worker_limit_value) {}
 
+    // Builds directly into a construction-only Project Context. Failure leaves
+    // that candidate disposable; project_manager destroys it and returns UNLOADED.
+    [[nodiscard]] status construct(
+        operation_id operation,
+        diagnostic_buffer& diagnostics,
+        project_build_result& output) noexcept;
+
+    // Detached full replacement retained as a low-level compatibility primitive.
     [[nodiscard]] status rebuild(
         operation_id operation,
         diagnostic_buffer& diagnostics,
@@ -65,7 +70,6 @@ private:
         project_build_result& output) noexcept;
 
     project_context& project;
-    std::shared_mutex* publication_mutex = nullptr;
     std::size_t worker_limit = 0;
 };
 

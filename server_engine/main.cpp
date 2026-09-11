@@ -39,26 +39,27 @@ int main(int argc, char** argv) {
 
     project_manager projects;
     project_build_result build;
-    if (!projects.load(
+    if (!projects.rebuild(
             server.project.path, operation_id{2}, diagnostics, build).ok()) {
         print_diagnostics(diagnostics);
         return 2;
     }
 
-    project_read_guard read;
-    if (!projects.read(read).ok() || !read)
+    project_access access;
+    if (!projects.acquire(access).ok() || !access)
         return 3;
 
-    const auto& graph = read->compiled_graph();
-    std::cout << "Server Engine project loaded\n";
-    std::cout << "Project: " << read->configuration().name << '\n';
-    std::cout << "Project items: " << read->configuration().project.size() << '\n';
-    std::cout << "Semantic identities: " << read->identity_count() << '\n';
+    const auto& graph = access->compiled_graph();
+    std::cout << "Server Engine project ready\n";
+    std::cout << "Project: " << access->configuration().name << '\n';
+    std::cout << "Project items: " << access->configuration().project.size() << '\n';
+    std::cout << "Semantic identities: " << access->identity_count() << '\n';
     std::cout << "Types: " << graph.type_count() << '\n';
     std::cout << "Objects: " << graph.object_count() << '\n';
     std::cout << "Links: " << graph.link_count() << '\n';
 
-    read = {};
-    projects.unload();
+    access.reset();
+    if (!projects.unload().ok())
+        return 4;
     return 0;
 }
