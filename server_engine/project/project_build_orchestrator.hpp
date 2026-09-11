@@ -13,6 +13,14 @@ namespace cw::server {
 struct project_build_telemetry final {
     project_storage_pressure storage_before{};
     project_storage_pressure storage_after{};
+    // project_manager BUILD boundary. These fields are populated for persisted
+    // baseline BUILDs; orchestrator-only tests leave them zero.
+    std::uint64_t baseline_open_ns = 0;
+    std::uint64_t dirty_detection_ns = 0;
+    std::uint64_t manager_total_ns = 0;
+    std::uint64_t baseline_sources = 0;
+    std::uint64_t dirty_sources = 0;
+
     std::uint64_t frontend_ns = 0;
     std::uint64_t builder_prepare_ns = 0;
     std::uint64_t source_prepare_publish_ns = 0;

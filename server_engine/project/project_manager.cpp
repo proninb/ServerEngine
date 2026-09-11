@@ -1,5 +1,6 @@
 #include "project_manager.hpp"
 
+#include <chrono>
 #include <exception>
 #include <new>
 #include <stdexcept>
@@ -146,6 +147,8 @@ status project_manager::build(
     std::size_t worker_limit) noexcept {
 
     output = {};
+    const auto manager_begin = std::chrono::steady_clock::now();
+
     if (!reserve_construction())
         return {status_code::invalid_state};
 
@@ -172,7 +175,13 @@ status project_manager::build(
 
     baseline_store store{configuration_path};
     baseline_snapshot snapshot;
+
+    const auto baseline_open_begin = std::chrono::steady_clock::now();
     result = store.open(fingerprint, snapshot);
+    const auto baseline_open_end = std::chrono::steady_clock::now();
+    const auto baseline_open_ns = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            baseline_open_end - baseline_open_begin).count());
 
     if (result.code == status_code::not_found ||
         result.code == status_code::rebuild_required) {
@@ -194,6 +203,8 @@ status project_manager::build(
     // BUILD change detection is intentionally Source-Manager-only. Full artifact
     // CRC/cross-image verification is a cold SAVE/test boundary; doing it here
     // would fault the complete baseline before a sparse update can begin.
+    const auto dirty_detection_begin = std::chrono::steady_clock::now();
+
     source_manager_image_view sources;
     result = sources.bind(
         snapshot.artifact(baseline_artifact_kind::source_manager));
@@ -211,12 +222,34 @@ status project_manager::build(
         return result;
     }
 
+    const auto dirty_detection_end = std::chrono::steady_clock::now();
+    const auto dirty_detection_ns = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            dirty_detection_end - dirty_detection_begin).count());
+
+    const auto baseline_source_count =
+        static_cast<std::uint64_t>(sources.source_count());
+    const auto dirty_source_count =
+        static_cast<std::uint64_t>(dirty_sources.size());
+
+    const auto publish_manager_telemetry = [&](project_build_result& value) noexcept {
+        value.telemetry.baseline_open_ns = baseline_open_ns;
+        value.telemetry.dirty_detection_ns = dirty_detection_ns;
+        value.telemetry.baseline_sources = baseline_source_count;
+        value.telemetry.dirty_sources = dirty_source_count;
+        value.telemetry.manager_total_ns = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - manager_begin).count());
+    };
+
     if (dirty_sources.empty()) {
-        return activate_baseline_reserved(
+        const auto activate_result = activate_baseline_reserved(
             std::move(configuration),
             configuration_path,
             std::move(snapshot),
             nullptr);
+        publish_manager_telemetry(output);
+        return activate_result;
     }
 
     try {
@@ -229,6 +262,7 @@ status project_manager::build(
         result = candidate->activate_build_baseline(
             std::move(snapshot));
         if (!result.ok()) {
+            publish_manager_telemetry(output);
             abandon_construction();
             return result;
         }
@@ -243,6 +277,7 @@ status project_manager::build(
             diagnostics,
             output);
         if (!result.ok()) {
+            publish_manager_telemetry(output);
             abandon_construction();
             return result;
         }
@@ -254,6 +289,8 @@ status project_manager::build(
         lifecycle.store(
             project_lifecycle_state::ready,
             std::memory_order_release);
+
+        publish_manager_telemetry(output);
         return {};
     }
     catch (const std::bad_alloc&) {
