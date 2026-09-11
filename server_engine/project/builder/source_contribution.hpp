@@ -108,6 +108,21 @@ struct source_contribution_storage_usage final {
     std::size_t construction_slots = 0;
 };
 
+// Read-only persistence boundary over the physical append arenas. Stale slices
+// remain present so normal SAVE preserves all SourceContribution range indices.
+struct source_contribution_data_view final {
+    std::span<const source_contribution_state> sources;
+    std::span<const source_contribution_type> types;
+    std::span<const source_contribution_member> members;
+    std::span<const source_type_modifier> modifiers;
+    std::span<const source_contribution_enum_value> enum_values;
+    std::span<const source_contribution_object> objects;
+    std::span<const source_contribution_link> links;
+    std::span<const source_construction_state> construction;
+    source_contribution_statistics statistics{};
+    bool complete = false;
+};
+
 class source_contribution_cache_update;
 class source_contribution_sparse_update;
 
@@ -132,6 +147,21 @@ public:
     [[nodiscard]] const source_construction_state* construction(type_handle handle) const noexcept;
     [[nodiscard]] const source_contribution_statistics& statistics() const noexcept { return statistics_value; }
     [[nodiscard]] source_contribution_storage_usage storage_usage() const noexcept;
+
+    [[nodiscard]] source_contribution_data_view data_view() const noexcept {
+        return {
+            committed.sources,
+            committed.types,
+            committed.members,
+            committed.modifiers,
+            committed.enum_values,
+            committed.objects,
+            committed.links,
+            committed.construction,
+            statistics_value,
+            provenance_complete,
+        };
+    }
 
     // Compares Parser output directly with retained build provenance. This is a
     // semantic-delta filter only: identity_ref equality and Source-local payload

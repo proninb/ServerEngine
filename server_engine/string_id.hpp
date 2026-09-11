@@ -6,6 +6,7 @@ namespace cw::server {
 
 class string_table;
 class compiled_image_view;
+class build_cache_image_view;
 
 // Identifies one canonical textual atom for the lifetime of a loaded Project.
 // It is text identity only; semantic identity remains identity_ref.
@@ -26,6 +27,7 @@ private:
 
     friend class string_table;
     friend class compiled_image_view;
+    friend class build_cache_image_view;
 };
 
 static_assert(sizeof(string_id) == 4);

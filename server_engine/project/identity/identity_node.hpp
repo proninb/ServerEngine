@@ -10,6 +10,7 @@ namespace cw::server {
 
 class identity_space;
 class compiled_image_view;
+class build_cache_image_view;
 
 enum class identity_kind : std::uint8_t {
     root,
@@ -68,6 +69,7 @@ private:
 
     friend class identity_space;
     friend class compiled_image_view;
+    friend class build_cache_image_view;
 };
 
 static_assert(sizeof(identity_ref) == 4);

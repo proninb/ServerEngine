@@ -10,6 +10,7 @@ namespace cw::server {
 class graph;
 class generation_builder;
 class compiled_image_view;
+class build_cache_image_view;
 
 // Identifies one canonical type expression inside the current committed Graph.
 // TypeRef is compact and Graph-local; index zero is the invalid sentinel.
@@ -31,6 +32,7 @@ private:
     friend class graph;
     friend class generation_builder;
     friend class compiled_image_view;
+    friend class build_cache_image_view;
 };
 
 static_assert(sizeof(TypeRef) == 4);

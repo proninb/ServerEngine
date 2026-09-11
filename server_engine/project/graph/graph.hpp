@@ -178,6 +178,18 @@ struct graph_data_view final {
     std::size_t live_links = 0;
 };
 
+// Read-only persistence boundary for incremental Builder lineage that is not
+// Runtime/READY semantic ownership. The query indexes remain in compiled.bin.
+struct graph_build_data_view final {
+    std::span<const TypeRef> intrinsic_refs;
+    std::span<const TypeRef> named_refs;
+    std::span<const graph_derived_index_slot> derived_index;
+    std::size_t derived_index_entries = 0;
+    std::span<const std::uint32_t> dependency_versions;
+    std::span<const std::uint32_t> reverse_dependency_heads;
+    std::span<const graph_dependency_edge> dependency_edges;
+};
+
 // Detached complete Graph storage. Generation Builder performs all
 // allocation and validation here; Graph publication is a no-fail swap only.
 class prepared_graph_generation final {
@@ -336,6 +348,18 @@ public:
             live_type_count,
             live_object_count,
             live_link_count,
+        };
+    }
+
+    [[nodiscard]] graph_build_data_view build_data_view() const noexcept {
+        return {
+            intrinsic_refs,
+            named_refs,
+            derived_index,
+            derived_index_entries,
+            dependency_versions,
+            reverse_dependency_heads,
+            dependency_edges,
         };
     }
 

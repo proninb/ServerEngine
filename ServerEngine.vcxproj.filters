@@ -16,6 +16,7 @@
     <ClCompile Include="server_engine\project\persistence\baseline_store.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="server_engine\project\persistence\source_manager_image.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="server_engine\project\persistence\compiled_image.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="server_engine\project\persistence\build_cache_image.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="server_engine\project\storage\byte_arena.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="server_engine\project\identity\identity_space.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="server_engine\project\string\string_table.cpp"><Filter>Source Files</Filter></ClCompile>
@@ -59,6 +60,7 @@
     <ClInclude Include="server_engine\project\persistence\baseline_store.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\persistence\source_manager_image.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\persistence\compiled_image.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\persistence\build_cache_image.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\identity\name_ref.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\identity\identity_node.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\storage\byte_arena.hpp"><Filter>Header Files</Filter></ClInclude>

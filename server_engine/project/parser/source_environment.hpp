@@ -24,6 +24,34 @@ struct source_interface_member final {
     member_index index{};
 };
 
+struct source_interface_type_slot final {
+    identity_ref parent{};
+    string_id name{};
+    identity_ref identity{};
+};
+
+struct source_interface_object_slot final {
+    identity_ref parent{};
+    string_id name{};
+    identity_ref identity{};
+    identity_ref named_type{};
+};
+
+struct source_interface_member_slot final {
+    identity_ref type{};
+    string_id name{};
+    member_index index{};
+};
+
+// Read-only persistence boundary for Source-local Parser acceleration state.
+// imported_interfaces is intentionally excluded because it contains process pointers.
+struct source_interface_data_view final {
+    std::span<const identity_ref> local_types;
+    std::span<const source_interface_type_slot> type_slots;
+    std::span<const source_interface_object_slot> object_slots;
+    std::span<const source_interface_member_slot> member_slots;
+};
+
 // Immutable Parser-visible interface exported by one parsed Source. Lookup keys
 // retain parent/name explicitly, so Parser lookup uses only numeric identity_ref
 // equality and never dereferences semantic identity records on the probe path.
@@ -56,25 +84,19 @@ public:
         return local_type_values;
     }
 
+    [[nodiscard]] source_interface_data_view data_view() const noexcept {
+        return {
+            local_type_values,
+            type_slots,
+            object_slots,
+            member_slots,
+        };
+    }
+
 private:
-    struct type_slot final {
-        identity_ref parent{};
-        string_id name{};
-        identity_ref identity{};
-    };
-
-    struct object_slot final {
-        identity_ref parent{};
-        string_id name{};
-        identity_ref identity{};
-        identity_ref named_type{};
-    };
-
-    struct member_slot final {
-        identity_ref type{};
-        string_id name{};
-        member_index index{};
-    };
+    using type_slot = source_interface_type_slot;
+    using object_slot = source_interface_object_slot;
+    using member_slot = source_interface_member_slot;
 
     [[nodiscard]] identity_ref find_type_recursive(
         identity_ref scope,

@@ -6,6 +6,7 @@
 #include "../server_engine/project/persistence/baseline_store.hpp"
 #include "../server_engine/project/persistence/source_manager_image.hpp"
 #include "../server_engine/project/persistence/compiled_image.hpp"
+#include "../server_engine/project/persistence/build_cache_image.hpp"
 #include "../server_engine/project/frontend/source_facts_validation.hpp"
 #include "../server_engine/project/frontend/include_discovery.hpp"
 #include "../server_engine/project/frontend/source_frontend_generation.hpp"
@@ -3706,6 +3707,512 @@ bool test_compiled_image_integrity() {
     return pass;
 }
 
+
+struct build_cache_fixture final {
+    std::unique_ptr<project_context> context;
+    std::filesystem::path directory;
+    std::filesystem::path root_path;
+    std::filesystem::path dependency_path;
+    source_id root_source{};
+    source_id dependency_source{};
+};
+
+[[nodiscard]] bool prepare_build_cache_fixture(
+    build_cache_fixture& output) {
+
+    output = {};
+    output.directory =
+        std::filesystem::temp_directory_path() /
+        "server_engine_v310d2_build_cache_fixture";
+
+    std::error_code error;
+    std::filesystem::remove_all(output.directory, error);
+    std::filesystem::create_directories(output.directory, error);
+    if (error)
+        return false;
+
+    output.root_path = output.directory / "a.hpp";
+    output.dependency_path = output.directory / "b.hpp";
+
+    {
+        std::ofstream file(output.dependency_path);
+        file << "namespace N { "
+                "struct Value {}; "
+                "struct IO { Value* IN; Value* OUT; }; "
+                "}";
+        if (!file)
+            return false;
+    }
+
+    {
+        std::ofstream file(output.root_path);
+        file << "#include \"b.hpp\"\n"
+                "namespace N { "
+                "IO A; IO B; B.IN = A.OUT; "
+                "}";
+        if (!file)
+            return false;
+    }
+
+    project_configuration configuration;
+    configuration.version = 1;
+    configuration.name = "BuildCache";
+    configuration.project.push_back(
+        project_item_configuration{
+            output.root_path,
+            project_item_role::type});
+
+    auto context =
+        std::make_unique<project_context>(std::move(configuration));
+    project_build_orchestrator orchestrator{*context, 2};
+    diagnostic_buffer diagnostics;
+    project_build_result build;
+
+    if (!orchestrator.rebuild(
+            operation_id{1300},
+            diagnostics,
+            build).ok() ||
+        diagnostics.has_errors() ||
+        !build.changed ||
+        !context->frontend_cache().complete() ||
+        !context->contributions().complete() ||
+        context->sources().source_count() != 2) {
+        return false;
+    }
+
+    std::string normalized;
+    if (!normalize_source_path(output.root_path, normalized).ok() ||
+        !context->sources().find(
+            normalized,
+            output.root_source).ok()) {
+        return false;
+    }
+
+    if (!normalize_source_path(
+            output.dependency_path,
+            normalized).ok() ||
+        !context->sources().find(
+            normalized,
+            output.dependency_source).ok()) {
+        return false;
+    }
+
+    output.context = std::move(context);
+    return true;
+}
+
+[[nodiscard]] bool encode_build_cache_correlated_images(
+    const build_cache_fixture& fixture,
+    std::vector<std::byte>& compiled,
+    std::vector<std::byte>& sources,
+    std::vector<std::byte>& build_cache) {
+
+    compiled.clear();
+    sources.clear();
+    build_cache.clear();
+
+    if (!fixture.context ||
+        !fixture.root_source ||
+        !encode_compiled_image(
+            *fixture.context,
+            compiled).ok()) {
+        return false;
+    }
+
+    const std::array roots{
+        source_manager_image_root{
+            fixture.root_source,
+            project_item_role::type},
+    };
+    source_manager_image_options options;
+    options.generation = 1;
+    options.roots = roots;
+
+    return encode_source_manager_image(
+               fixture.context->sources(),
+               options,
+               sources).ok() &&
+           encode_build_cache_image(
+               *fixture.context,
+               build_cache).ok();
+}
+
+bool test_build_cache_image_roundtrip() {
+    static_assert(build_cache_image_directory_count == 20);
+    static_assert(
+        static_cast<std::uint32_t>(
+            build_cache_image_section::graph_dependency_edges) == 20);
+
+    build_cache_fixture fixture;
+    if (!prepare_build_cache_fixture(fixture))
+        return false;
+
+    std::vector<std::byte> image;
+    if (!encode_build_cache_image(*fixture.context, image).ok() ||
+        image.empty()) {
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    build_cache_image_view view;
+    if (!view.bind(image).ok() ||
+        !view.verify_contents().ok() ||
+        !view.frontend_complete() ||
+        !view.contributions_complete() ||
+        view.source_count() != 2 ||
+        view.frontend_count() != 2) {
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    const auto dependency_text =
+        view.source_text(fixture.dependency_source);
+    if (dependency_text.find("struct IO") == std::string_view::npos ||
+        dependency_text.find("Value* IN") == std::string_view::npos) {
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    type_handle value_type;
+    type_handle io_type;
+    object_handle a_object;
+    if (!fixture.context->find_type("N::Value", value_type).ok() ||
+        !fixture.context->find_type("N::IO", io_type).ok() ||
+        !fixture.context->find_object("N::A", a_object).ok()) {
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    const auto expected_io_identity =
+        fixture.context->compiled_graph().identity(io_type);
+
+    bool found_io = false;
+    build_cache_source_record dependency_record;
+    if (!view.source(
+            fixture.dependency_source,
+            dependency_record).ok()) {
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    for (std::size_t index = 0;
+         index < dependency_record.local_types.count;
+         ++index) {
+        identity_ref identity;
+        if (!view.frontend_local_type(
+                fixture.dependency_source,
+                index,
+                identity).ok()) {
+            std::error_code error;
+            std::filesystem::remove_all(fixture.directory, error);
+            return false;
+        }
+        if (identity == expected_io_identity)
+            found_io = true;
+    }
+
+    source_contribution_state root_state;
+    source_contribution_state dependency_state;
+    const auto statistics = view.contribution_statistics();
+
+    const auto* a_record =
+        fixture.context->compiled_graph().find(a_object);
+    const auto named_io = view.named_ref(io_type);
+
+    type_handle decoded_io;
+    const bool pass =
+        found_io &&
+        view.contribution_state(
+            fixture.root_source,
+            root_state).ok() &&
+        view.contribution_state(
+            fixture.dependency_source,
+            dependency_state).ok() &&
+        root_state.objects.count == 2 &&
+        root_state.links.count == 1 &&
+        dependency_state.types.count == 2 &&
+        dependency_state.members.count == 2 &&
+        statistics.sources == 2 &&
+        statistics.type_declarations == 2 &&
+        statistics.members == 2 &&
+        statistics.objects == 2 &&
+        statistics.links == 1 &&
+        view.construction_slot_count() ==
+            fixture.context->compiled_graph().type_slot_count() &&
+        view.dependency_version_count() ==
+            fixture.context->compiled_graph().type_slot_count() &&
+        view.derived_index_entries() != 0 &&
+        view.dependency_edge_count() != 0 &&
+        a_record != nullptr &&
+        named_io &&
+        named_io == a_record->type &&
+        fixture.context->compiled_graph().named(
+            named_io,
+            decoded_io) &&
+        decoded_io == io_type;
+
+    std::error_code error;
+    std::filesystem::remove_all(fixture.directory, error);
+    return pass;
+}
+
+bool test_build_cache_image_deterministic() {
+    build_cache_fixture fixture;
+    if (!prepare_build_cache_fixture(fixture))
+        return false;
+
+    std::vector<std::byte> first;
+    std::vector<std::byte> second;
+
+    const bool pass =
+        encode_build_cache_image(
+            *fixture.context,
+            first).ok() &&
+        encode_build_cache_image(
+            *fixture.context,
+            second).ok() &&
+        !first.empty() &&
+        first == second;
+
+    std::error_code error;
+    std::filesystem::remove_all(fixture.directory, error);
+    return pass;
+}
+
+bool test_build_cache_image_cross_artifact() {
+    build_cache_fixture fixture;
+    if (!prepare_build_cache_fixture(fixture))
+        return false;
+
+    std::vector<std::byte> compiled_bytes;
+    std::vector<std::byte> source_bytes;
+    std::vector<std::byte> cache_bytes;
+
+    if (!encode_build_cache_correlated_images(
+            fixture,
+            compiled_bytes,
+            source_bytes,
+            cache_bytes)) {
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    compiled_image_view compiled;
+    source_manager_image_view sources;
+    build_cache_image_view cache;
+
+    const bool pass =
+        compiled.bind(compiled_bytes).ok() &&
+        compiled.verify_contents().ok() &&
+        sources.bind(source_bytes).ok() &&
+        sources.verify_contents().ok() &&
+        cache.bind(cache_bytes).ok() &&
+        cache.verify_contents().ok() &&
+        cache.verify_against(compiled, sources).ok();
+
+    std::error_code error;
+    std::filesystem::remove_all(fixture.directory, error);
+    return pass;
+}
+
+bool test_build_cache_image_mapped_baseline() {
+    build_cache_fixture fixture;
+    if (!prepare_build_cache_fixture(fixture))
+        return false;
+
+    std::vector<std::byte> compiled_bytes;
+    std::vector<std::byte> source_bytes;
+    std::vector<std::byte> cache_bytes;
+
+    if (!encode_build_cache_correlated_images(
+            fixture,
+            compiled_bytes,
+            source_bytes,
+            cache_bytes)) {
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    const auto project_path = fixture.directory / "project.json";
+    {
+        std::ofstream file(project_path);
+        file << "{}";
+    }
+
+    baseline_store store{project_path};
+    baseline_commit_result committed;
+    const auto fingerprint = baseline_test_fingerprint(141);
+
+    if (!store.commit(
+            fingerprint,
+            compiled_bytes,
+            source_bytes,
+            cache_bytes,
+            committed).ok()) {
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    baseline_snapshot snapshot;
+    if (!store.open(fingerprint, snapshot).ok()) {
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    compiled_image_view compiled;
+    source_manager_image_view sources;
+    build_cache_image_view cache;
+
+    const bool pass =
+        compiled.bind(
+            snapshot.artifact(
+                baseline_artifact_kind::compiled)).ok() &&
+        sources.bind(
+            snapshot.artifact(
+                baseline_artifact_kind::source_manager)).ok() &&
+        cache.bind(
+            snapshot.artifact(
+                baseline_artifact_kind::build_cache)).ok() &&
+        cache.verify_contents().ok() &&
+        cache.verify_against(compiled, sources).ok() &&
+        cache.source_text(
+            fixture.dependency_source).find(
+                "Value* OUT") != std::string_view::npos;
+
+    snapshot = {};
+    std::error_code error;
+    std::filesystem::remove_all(fixture.directory, error);
+    return pass;
+}
+
+bool test_build_cache_image_incremental_lineage() {
+    build_cache_fixture fixture;
+    if (!prepare_build_cache_fixture(fixture))
+        return false;
+
+    {
+        std::ofstream file(
+            fixture.dependency_path,
+            std::ios::trunc);
+        file << "namespace N { "
+                "struct Value {}; "
+                "struct IO { "
+                "Value* IN; Value* OUT; Value* AUX; "
+                "}; "
+                "}";
+        if (!file)
+            return false;
+    }
+
+    project_build_orchestrator orchestrator{
+        *fixture.context,
+        2};
+    diagnostic_buffer diagnostics;
+    project_build_result update;
+    const std::array dirty{fixture.dependency_source};
+
+    if (!orchestrator.update(
+            dirty,
+            operation_id{1301},
+            diagnostics,
+            update).ok() ||
+        diagnostics.has_errors() ||
+        !update.changed) {
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    const auto storage =
+        fixture.context->contributions().storage_usage();
+    const auto live =
+        fixture.context->contributions().statistics();
+
+    std::vector<std::byte> compiled_bytes;
+    std::vector<std::byte> source_bytes;
+    std::vector<std::byte> cache_bytes;
+
+    if (!encode_build_cache_correlated_images(
+            fixture,
+            compiled_bytes,
+            source_bytes,
+            cache_bytes)) {
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    compiled_image_view compiled;
+    source_manager_image_view sources;
+    build_cache_image_view cache;
+
+    const bool pass =
+        storage.stale_bytes != 0 &&
+        compiled.bind(compiled_bytes).ok() &&
+        sources.bind(source_bytes).ok() &&
+        cache.bind(cache_bytes).ok() &&
+        cache.verify_contents().ok() &&
+        cache.verify_against(compiled, sources).ok() &&
+        cache.source_text(
+            fixture.dependency_source).find(
+                "Value* AUX") != std::string_view::npos &&
+        cache.contribution_statistics().members ==
+            live.members &&
+        cache.contribution_member_count() >
+            cache.contribution_statistics().members;
+
+    std::error_code error;
+    std::filesystem::remove_all(fixture.directory, error);
+    return pass;
+}
+
+bool test_build_cache_image_integrity() {
+    build_cache_fixture fixture;
+    if (!prepare_build_cache_fixture(fixture))
+        return false;
+
+    std::vector<std::byte> image;
+    if (!encode_build_cache_image(
+            *fixture.context,
+            image).ok()) {
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    build_cache_image_view before;
+    if (!before.bind(image).ok() ||
+        !before.verify_contents().ok()) {
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    auto damaged = image;
+    damaged[damaged.size() / 2] ^= std::byte{0x01};
+
+    build_cache_image_view after;
+    const auto bind_result = after.bind(damaged);
+    const bool pass =
+        bind_result.code == status_code::artifact_corrupt ||
+        (bind_result.ok() &&
+         after.verify_contents().code ==
+             status_code::artifact_corrupt);
+
+    std::error_code error;
+    std::filesystem::remove_all(fixture.directory, error);
+    return pass;
+}
+
 using test_function = bool (*)();
 
 struct test_case {
@@ -3786,6 +4293,12 @@ constexpr std::array tests{
     test_case{"compiled_image_mapped_baseline", &test_compiled_image_mapped_baseline},
     test_case{"compiled_image_tombstone_preservation", &test_compiled_image_tombstone_preservation},
     test_case{"compiled_image_integrity", &test_compiled_image_integrity},
+    test_case{"build_cache_image_roundtrip", &test_build_cache_image_roundtrip},
+    test_case{"build_cache_image_deterministic", &test_build_cache_image_deterministic},
+    test_case{"build_cache_image_cross_artifact", &test_build_cache_image_cross_artifact},
+    test_case{"build_cache_image_mapped_baseline", &test_build_cache_image_mapped_baseline},
+    test_case{"build_cache_image_incremental_lineage", &test_build_cache_image_incremental_lineage},
+    test_case{"build_cache_image_integrity", &test_build_cache_image_integrity},
 };
 
 } // namespace
