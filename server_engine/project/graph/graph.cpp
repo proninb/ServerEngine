@@ -21,8 +21,7 @@ namespace {
 }
 
 [[nodiscard]] std::uint64_t identity_hash(identity_ref identity) noexcept {
-    const auto value = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(identity));
-    return mix64(value >> 3);
+    return mix64(static_cast<std::uint64_t>(identity.value()));
 }
 
 [[nodiscard]] std::uint64_t derived_hash(

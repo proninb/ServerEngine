@@ -12,7 +12,7 @@ add_library(server_engine_core STATIC
     server_engine/json/json_parser.cpp
     server_engine/config/server_configuration_loader.cpp
     server_engine/project/project_configuration_loader.cpp
-    server_engine/project/identity/identity_arena.cpp
+    server_engine/project/storage/byte_arena.cpp
     server_engine/project/identity/identity_space.cpp
     server_engine/project/string/string_table.cpp
     server_engine/project/frontend/source_facts_validation.cpp
@@ -93,6 +93,7 @@ add_test(NAME project_identity_resolution COMMAND server_engine_tests project_id
 add_test(NAME project_identity_name_lifetime COMMAND server_engine_tests project_identity_name_lifetime)
 add_test(NAME project_identity_concurrency COMMAND server_engine_tests project_identity_concurrency)
 add_test(NAME project_identity_index_statistics COMMAND server_engine_tests project_identity_index_statistics)
+add_test(NAME project_identity_compact_reference COMMAND server_engine_tests project_identity_compact_reference)
 add_test(NAME source_facts_contract COMMAND server_engine_tests source_facts_contract)
 add_test(NAME source_facts_validation COMMAND server_engine_tests source_facts_validation)
 add_test(NAME source_facts_enum_validation COMMAND server_engine_tests source_facts_enum_validation)

@@ -28,117 +28,17 @@ namespace {
 
 [[nodiscard]] std::uint64_t binding_hash(identity_ref parent, string_id name) noexcept {
     return mix64(
-        static_cast<std::uint64_t>(name.value()) ^
-        mix64(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(parent))));
+        static_cast<std::uint64_t>(parent.value()) ^
+        (static_cast<std::uint64_t>(name.value()) << 32));
 }
 
-// Per-parse local declaration index. It is the source-language scope lookup state,
-// not a project identity canonicalizer; values are already canonical identity_ref.
+// Per-parse local declaration index. Lookup keys are stored directly so the
+// parser probe path never dereferences Identity Space metadata.
 class binding_index final {
 public:
-    [[nodiscard]] status reserve(std::size_t expected) noexcept {
-        try {
-            std::size_t capacity = 16;
-            const auto target = expected > (std::numeric_limits<std::size_t>::max)() / 2
-                ? (std::numeric_limits<std::size_t>::max)()
-                : expected * 2 + 1;
-            while (capacity < target) {
-                if (capacity > (std::numeric_limits<std::size_t>::max)() / 2)
-                    return {status_code::not_available};
-                capacity *= 2;
-            }
-            slots.assign(capacity, nullptr);
-            count = 0;
-            return {};
-        }
-        catch (...) {
-            return {status_code::not_available};
-        }
-    }
+    explicit binding_index(identity_view identities_value) noexcept
+        : identities(identities_value) {}
 
-    [[nodiscard]] status insert(identity_ref identity) noexcept {
-        if (identity == nullptr || identity->kind() != identity_kind::type || identity->parent() == nullptr)
-            return {status_code::invalid_argument};
-        if (slots.empty()) {
-            const auto result = reserve(16);
-            if (!result.ok())
-                return result;
-        }
-        if ((count + 1) * 10 >= slots.size() * 7) {
-            const auto result = grow();
-            if (!result.ok())
-                return result;
-        }
-        return insert_into(slots, identity, count);
-    }
-
-    [[nodiscard]] identity_ref find(identity_ref parent, string_id name) const noexcept {
-        if (slots.empty())
-            return nullptr;
-        const auto mask = slots.size() - 1;
-        auto position = static_cast<std::size_t>(binding_hash(parent, name)) & mask;
-        for (std::size_t probe = 0; probe < slots.size(); ++probe) {
-            const auto identity = slots[position];
-            if (identity == nullptr)
-                return nullptr;
-            if (identity->parent() == parent && identity->name() == name)
-                return identity;
-            position = (position + 1) & mask;
-        }
-        return nullptr;
-    }
-
-private:
-    [[nodiscard]] static status insert_into(
-        std::vector<identity_ref>& target,
-        identity_ref identity,
-        std::size_t& target_count) noexcept {
-
-        const auto mask = target.size() - 1;
-        const auto name = identity->name();
-        auto position = static_cast<std::size_t>(binding_hash(identity->parent(), name)) & mask;
-        for (std::size_t probe = 0; probe < target.size(); ++probe) {
-            const auto existing = target[position];
-            if (existing == nullptr) {
-                target[position] = identity;
-                ++target_count;
-                return {};
-            }
-            if (existing->parent() == identity->parent() && existing->name() == name)
-                return existing == identity ? status{} : status{status_code::semantic_conflict};
-            position = (position + 1) & mask;
-        }
-        return {status_code::not_available};
-    }
-
-    [[nodiscard]] status grow() noexcept {
-        try {
-            if (slots.size() > (std::numeric_limits<std::size_t>::max)() / 2)
-                return {status_code::not_available};
-            std::vector<identity_ref> replacement(slots.size() * 2, nullptr);
-            std::size_t replacement_count = 0;
-            for (const auto identity : slots) {
-                if (identity == nullptr)
-                    continue;
-                const auto result = insert_into(replacement, identity, replacement_count);
-                if (!result.ok())
-                    return result;
-            }
-            slots.swap(replacement);
-            count = replacement_count;
-            return {};
-        }
-        catch (...) {
-            return {status_code::not_available};
-        }
-    }
-
-    std::vector<identity_ref> slots;
-    std::size_t count = 0;
-};
-
-class object_binding_index final {
-public:
     [[nodiscard]] status reserve(std::size_t expected) noexcept {
         try {
             std::size_t capacity = 16;
@@ -159,69 +59,85 @@ public:
         }
     }
 
-    [[nodiscard]] status insert(identity_ref identity, identity_ref named_type) noexcept {
-        if (identity == nullptr || identity->kind() != identity_kind::object ||
-            identity->parent() == nullptr || !identity->name()) {
+    [[nodiscard]] status insert(identity_ref identity) noexcept {
+        if (!identity || identity.kind() != identity_kind::type)
             return {status_code::invalid_argument};
-        }
+
+        const auto parent = identities.parent(identity);
+        const auto name = identities.name(identity);
+        if (!parent || !name)
+            return {status_code::invalid_argument};
+
         if (slots.empty()) {
             const auto result = reserve(16);
             if (!result.ok())
                 return result;
         }
+
         if ((count + 1) * 10 >= slots.size() * 7) {
             const auto result = grow();
             if (!result.ok())
                 return result;
         }
-        return insert_into(slots, identity, named_type, count);
+
+        return insert_into(slots, parent, name, identity, count);
     }
 
-    [[nodiscard]] source_interface_object find(identity_ref parent, string_id name) const noexcept {
-        if (slots.empty() || parent == nullptr || !name)
+    [[nodiscard]] identity_ref find(identity_ref parent, string_id name) const noexcept {
+        if (slots.empty() || !parent || !name)
             return {};
+
         const auto mask = slots.size() - 1;
         auto position = static_cast<std::size_t>(binding_hash(parent, name)) & mask;
+
         for (std::size_t probe = 0; probe < slots.size(); ++probe) {
-            const auto& entry = slots[position];
-            if (entry.identity == nullptr)
+            const auto& current = slots[position];
+            if (!current.identity)
                 return {};
-            if (entry.identity->parent() == parent && entry.identity->name() == name)
-                return {entry.identity, entry.named_type};
+
+            if (current.parent == parent && current.name == name)
+                return current.identity;
+
             position = (position + 1) & mask;
         }
+
         return {};
     }
 
 private:
     struct slot final {
-        identity_ref identity = nullptr;
-        identity_ref named_type = nullptr;
+        identity_ref parent{};
+        string_id name{};
+        identity_ref identity{};
     };
 
     [[nodiscard]] static status insert_into(
         std::vector<slot>& target,
+        identity_ref parent,
+        string_id name,
         identity_ref identity,
-        identity_ref named_type,
         std::size_t& target_count) noexcept {
 
         const auto mask = target.size() - 1;
-        auto position = static_cast<std::size_t>(binding_hash(identity->parent(), identity->name())) & mask;
+        auto position = static_cast<std::size_t>(binding_hash(parent, name)) & mask;
+
         for (std::size_t probe = 0; probe < target.size(); ++probe) {
             auto& current = target[position];
-            if (current.identity == nullptr) {
-                current = {identity, named_type};
+            if (!current.identity) {
+                current = slot{parent, name, identity};
                 ++target_count;
                 return {};
             }
-            if (current.identity->parent() == identity->parent() &&
-                current.identity->name() == identity->name()) {
-                return current.identity == identity && current.named_type == named_type
-                    ? status{status_code::semantic_conflict}
+
+            if (current.parent == parent && current.name == name) {
+                return current.identity == identity
+                    ? status{}
                     : status{status_code::semantic_conflict};
             }
+
             position = (position + 1) & mask;
         }
+
         return {status_code::not_available};
     }
 
@@ -229,16 +145,24 @@ private:
         try {
             if (slots.size() > (std::numeric_limits<std::size_t>::max)() / 2)
                 return {status_code::not_available};
+
             std::vector<slot> replacement(slots.size() * 2);
             std::size_t replacement_count = 0;
+
             for (const auto& current : slots) {
-                if (current.identity == nullptr)
+                if (!current.identity)
                     continue;
+
                 const auto result = insert_into(
-                    replacement, current.identity, current.named_type, replacement_count);
+                    replacement,
+                    current.parent,
+                    current.name,
+                    current.identity,
+                    replacement_count);
                 if (!result.ok())
                     return result;
             }
+
             slots.swap(replacement);
             count = replacement_count;
             return {};
@@ -248,6 +172,159 @@ private:
         }
     }
 
+    identity_view identities;
+    std::vector<slot> slots;
+    std::size_t count = 0;
+};
+
+class object_binding_index final {
+public:
+    explicit object_binding_index(identity_view identities_value) noexcept
+        : identities(identities_value) {}
+
+    [[nodiscard]] status reserve(std::size_t expected) noexcept {
+        try {
+            std::size_t capacity = 16;
+            const auto target = expected > (std::numeric_limits<std::size_t>::max)() / 2
+                ? (std::numeric_limits<std::size_t>::max)()
+                : expected * 2 + 1;
+            while (capacity < target) {
+                if (capacity > (std::numeric_limits<std::size_t>::max)() / 2)
+                    return {status_code::not_available};
+                capacity *= 2;
+            }
+            slots.assign(capacity, {});
+            count = 0;
+            return {};
+        }
+        catch (...) {
+            return {status_code::not_available};
+        }
+    }
+
+    [[nodiscard]] status insert(
+        identity_ref identity,
+        identity_ref named_type) noexcept {
+
+        if (!identity ||
+            identity.kind() != identity_kind::object) {
+            return {status_code::invalid_argument};
+        }
+
+        const auto parent = identities.parent(identity);
+        const auto name = identities.name(identity);
+        if (!parent || !name)
+            return {status_code::invalid_argument};
+
+        if (slots.empty()) {
+            const auto result = reserve(16);
+            if (!result.ok())
+                return result;
+        }
+
+        if ((count + 1) * 10 >= slots.size() * 7) {
+            const auto result = grow();
+            if (!result.ok())
+                return result;
+        }
+
+        return insert_into(
+            slots, parent, name, identity, named_type, count);
+    }
+
+    [[nodiscard]] source_interface_object find(
+        identity_ref parent,
+        string_id name) const noexcept {
+
+        if (slots.empty() || !parent || !name)
+            return {};
+
+        const auto mask = slots.size() - 1;
+        auto position = static_cast<std::size_t>(binding_hash(parent, name)) & mask;
+
+        for (std::size_t probe = 0; probe < slots.size(); ++probe) {
+            const auto& current = slots[position];
+            if (!current.identity)
+                return {};
+
+            if (current.parent == parent && current.name == name)
+                return {current.identity, current.named_type};
+
+            position = (position + 1) & mask;
+        }
+
+        return {};
+    }
+
+private:
+    struct slot final {
+        identity_ref parent{};
+        string_id name{};
+        identity_ref identity{};
+        identity_ref named_type{};
+    };
+
+    [[nodiscard]] static status insert_into(
+        std::vector<slot>& target,
+        identity_ref parent,
+        string_id name,
+        identity_ref identity,
+        identity_ref named_type,
+        std::size_t& target_count) noexcept {
+
+        const auto mask = target.size() - 1;
+        auto position = static_cast<std::size_t>(binding_hash(parent, name)) & mask;
+
+        for (std::size_t probe = 0; probe < target.size(); ++probe) {
+            auto& current = target[position];
+            if (!current.identity) {
+                current = slot{parent, name, identity, named_type};
+                ++target_count;
+                return {};
+            }
+
+            if (current.parent == parent && current.name == name)
+                return {status_code::semantic_conflict};
+
+            position = (position + 1) & mask;
+        }
+
+        return {status_code::not_available};
+    }
+
+    [[nodiscard]] status grow() noexcept {
+        try {
+            if (slots.size() > (std::numeric_limits<std::size_t>::max)() / 2)
+                return {status_code::not_available};
+
+            std::vector<slot> replacement(slots.size() * 2);
+            std::size_t replacement_count = 0;
+
+            for (const auto& current : slots) {
+                if (!current.identity)
+                    continue;
+
+                const auto result = insert_into(
+                    replacement,
+                    current.parent,
+                    current.name,
+                    current.identity,
+                    current.named_type,
+                    replacement_count);
+                if (!result.ok())
+                    return result;
+            }
+
+            slots.swap(replacement);
+            count = replacement_count;
+            return {};
+        }
+        catch (...) {
+            return {status_code::not_available};
+        }
+    }
+
+    identity_view identities;
     std::vector<slot> slots;
     std::size_t count = 0;
 };
@@ -274,41 +351,56 @@ public:
         }
     }
 
-    [[nodiscard]] status insert(identity_ref type, string_id name, member_index index) noexcept {
-        if (type == nullptr || type->kind() != identity_kind::type || !name || !index)
+    [[nodiscard]] status insert(
+        identity_ref type,
+        string_id name,
+        member_index index) noexcept {
+
+        if (!type || type.kind() != identity_kind::type || !name || !index)
             return {status_code::invalid_argument};
+
         if (slots.empty()) {
             const auto result = reserve(16);
             if (!result.ok())
                 return result;
         }
+
         if ((count + 1) * 10 >= slots.size() * 7) {
             const auto result = grow();
             if (!result.ok())
                 return result;
         }
+
         return insert_into(slots, type, name, index, count);
     }
 
-    [[nodiscard]] member_index find(identity_ref type, string_id name) const noexcept {
-        if (slots.empty() || type == nullptr || !name)
+    [[nodiscard]] member_index find(
+        identity_ref type,
+        string_id name) const noexcept {
+
+        if (slots.empty() || !type || !name)
             return {};
+
         const auto mask = slots.size() - 1;
         auto position = static_cast<std::size_t>(binding_hash(type, name)) & mask;
+
         for (std::size_t probe = 0; probe < slots.size(); ++probe) {
-            const auto& entry = slots[position];
-            if (entry.type == nullptr)
+            const auto& current = slots[position];
+            if (!current.type)
                 return {};
-            if (entry.type == type && entry.name == name)
-                return entry.index;
+
+            if (current.type == type && current.name == name)
+                return current.index;
+
             position = (position + 1) & mask;
         }
+
         return {};
     }
 
 private:
     struct slot final {
-        identity_ref type = nullptr;
+        identity_ref type{};
         string_id name{};
         member_index index{};
     };
@@ -322,17 +414,21 @@ private:
 
         const auto mask = target.size() - 1;
         auto position = static_cast<std::size_t>(binding_hash(type, name)) & mask;
+
         for (std::size_t probe = 0; probe < target.size(); ++probe) {
             auto& current = target[position];
-            if (current.type == nullptr) {
-                current = {type, name, index};
+            if (!current.type) {
+                current = slot{type, name, index};
                 ++target_count;
                 return {};
             }
+
             if (current.type == type && current.name == name)
                 return {status_code::semantic_conflict};
+
             position = (position + 1) & mask;
         }
+
         return {status_code::not_available};
     }
 
@@ -340,16 +436,24 @@ private:
         try {
             if (slots.size() > (std::numeric_limits<std::size_t>::max)() / 2)
                 return {status_code::not_available};
+
             std::vector<slot> replacement(slots.size() * 2);
             std::size_t replacement_count = 0;
+
             for (const auto& current : slots) {
-                if (current.type == nullptr)
+                if (!current.type)
                     continue;
+
                 const auto result = insert_into(
-                    replacement, current.type, current.name, current.index, replacement_count);
+                    replacement,
+                    current.type,
+                    current.name,
+                    current.index,
+                    replacement_count);
                 if (!result.ok())
                     return result;
             }
+
             slots.swap(replacement);
             count = replacement_count;
             return {};
@@ -362,6 +466,7 @@ private:
     std::vector<slot> slots;
     std::size_t count = 0;
 };
+
 
 [[nodiscard]] constexpr bool integral_intrinsic(intrinsic_type value) noexcept {
     return value >= intrinsic_type::bool_type && value <= intrinsic_type::unsigned_long_long;
@@ -379,7 +484,8 @@ public:
         operation_id operation_value,
         diagnostic_buffer& diagnostics_value) noexcept
         : semantic(semantic_value), source(source_value), text(source_value.text()), tokens(token_values),
-          environment(environment_value), operation(operation_value), diagnostics(diagnostics_value) {}
+          environment(environment_value), operation(operation_value), diagnostics(diagnostics_value),
+          bindings(semantic.identities()), object_bindings(semantic.identities()) {}
 
     [[nodiscard]] status run(parsed_source& output) {
         if (!source || !source.source() || tokens.empty() ||
@@ -808,7 +914,7 @@ private:
             const auto imported = environment.find_object(current_scope, name, source_offset);
             if (imported.identity != nullptr)
                 return imported;
-            current_scope = current_scope->parent();
+            current_scope = semantic.identities().parent(current_scope);
         }
         return {};
     }
@@ -1197,7 +1303,7 @@ private:
                 return identity;
             if (const auto identity = environment.find_type(current_scope, name, source_offset); identity != nullptr)
                 return identity;
-            current_scope = current_scope->parent();
+            current_scope = semantic.identities().parent(current_scope);
         }
         return nullptr;
     }

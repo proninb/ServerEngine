@@ -105,7 +105,7 @@ status validate_source_facts(
             return fail(error, source_facts_error_code::namespace_identity_missing,
                 source_fact_category::namespace_fact, index, item.declaration);
         }
-        if (item.identity->kind() != identity_kind::namespace_scope) {
+        if (item.identity.kind() != identity_kind::namespace_scope) {
             return fail(error, source_facts_error_code::namespace_identity_kind,
                 source_fact_category::namespace_fact, index, item.declaration);
         }
@@ -131,7 +131,7 @@ status validate_source_facts(
             return fail(error, source_facts_error_code::record_identity_missing,
                 source_fact_category::record_fact, index, item.declaration);
         }
-        if (item.identity->kind() != identity_kind::type) {
+        if (item.identity.kind() != identity_kind::type) {
             return fail(error, source_facts_error_code::record_identity_kind,
                 source_fact_category::record_fact, index, item.declaration);
         }
@@ -231,7 +231,7 @@ status validate_source_facts(
             return fail(error, source_facts_error_code::ambiguous_type_base,
                 source_fact_category::member_fact, index, item.type.spelling);
         }
-        if (has_identity && item.type.identity->kind() != identity_kind::type) {
+        if (has_identity && item.type.identity.kind() != identity_kind::type) {
             return fail(error, source_facts_error_code::semantic_type_identity_kind,
                 source_fact_category::member_fact, index, item.type.spelling);
         }
@@ -277,7 +277,7 @@ status validate_source_facts(
             return fail(error, source_facts_error_code::enum_identity_missing,
                 source_fact_category::enum_fact, index, item.declaration);
         }
-        if (item.identity->kind() != identity_kind::type) {
+        if (item.identity.kind() != identity_kind::type) {
             return fail(error, source_facts_error_code::enum_identity_kind,
                 source_fact_category::enum_fact, index, item.declaration);
         }
@@ -348,7 +348,7 @@ status validate_source_facts(
             return fail(error, source_facts_error_code::object_identity_missing,
                 source_fact_category::object_fact, index, item.declaration);
         }
-        if (item.identity->kind() != identity_kind::object) {
+        if (item.identity.kind() != identity_kind::object) {
             return fail(error, source_facts_error_code::object_identity_kind,
                 source_fact_category::object_fact, index, item.declaration);
         }
@@ -362,7 +362,7 @@ status validate_source_facts(
         }
         previous_object_offset = item.declaration.offset;
         const bool semantic_type = item.type.identity != nullptr &&
-            item.type.identity->kind() == identity_kind::type &&
+            item.type.identity.kind() == identity_kind::type &&
             item.type.intrinsic == intrinsic_type::none;
         const bool intrinsic_type_value = item.type.identity == nullptr &&
             item.type.intrinsic != intrinsic_type::none;
@@ -390,9 +390,9 @@ status validate_source_facts(
                 source_fact_category::link_fact, index, item.declaration);
         }
         previous_link_offset = item.declaration.offset;
-        if (item.source.object == nullptr || item.source.object->kind() != identity_kind::object ||
+        if (item.source.object == nullptr || item.source.object.kind() != identity_kind::object ||
             !item.source.member || item.target.object == nullptr ||
-            item.target.object->kind() != identity_kind::object || !item.target.member) {
+            item.target.object.kind() != identity_kind::object || !item.target.member) {
             return fail(error, source_facts_error_code::link_endpoint,
                 source_fact_category::link_fact, index, item.declaration);
         }

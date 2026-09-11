@@ -2,7 +2,7 @@
 
 #include "../../status.hpp"
 #include "../../string_id.hpp"
-#include "../identity/identity_arena.hpp"
+#include "../storage/byte_arena.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -71,7 +71,7 @@ private:
     [[nodiscard]] record_page* ensure_page(std::uint32_t id) noexcept;
     [[nodiscard]] record_page* page(std::uint32_t id) const noexcept;
 
-    identity_arena storage;
+    byte_arena storage;
     std::unique_ptr<std::atomic<record*>[]> buckets;
     std::unique_ptr<std::atomic<record_page*>[]> pages;
     std::atomic<std::uint32_t> next_id{1};

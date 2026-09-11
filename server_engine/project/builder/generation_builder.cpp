@@ -239,8 +239,7 @@ template<class T>
 }
 
 [[nodiscard]] std::uint64_t identity_hash(identity_ref identity) noexcept {
-    const auto value = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(identity));
-    return mix64(value >> 3);
+    return mix64(static_cast<std::uint64_t>(identity.value()));
 }
 
 [[nodiscard]] std::uint64_t derived_hash(
@@ -1163,7 +1162,7 @@ status generation_builder::prepare_incremental_graph(
 
         const auto find_or_create_object_handle = [&](identity_ref identity, std::uint32_t& output) -> status {
             output = 0;
-            if (identity == nullptr || identity->kind() != identity_kind::object)
+            if (!identity || identity.kind() != identity_kind::object)
                 return {status_code::invalid_argument};
             const auto existing = target.find_object_identity(identity);
             if (existing) {
@@ -2057,8 +2056,8 @@ status generation_builder::prepare_graph(
 
     private:
         [[nodiscard]] std::size_t position_for(identity_ref identity) const noexcept {
-            const auto value = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(identity));
-            return static_cast<std::size_t>(mix64(value >> 3)) & mask;
+            return static_cast<std::size_t>(
+                mix64(static_cast<std::uint64_t>(identity.value()))) & mask;
         }
 
         std::vector<identity_slot> slots;

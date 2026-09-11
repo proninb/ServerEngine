@@ -1,7 +1,7 @@
 #pragma once
 
 #include "../frontend/source_facts.hpp"
-#include "../identity/identity_node.hpp"
+#include "../identity/identity_space.hpp"
 #include "../../member_index.hpp"
 #include "../../status.hpp"
 #include "../../string_id.hpp"
@@ -14,19 +14,19 @@
 namespace cw::server {
 
 struct source_interface_object final {
-    identity_ref identity = nullptr;
-    identity_ref named_type = nullptr;
+    identity_ref identity{};
+    identity_ref named_type{};
 };
 
 struct source_interface_member final {
-    identity_ref type = nullptr;
+    identity_ref type{};
     string_id name{};
     member_index index{};
 };
 
-// Immutable Parser-visible interface exported by one parsed Source. It retains
-// resolved types, objects and record-member positions using identity_ref/string_id;
-// imports are referenced, so transitive visibility never copies declarations.
+// Immutable Parser-visible interface exported by one parsed Source. Lookup keys
+// retain parent/name explicitly, so Parser lookup uses only numeric identity_ref
+// equality and never dereferences semantic identity records on the probe path.
 class source_interface final {
 public:
     source_interface() = default;
@@ -37,6 +37,7 @@ public:
 
     [[nodiscard]] status initialize(
         const source_facts& facts,
+        identity_view identities,
         std::span<const source_interface* const> imports = {}) noexcept;
 
     [[nodiscard]] identity_ref find_type(
@@ -56,13 +57,21 @@ public:
     }
 
 private:
+    struct type_slot final {
+        identity_ref parent{};
+        string_id name{};
+        identity_ref identity{};
+    };
+
     struct object_slot final {
-        identity_ref identity = nullptr;
-        identity_ref named_type = nullptr;
+        identity_ref parent{};
+        string_id name{};
+        identity_ref identity{};
+        identity_ref named_type{};
     };
 
     struct member_slot final {
-        identity_ref type = nullptr;
+        identity_ref type{};
         string_id name{};
         member_index index{};
     };
@@ -83,7 +92,7 @@ private:
         std::uint32_t depth) const noexcept;
 
     std::vector<identity_ref> local_type_values;
-    std::vector<identity_ref> type_slots;
+    std::vector<type_slot> type_slots;
     std::vector<object_slot> object_slots;
     std::vector<member_slot> member_slots;
     std::vector<const source_interface*> imported_interfaces;

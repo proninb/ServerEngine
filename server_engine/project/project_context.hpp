@@ -29,6 +29,10 @@ public:
         return state->identities.root();
     }
 
+    [[nodiscard]] identity_view identities() const noexcept {
+        return state->identities.view();
+    }
+
     [[nodiscard]] status intern_string(
         std::string_view value,
         string_id& output) const noexcept {
@@ -84,6 +88,10 @@ public:
 
     [[nodiscard]] identity_ref identity_root() const noexcept {
         return compiled->identities.root();
+    }
+
+    [[nodiscard]] identity_view identity_metadata() const noexcept {
+        return compiled->identities.view();
     }
 
     [[nodiscard]] status intern_string(

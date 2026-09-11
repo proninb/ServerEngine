@@ -499,7 +499,7 @@ status source_frontend_generation::build_incremental(
             const auto facts = state.parsed.facts();
 
             state.interface = std::make_unique<source_interface>();
-            result = state.interface->initialize(facts, interface_imports);
+            result = state.interface->initialize(facts, semantic.identities(), interface_imports);
             if (!result.ok())
                 return result;
             state.parsed_value = true;

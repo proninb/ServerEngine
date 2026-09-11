@@ -1,4 +1,4 @@
-#include "identity_arena.hpp"
+#include "byte_arena.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -20,7 +20,7 @@ namespace {
 
 } // namespace
 
-identity_arena::~identity_arena() noexcept {
+byte_arena::~byte_arena() noexcept {
     auto* item = owned_pages.load(std::memory_order_relaxed);
     while (item != nullptr) {
         auto* next = item->next_owned;
@@ -29,14 +29,17 @@ identity_arena::~identity_arena() noexcept {
     }
 }
 
-identity_arena::page* identity_arena::make_page(std::size_t minimum_capacity) noexcept {
-    const auto capacity = std::max(default_page_size, minimum_capacity);
+byte_arena::page* byte_arena::make_page(
+    std::size_t minimum_capacity) noexcept {
+
+    const auto capacity = (std::max)(default_page_size, minimum_capacity);
 
     auto* result = new (std::nothrow) page{};
     if (result == nullptr)
         return nullptr;
 
-    result->data = std::unique_ptr<std::byte[]>{new (std::nothrow) std::byte[capacity]};
+    result->data =
+        std::unique_ptr<std::byte[]>{new (std::nothrow) std::byte[capacity]};
     if (!result->data) {
         delete result;
         return nullptr;
@@ -46,7 +49,7 @@ identity_arena::page* identity_arena::make_page(std::size_t minimum_capacity) no
     return result;
 }
 
-void identity_arena::own_page(page* value) noexcept {
+void byte_arena::own_page(page* value) noexcept {
     auto* head = owned_pages.load(std::memory_order_relaxed);
     do {
         value->next_owned = head;
@@ -60,7 +63,7 @@ void identity_arena::own_page(page* value) noexcept {
     reserved_pages.fetch_add(1, std::memory_order_relaxed);
 }
 
-status identity_arena::allocate(
+status byte_arena::allocate(
     std::size_t size,
     std::size_t alignment,
     void*& output) noexcept {
@@ -70,7 +73,7 @@ status identity_arena::allocate(
     if (size == 0 || !valid_alignment(alignment))
         return {status_code::invalid_argument};
 
-    if (size > std::numeric_limits<std::size_t>::max() - (alignment - 1))
+    if (size > (std::numeric_limits<std::size_t>::max)() - (alignment - 1))
         return {status_code::not_available};
 
     const auto reservation = size + alignment - 1;
@@ -96,10 +99,13 @@ status identity_arena::allocate(
             page_value = candidate;
         }
 
-        const auto offset = page_value->used.fetch_add(reservation, std::memory_order_relaxed);
+        const auto offset =
+            page_value->used.fetch_add(reservation, std::memory_order_relaxed);
+
         if (offset <= page_value->capacity) {
             const auto aligned = align_up(offset, alignment);
-            if (aligned <= page_value->capacity && size <= page_value->capacity - aligned) {
+            if (aligned <= page_value->capacity &&
+                size <= page_value->capacity - aligned) {
                 output = page_value->data.get() + aligned;
                 return {};
             }
@@ -116,7 +122,8 @@ status identity_arena::allocate(
                 std::memory_order_release,
                 std::memory_order_acquire)) {
             own_page(candidate);
-        } else {
+        }
+        else {
             delete candidate;
         }
     }

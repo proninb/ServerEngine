@@ -8,15 +8,16 @@
 
 namespace cw::server {
 
-// Concurrent Project-lifetime bump storage. It owns bytes only and performs no
-// identity lookup, canonicalization, hashing, ordering, or synchronization lock.
-class identity_arena final {
+// Concurrent Project-lifetime monotonic byte storage for immutable variable-size
+// payloads such as interned String Table records. It owns bytes only and performs
+// no semantic identity lookup, canonicalization, ordering, or lock acquisition.
+class byte_arena final {
 public:
-    identity_arena() noexcept = default;
-    ~identity_arena() noexcept;
+    byte_arena() noexcept = default;
+    ~byte_arena() noexcept;
 
-    identity_arena(const identity_arena&) = delete;
-    identity_arena& operator=(const identity_arena&) = delete;
+    byte_arena(const byte_arena&) = delete;
+    byte_arena& operator=(const byte_arena&) = delete;
 
     [[nodiscard]] status allocate(
         std::size_t size,

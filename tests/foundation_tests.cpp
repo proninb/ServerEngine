@@ -60,7 +60,7 @@ bool test_project_identity_resolution() {
     project_context context{std::move(configuration)};
 
     const auto root = context.identity_root();
-    if (root == nullptr || root->parent() != nullptr || root->kind() != identity_kind::root)
+    if (!root || context.identity_metadata().parent(root) || root.kind() != identity_kind::root)
         return false;
 
     identity_ref n1 = nullptr;
@@ -69,7 +69,7 @@ bool test_project_identity_resolution() {
         return false;
     if (!context.resolve_declaration(root, "N", identity_kind::namespace_scope, n2).ok())
         return false;
-    if (n1 == nullptr || n1 != n2 || context.string(n1->name()) != "N")
+    if (!n1 || n1 != n2 || context.string(context.identity_metadata().name(n1)) != "N")
         return false;
 
     identity_ref a1 = nullptr;
@@ -79,8 +79,9 @@ bool test_project_identity_resolution() {
     if (!context.resolve_declaration(n2, "A", identity_kind::type, a2).ok())
         return false;
 
-    if (a1 == nullptr || a1 != a2 || a1->parent() != n1 ||
-        context.string(a1->name()) != "A" || a1->kind() != identity_kind::type)
+    if (!a1 || a1 != a2 || context.identity_metadata().parent(a1) != n1 ||
+        context.string(context.identity_metadata().name(a1)) != "A" ||
+        a1.kind() != identity_kind::type)
         return false;
 
     identity_ref conflict = nullptr;
@@ -103,7 +104,7 @@ bool test_project_identity_name_lifetime() {
         return false;
 
     source_name.assign("Modified");
-    return identity != nullptr && context.string(identity->name()) == "Controller";
+    return identity && context.string(context.identity_metadata().name(identity)) == "Controller";
 }
 
 bool test_project_identity_concurrency() {
@@ -182,6 +183,42 @@ bool test_project_identity_index_statistics() {
                statistics.p95_successful_lookup_comparisons;
 }
 
+
+
+bool test_project_identity_compact_reference() {
+    static_assert(sizeof(identity_ref) == 4);
+    static_assert(std::is_trivially_copyable_v<identity_ref>);
+    static_assert(std::is_standard_layout_v<identity_ref>);
+    static_assert(!std::is_pointer_v<identity_ref>);
+
+    project_configuration configuration;
+    project_context context{std::move(configuration)};
+
+    const auto metadata = context.identity_metadata();
+    const auto root = context.identity_root();
+    if (!root || root.kind() != identity_kind::root ||
+        metadata.parent(root) || metadata.name(root)) {
+        return false;
+    }
+
+    identity_ref ns;
+    identity_ref type;
+    if (!context.resolve_declaration(
+            root, "N", identity_kind::namespace_scope, ns).ok() ||
+        !context.resolve_declaration(
+            ns, "A", identity_kind::type, type).ok()) {
+        return false;
+    }
+
+    return ns && type &&
+           ns.kind() == identity_kind::namespace_scope &&
+           type.kind() == identity_kind::type &&
+           metadata.parent(ns) == root &&
+           metadata.parent(type) == ns &&
+           context.string(metadata.name(ns)) == "N" &&
+           context.string(metadata.name(type)) == "A" &&
+           ns.value() != type.value();
+}
 
 [[nodiscard]] source_span span_of(std::string_view text, std::string_view value) {
     const auto offset = text.find(value);
@@ -655,7 +692,8 @@ bool test_parser_source_facts_producer() {
     const auto n = facts.namespaces()[0].identity;
     const auto b = facts.records()[0].identity;
     const auto a = facts.records()[1].identity;
-    if (n == nullptr || b == nullptr || a == nullptr || b->parent() != n || a->parent() != n)
+    if (!n || !b || !a || context.identity_metadata().parent(b) != n ||
+        context.identity_metadata().parent(a) != n)
         return false;
 
     const auto& value = facts.members()[0];
@@ -712,7 +750,7 @@ bool test_parser_cross_source_visibility() {
     const auto first_facts = first.facts();
     const auto b = first_facts.records()[0].identity;
     source_interface first_interface;
-    if (!first_interface.initialize(first_facts).ok())
+    if (!first_interface.initialize(first_facts, context.identity_metadata()).ok())
         return false;
 
     source_snapshot second_snapshot;
@@ -743,7 +781,7 @@ bool test_parser_positional_include_visibility() {
         return false;
     const auto b_facts = b_parsed.facts();
     source_interface b_interface;
-    if (!b_interface.initialize(b_facts).ok())
+    if (!b_interface.initialize(b_facts, context.identity_metadata()).ok())
         return false;
 
     source_snapshot a_snapshot;
@@ -1672,7 +1710,7 @@ bool test_generation_builder_incremental_conflict_rollback() {
         if (!handle)
             continue;
         const auto identity = graph_value.identity(handle);
-        if (identity != nullptr && context.string(identity->name()) == name)
+        if (identity && context.string(context.identity_metadata().name(identity)) == name)
             return handle;
     }
     return {};
@@ -3255,6 +3293,7 @@ constexpr std::array tests{
     test_case{"project_identity_name_lifetime", &test_project_identity_name_lifetime},
     test_case{"project_identity_concurrency", &test_project_identity_concurrency},
     test_case{"project_identity_index_statistics", &test_project_identity_index_statistics},
+    test_case{"project_identity_compact_reference", &test_project_identity_compact_reference},
     test_case{"source_facts_contract", &test_source_facts_contract},
     test_case{"source_facts_validation", &test_source_facts_validation},
     test_case{"source_facts_enum_validation", &test_source_facts_enum_validation},

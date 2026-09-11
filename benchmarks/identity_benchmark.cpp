@@ -59,7 +59,7 @@ struct hardening_result {
     std::size_t identity_count = 0;
     std::size_t reserved_bytes = 0;
     identity_index_statistics index_stats;
-    bool canonical_pointer_pass = false;
+    bool canonical_reference_pass = false;
     bool structural_pass = false;
 };
 
@@ -318,6 +318,7 @@ void print_result(const benchmark_result& result) {
     constexpr std::size_t large_count = 1000000;
     constexpr double maximum_exponent = 1.50;
     constexpr double maximum_memory_amplification = 1.10;
+    constexpr std::size_t maximum_large_reserved_bytes = 32u * 1024u * 1024u;
 
     const auto small = run_benchmark(small_count, scenario::create_unique, 1);
     const auto large = run_benchmark(large_count, scenario::create_unique, 1);
@@ -352,6 +353,20 @@ void print_result(const benchmark_result& result) {
         passed = false;
     } else {
         std::printf("SCALING_GATE,PASS,exponent %.3f <= %.2f\n", exponent, maximum_exponent);
+    }
+
+    std::printf("IDENTITY_RESERVED_BYTES_1M,%zu\n", large.reserved_bytes);
+    if (large.reserved_bytes > maximum_large_reserved_bytes) {
+        std::printf(
+            "IDENTITY_MEMORY_GATE,FAIL,1M identity storage %zu > %zu bytes\n",
+            large.reserved_bytes,
+            maximum_large_reserved_bytes);
+        passed = false;
+    } else {
+        std::printf(
+            "IDENTITY_MEMORY_GATE,PASS,1M identity storage %zu <= %zu bytes\n",
+            large.reserved_bytes,
+            maximum_large_reserved_bytes);
     }
 
     std::printf("MEMORY_AMPLIFICATION_16T,%.3f\n", memory_amplification);
@@ -419,7 +434,7 @@ void print_result(const benchmark_result& result) {
     output.identity_count = context.identity_count();
     output.reserved_bytes = context.identity_bytes_reserved();
     output.index_stats = context.identity_index_stats();
-    output.canonical_pointer_pass = canonical && output.identity_count == count + 1 &&
+    output.canonical_reference_pass = canonical && output.identity_count == count + 1 &&
                                     output.index_stats.entry_count == count;
 
     constexpr double maximum_collision_rate = 0.45;
@@ -449,7 +464,7 @@ void print_hardening_header() {
     std::puts(
         "count,pattern,create_ms,hit_ms,identity_count,reserved_bytes,occupied_buckets,"
         "collision_entries,collision_rate,max_chain,avg_chain,avg_success_comparisons,"
-        "p95_success_comparisons,p99_success_comparisons,canonical_pointer,structural_gate,status");
+        "p95_success_comparisons,p99_success_comparisons,canonical_reference,structural_gate,status");
 }
 
 void print_hardening_result(const hardening_result& result) {
@@ -457,7 +472,7 @@ void print_hardening_result(const hardening_result& result) {
         ? 0.0
         : static_cast<double>(result.index_stats.collision_entries) /
               static_cast<double>(result.index_stats.entry_count);
-    const auto passed = result.canonical_pointer_pass && result.structural_pass;
+    const auto passed = result.canonical_reference_pass && result.structural_pass;
 
     std::printf(
         "%zu,%.*s,%.6f,%.6f,%zu,%zu,%zu,%zu,%.6f,%zu,%.6f,%.6f,%zu,%zu,%s,%s,%s\n",
@@ -476,7 +491,7 @@ void print_hardening_result(const hardening_result& result) {
         result.index_stats.average_successful_lookup_comparisons,
         result.index_stats.p95_successful_lookup_comparisons,
         result.index_stats.p99_successful_lookup_comparisons,
-        result.canonical_pointer_pass ? "PASS" : "FAIL",
+        result.canonical_reference_pass ? "PASS" : "FAIL",
         result.structural_pass ? "PASS" : "FAIL",
         passed ? "PASS" : "FAIL");
 }
@@ -495,16 +510,16 @@ void print_hardening_result(const hardening_result& result) {
     for (const auto pattern : patterns) {
         const auto result = run_hardening_workload(count, pattern);
         print_hardening_result(result);
-        passed = result.canonical_pointer_pass && result.structural_pass && passed;
+        passed = result.canonical_reference_pass && result.structural_pass && passed;
     }
 
     if (passed) {
         std::puts(
-            "IDENTITY_INDEX_HARDENING_GATE,PASS,1M canonical pointer and collision structure "
+            "IDENTITY_INDEX_HARDENING_GATE,PASS,1M canonical reference and collision structure "
             "passed for all identifier patterns");
     } else {
         std::puts(
-            "IDENTITY_INDEX_HARDENING_GATE,FAIL,canonical pointer or collision structure "
+            "IDENTITY_INDEX_HARDENING_GATE,FAIL,canonical reference or collision structure "
             "failed for at least one identifier pattern");
     }
     return passed;

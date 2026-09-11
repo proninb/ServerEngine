@@ -16,8 +16,9 @@ namespace {
 }
 
 [[nodiscard]] std::uint64_t binding_hash(identity_ref owner, string_id name) noexcept {
-    const auto pointer = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(owner));
-    return mix64(pointer ^ (static_cast<std::uint64_t>(name.value()) << 32));
+    return mix64(
+        static_cast<std::uint64_t>(owner.value()) ^
+        (static_cast<std::uint64_t>(name.value()) << 32));
 }
 
 [[nodiscard]] std::size_t capacity_for(std::size_t count) noexcept {
@@ -25,6 +26,7 @@ namespace {
     const auto target = count > (std::numeric_limits<std::size_t>::max)() / 2
         ? (std::numeric_limits<std::size_t>::max)()
         : count * 2 + 1;
+
     while (capacity < target) {
         if (capacity > (std::numeric_limits<std::size_t>::max)() / 2)
             return 0;
@@ -37,6 +39,7 @@ namespace {
 
 status source_interface::initialize(
     const source_facts& facts,
+    identity_view identities,
     std::span<const source_interface* const> imports) noexcept {
 
     try {
@@ -54,34 +57,41 @@ status source_interface::initialize(
             return {status_code::not_available};
 
         std::vector<identity_ref> new_types;
-        std::vector<identity_ref> new_type_slots(type_capacity, nullptr);
+        std::vector<type_slot> new_type_slots(type_capacity);
         std::vector<object_slot> new_object_slots(object_capacity);
         std::vector<member_slot> new_member_slots(member_capacity);
         std::vector<const source_interface*> new_imports;
+
         new_types.reserve(type_count);
         new_imports.reserve(imports.size());
 
         const auto insert_type = [&](identity_ref identity) -> status {
-            if (identity == nullptr || identity->kind() != identity_kind::type ||
-                identity->parent() == nullptr || !identity->name()) {
+            if (!identity || identity.kind() != identity_kind::type)
                 return {status_code::invalid_argument};
-            }
+
+            const auto parent = identities.parent(identity);
+            const auto name = identities.name(identity);
+            if (!parent || !name)
+                return {status_code::invalid_argument};
+
             const auto mask = new_type_slots.size() - 1;
-            auto position = static_cast<std::size_t>(
-                binding_hash(identity->parent(), identity->name())) & mask;
+            auto position =
+                static_cast<std::size_t>(binding_hash(parent, name)) & mask;
+
             for (;;) {
-                const auto existing = new_type_slots[position];
-                if (existing == nullptr) {
-                    new_type_slots[position] = identity;
+                auto& slot = new_type_slots[position];
+                if (!slot.identity) {
+                    slot = type_slot{parent, name, identity};
                     new_types.push_back(identity);
                     return {};
                 }
-                if (existing->parent() == identity->parent() &&
-                    existing->name() == identity->name()) {
-                    return existing == identity
+
+                if (slot.parent == parent && slot.name == name) {
+                    return slot.identity == identity
                         ? status{}
                         : status{status_code::semantic_conflict};
                 }
+
                 position = (position + 1) & mask;
             }
         };
@@ -91,6 +101,7 @@ status source_interface::initialize(
             if (!result.ok())
                 return result;
         }
+
         for (const auto& enum_fact : facts.enums()) {
             const auto result = insert_type(enum_fact.identity);
             if (!result.ok())
@@ -99,28 +110,37 @@ status source_interface::initialize(
 
         const auto object_mask = new_object_slots.size() - 1;
         for (const auto& object : facts.objects()) {
-            if (object.identity == nullptr || object.identity->kind() != identity_kind::object ||
-                object.identity->parent() == nullptr || !object.identity->name()) {
+            if (!object.identity || object.identity.kind() != identity_kind::object)
                 return {status_code::invalid_argument};
-            }
-            auto position = static_cast<std::size_t>(
-                binding_hash(object.identity->parent(), object.identity->name())) & object_mask;
-            const auto named_type = object.type.identity != nullptr && object.type.modifiers.count == 0
+
+            const auto parent = identities.parent(object.identity);
+            const auto name = identities.name(object.identity);
+            if (!parent || !name)
+                return {status_code::invalid_argument};
+
+            auto position =
+                static_cast<std::size_t>(binding_hash(parent, name)) & object_mask;
+
+            const auto named_type = object.type.identity && object.type.modifiers.count == 0
                 ? object.type.identity
-                : nullptr;
+                : identity_ref{};
+
             for (;;) {
                 auto& slot = new_object_slots[position];
-                if (slot.identity == nullptr) {
-                    slot.identity = object.identity;
-                    slot.named_type = named_type;
+                if (!slot.identity) {
+                    slot = object_slot{
+                        parent, name, object.identity, named_type};
                     break;
                 }
-                if (slot.identity->parent() == object.identity->parent() &&
-                    slot.identity->name() == object.identity->name()) {
-                    if (slot.identity != object.identity || slot.named_type != named_type)
+
+                if (slot.parent == parent && slot.name == name) {
+                    if (slot.identity != object.identity ||
+                        slot.named_type != named_type) {
                         return {status_code::semantic_conflict};
+                    }
                     break;
                 }
+
                 position = (position + 1) & object_mask;
             }
         }
@@ -129,26 +149,34 @@ status source_interface::initialize(
         for (const auto& record : facts.records()) {
             if (record.declaration_kind != source_record_declaration_kind::definition)
                 continue;
-            if (record.members.begin > facts.members().size() ||
+
+            if (!record.identity ||
+                record.identity.kind() != identity_kind::type ||
+                record.members.begin > facts.members().size() ||
                 record.members.count > facts.members().size() - record.members.begin) {
                 return {status_code::invalid_argument};
             }
+
             for (std::uint32_t index = 0; index < record.members.count; ++index) {
                 const auto& member = facts.members()[record.members.begin + index];
                 if (!member.name)
                     return {status_code::invalid_argument};
+
                 auto position = static_cast<std::size_t>(
                     binding_hash(record.identity, member.name)) & member_mask;
+
                 for (;;) {
                     auto& slot = new_member_slots[position];
-                    if (slot.type == nullptr) {
+                    if (!slot.type) {
                         slot.type = record.identity;
                         slot.name = member.name;
                         slot.index = member_index::from_zero_based(index);
                         break;
                     }
+
                     if (slot.type == record.identity && slot.name == member.name)
                         return {status_code::semantic_conflict};
+
                     position = (position + 1) & member_mask;
                 }
             }
@@ -175,7 +203,10 @@ status source_interface::initialize(
     }
 }
 
-identity_ref source_interface::find_type(identity_ref scope, string_id name) const noexcept {
+identity_ref source_interface::find_type(
+    identity_ref scope,
+    string_id name) const noexcept {
+
     return find_type_recursive(scope, name, 0);
 }
 
@@ -184,32 +215,44 @@ identity_ref source_interface::find_type_recursive(
     string_id name,
     std::uint32_t depth) const noexcept {
 
-    if (scope == nullptr || !name || depth > 1024)
-        return nullptr;
+    if (!scope || !name || depth > 1024)
+        return {};
 
     if (!type_slots.empty()) {
         const auto mask = type_slots.size() - 1;
-        auto position = static_cast<std::size_t>(binding_hash(scope, name)) & mask;
+        auto position =
+            static_cast<std::size_t>(binding_hash(scope, name)) & mask;
+
         for (std::size_t probe = 0; probe < type_slots.size(); ++probe) {
-            const auto identity = type_slots[position];
-            if (identity == nullptr)
+            const auto& slot = type_slots[position];
+            if (!slot.identity)
                 break;
-            if (identity->parent() == scope && identity->name() == name)
-                return identity;
+
+            if (slot.parent == scope && slot.name == name)
+                return slot.identity;
+
             position = (position + 1) & mask;
         }
     }
 
-    for (auto iterator = imported_interfaces.rbegin(); iterator != imported_interfaces.rend(); ++iterator) {
-        if (const auto identity = (*iterator)->find_type_recursive(scope, name, depth + 1);
-            identity != nullptr) {
+    for (auto iterator = imported_interfaces.rbegin();
+         iterator != imported_interfaces.rend();
+         ++iterator) {
+
+        if (const auto identity =
+                (*iterator)->find_type_recursive(scope, name, depth + 1);
+            identity) {
             return identity;
         }
     }
-    return nullptr;
+
+    return {};
 }
 
-source_interface_object source_interface::find_object(identity_ref scope, string_id name) const noexcept {
+source_interface_object source_interface::find_object(
+    identity_ref scope,
+    string_id name) const noexcept {
+
     return find_object_recursive(scope, name, 0);
 }
 
@@ -218,31 +261,43 @@ source_interface_object source_interface::find_object_recursive(
     string_id name,
     std::uint32_t depth) const noexcept {
 
-    if (scope == nullptr || !name || depth > 1024)
+    if (!scope || !name || depth > 1024)
         return {};
 
     if (!object_slots.empty()) {
         const auto mask = object_slots.size() - 1;
-        auto position = static_cast<std::size_t>(binding_hash(scope, name)) & mask;
+        auto position =
+            static_cast<std::size_t>(binding_hash(scope, name)) & mask;
+
         for (std::size_t probe = 0; probe < object_slots.size(); ++probe) {
             const auto& slot = object_slots[position];
-            if (slot.identity == nullptr)
+            if (!slot.identity)
                 break;
-            if (slot.identity->parent() == scope && slot.identity->name() == name)
+
+            if (slot.parent == scope && slot.name == name)
                 return {slot.identity, slot.named_type};
+
             position = (position + 1) & mask;
         }
     }
 
-    for (auto iterator = imported_interfaces.rbegin(); iterator != imported_interfaces.rend(); ++iterator) {
-        const auto found = (*iterator)->find_object_recursive(scope, name, depth + 1);
-        if (found.identity != nullptr)
+    for (auto iterator = imported_interfaces.rbegin();
+         iterator != imported_interfaces.rend();
+         ++iterator) {
+
+        const auto found =
+            (*iterator)->find_object_recursive(scope, name, depth + 1);
+        if (found.identity)
             return found;
     }
+
     return {};
 }
 
-member_index source_interface::find_member(identity_ref type, string_id name) const noexcept {
+member_index source_interface::find_member(
+    identity_ref type,
+    string_id name) const noexcept {
+
     return find_member_recursive(type, name, 0);
 }
 
@@ -251,27 +306,36 @@ member_index source_interface::find_member_recursive(
     string_id name,
     std::uint32_t depth) const noexcept {
 
-    if (type == nullptr || !name || depth > 1024)
+    if (!type || !name || depth > 1024)
         return {};
 
     if (!member_slots.empty()) {
         const auto mask = member_slots.size() - 1;
-        auto position = static_cast<std::size_t>(binding_hash(type, name)) & mask;
+        auto position =
+            static_cast<std::size_t>(binding_hash(type, name)) & mask;
+
         for (std::size_t probe = 0; probe < member_slots.size(); ++probe) {
             const auto& slot = member_slots[position];
-            if (slot.type == nullptr)
+            if (!slot.type)
                 break;
+
             if (slot.type == type && slot.name == name)
                 return slot.index;
+
             position = (position + 1) & mask;
         }
     }
 
-    for (auto iterator = imported_interfaces.rbegin(); iterator != imported_interfaces.rend(); ++iterator) {
-        const auto found = (*iterator)->find_member_recursive(type, name, depth + 1);
+    for (auto iterator = imported_interfaces.rbegin();
+         iterator != imported_interfaces.rend();
+         ++iterator) {
+
+        const auto found =
+            (*iterator)->find_member_recursive(type, name, depth + 1);
         if (found)
             return found;
     }
+
     return {};
 }
 
@@ -283,10 +347,14 @@ identity_ref source_environment::find_type(
     for (auto iterator = imports.rbegin(); iterator != imports.rend(); ++iterator) {
         if (iterator->visible_from > source_offset || iterator->interface == nullptr)
             continue;
-        if (const auto identity = iterator->interface->find_type(scope, name); identity != nullptr)
+
+        if (const auto identity = iterator->interface->find_type(scope, name);
+            identity) {
             return identity;
+        }
     }
-    return nullptr;
+
+    return {};
 }
 
 source_interface_object source_environment::find_object(
@@ -297,10 +365,12 @@ source_interface_object source_environment::find_object(
     for (auto iterator = imports.rbegin(); iterator != imports.rend(); ++iterator) {
         if (iterator->visible_from > source_offset || iterator->interface == nullptr)
             continue;
+
         const auto found = iterator->interface->find_object(scope, name);
-        if (found.identity != nullptr)
+        if (found.identity)
             return found;
     }
+
     return {};
 }
 
@@ -312,10 +382,12 @@ member_index source_environment::find_member(
     for (auto iterator = imports.rbegin(); iterator != imports.rend(); ++iterator) {
         if (iterator->visible_from > source_offset || iterator->interface == nullptr)
             continue;
+
         const auto found = iterator->interface->find_member(type, name);
         if (found)
             return found;
     }
+
     return {};
 }
 

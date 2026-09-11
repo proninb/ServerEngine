@@ -457,7 +457,7 @@ status source_frontend_generation::build(
                     const auto facts = state.parsed.facts();
 
                     state.interface = std::make_unique<source_interface>();
-                    state.work_status = state.interface->initialize(facts, interface_imports);
+                    state.work_status = state.interface->initialize(facts, semantic.identities(), interface_imports);
                 }
                 catch (const std::bad_alloc&) {
                     state.work_status = {status_code::not_available};
