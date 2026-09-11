@@ -3,6 +3,8 @@
 #include "../server_engine/project/project_context.hpp"
 #include "../server_engine/project/project_build_orchestrator.hpp"
 #include "../server_engine/project/project_manager.hpp"
+#include "../server_engine/project/persistence/baseline_store.hpp"
+#include "../server_engine/project/persistence/source_manager_image.hpp"
 #include "../server_engine/project/frontend/source_facts_validation.hpp"
 #include "../server_engine/project/frontend/include_discovery.hpp"
 #include "../server_engine/project/frontend/source_frontend_generation.hpp"
@@ -21,6 +23,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -2702,6 +2705,542 @@ bool test_project_rebuild_failure_returns_unloaded() {
     return pass;
 }
 
+
+template <std::size_t Size>
+[[nodiscard]] std::span<const std::byte> baseline_test_bytes(
+    const std::array<std::uint8_t, Size>& value) noexcept {
+    return std::as_bytes(std::span{value});
+}
+
+[[nodiscard]] baseline_fingerprint baseline_test_fingerprint(std::uint8_t seed) noexcept {
+    baseline_fingerprint output;
+    for (std::size_t index = 0; index < output.bytes.size(); ++index)
+        output.bytes[index] = static_cast<std::uint8_t>(seed + index);
+    return output;
+}
+
+bool test_baseline_store_commit_open() {
+    const auto directory = std::filesystem::temp_directory_path() /
+        "server_engine_v310b_baseline_commit";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto project_path = directory / "project.json";
+    { std::ofstream file(project_path); file << "{}"; }
+
+    const auto fingerprint = baseline_test_fingerprint(11);
+    const std::array<std::uint8_t, 4> compiled{1, 2, 3, 4};
+    const std::array<std::uint8_t, 3> sources{5, 6, 7};
+    const std::array<std::uint8_t, 2> cache{8, 9};
+
+    baseline_store store{project_path};
+    baseline_commit_result committed;
+    if (!store.commit(
+            fingerprint,
+            baseline_test_bytes(compiled),
+            baseline_test_bytes(sources),
+            baseline_test_bytes(cache),
+            committed).ok() ||
+        committed.transaction.empty()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    baseline_snapshot snapshot;
+    const auto result = store.open(fingerprint, snapshot);
+    const auto compiled_view = snapshot.artifact(baseline_artifact_kind::compiled);
+    const auto source_view = snapshot.artifact(baseline_artifact_kind::source_manager);
+    const auto cache_view = snapshot.artifact(baseline_artifact_kind::build_cache);
+
+    const bool pass = result.ok() && snapshot.valid() &&
+        snapshot.transaction() == committed.transaction &&
+        snapshot.fingerprint() == fingerprint &&
+        compiled_view.size() == compiled.size() &&
+        source_view.size() == sources.size() &&
+        cache_view.size() == cache.size() &&
+        std::to_integer<std::uint8_t>(compiled_view[2]) == 3 &&
+        std::to_integer<std::uint8_t>(source_view[1]) == 6 &&
+        std::to_integer<std::uint8_t>(cache_view[0]) == 8;
+
+    snapshot = {};
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+bool test_baseline_store_fingerprint_guard() {
+    const auto directory = std::filesystem::temp_directory_path() /
+        "server_engine_v310b_baseline_fingerprint";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto project_path = directory / "project.json";
+    { std::ofstream file(project_path); file << "{}"; }
+
+    const auto fingerprint = baseline_test_fingerprint(21);
+    const auto wrong = baseline_test_fingerprint(22);
+    const std::array<std::uint8_t, 1> data{42};
+
+    baseline_store store{project_path};
+    baseline_commit_result committed;
+    if (!store.commit(
+            fingerprint,
+            baseline_test_bytes(data),
+            baseline_test_bytes(data),
+            baseline_test_bytes(data),
+            committed).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    baseline_snapshot snapshot;
+    const bool pass =
+        store.open(wrong, snapshot).code == status_code::rebuild_required &&
+        !snapshot.valid();
+
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+bool test_baseline_store_pinned_gc() {
+    const auto directory = std::filesystem::temp_directory_path() /
+        "server_engine_v310b_baseline_gc";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto project_path = directory / "project.json";
+    { std::ofstream file(project_path); file << "{}"; }
+
+    const auto fingerprint = baseline_test_fingerprint(31);
+    const std::array<std::uint8_t, 4> first_data{1, 2, 3, 4};
+    const std::array<std::uint8_t, 5> second_data{10, 11, 12, 13, 14};
+
+    baseline_store store{project_path};
+    baseline_commit_result first_commit;
+    if (!store.commit(
+            fingerprint,
+            baseline_test_bytes(first_data),
+            {},
+            {},
+            first_commit).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    baseline_snapshot pinned;
+    if (!store.open(fingerprint, pinned).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    baseline_commit_result second_commit;
+    if (!store.commit(
+            fingerprint,
+            baseline_test_bytes(second_data),
+            {},
+            {},
+            second_commit).ok() ||
+        second_commit.transaction == first_commit.transaction) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    const auto baseline_root = directory / ".serverengine" / "project.json";
+    const auto first_path = baseline_root / first_commit.transaction;
+    const auto second_path = baseline_root / second_commit.transaction;
+
+    if (!store.collect_garbage(pinned.transaction()).ok() ||
+        !std::filesystem::exists(first_path) ||
+        !std::filesystem::exists(second_path) ||
+        std::to_integer<std::uint8_t>(
+            pinned.artifact(baseline_artifact_kind::compiled)[0]) != 1) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    pinned = {};
+    if (!store.collect_garbage().ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    baseline_snapshot current;
+    const bool pass =
+        !std::filesystem::exists(first_path) &&
+        std::filesystem::exists(second_path) &&
+        store.open(fingerprint, current).ok() &&
+        current.transaction() == second_commit.transaction &&
+        current.artifact(baseline_artifact_kind::compiled).size() ==
+            second_data.size();
+
+    current = {};
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+bool test_baseline_store_manifest_corruption() {
+    const auto directory = std::filesystem::temp_directory_path() /
+        "server_engine_v310b_baseline_corrupt";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto project_path = directory / "project.json";
+    { std::ofstream file(project_path); file << "{}"; }
+
+    const auto fingerprint = baseline_test_fingerprint(41);
+    const std::array<std::uint8_t, 2> data{90, 91};
+
+    baseline_store store{project_path};
+    baseline_commit_result committed;
+    if (!store.commit(
+            fingerprint,
+            baseline_test_bytes(data),
+            baseline_test_bytes(data),
+            baseline_test_bytes(data),
+            committed).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    const auto manifest_path =
+        directory / ".serverengine" / "project.json" /
+        committed.transaction / "manifest.bin";
+
+    {
+        std::fstream file(
+            manifest_path,
+            std::ios::binary | std::ios::in | std::ios::out);
+        if (!file) {
+            std::filesystem::remove_all(directory, error);
+            return false;
+        }
+
+        file.seekg(24);
+        char value = 0;
+        file.read(&value, 1);
+        if (!file) {
+            std::filesystem::remove_all(directory, error);
+            return false;
+        }
+
+        value ^= 0x5a;
+        file.seekp(24);
+        file.write(&value, 1);
+        if (!file) {
+            std::filesystem::remove_all(directory, error);
+            return false;
+        }
+    }
+
+    baseline_snapshot snapshot;
+    const bool pass =
+        store.open(fingerprint, snapshot).code == status_code::artifact_corrupt &&
+        !snapshot.valid();
+
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+
+[[nodiscard]] bool prepare_source_manager_image_fixture(
+    const std::filesystem::path& directory,
+    source_manager& manager,
+    source_id& root_source,
+    source_id& include_source,
+    source_id& leaf_source) {
+
+    source_snapshot snapshot;
+    if (!manager.publish_memory(
+            (directory / "root.hpp").generic_string(),
+            "struct Root;",
+            snapshot,
+            &root_source).ok()) {
+        return false;
+    }
+
+    if (!manager.publish_memory(
+            (directory / "include.hpp").generic_string(),
+            "struct Include;",
+            snapshot,
+            &include_source).ok()) {
+        return false;
+    }
+
+    if (!manager.publish_memory(
+            (directory / "leaf.hpp").generic_string(),
+            "struct Leaf;",
+            snapshot,
+            &leaf_source).ok()) {
+        return false;
+    }
+
+    auto update = manager.begin_update();
+    const std::array root_dependencies{include_source, leaf_source};
+    if (!update.set_includes(root_source, root_dependencies).ok())
+        return false;
+
+    const std::array include_dependencies{leaf_source};
+    if (!update.set_includes(include_source, include_dependencies).ok())
+        return false;
+
+    return update.commit().ok();
+}
+
+bool test_source_manager_image_roundtrip() {
+    const auto directory = std::filesystem::temp_directory_path() /
+        "server_engine_v310c_source_manager_image";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    source_manager manager;
+    source_id root_source;
+    source_id include_source;
+    source_id leaf_source;
+    if (!prepare_source_manager_image_fixture(
+            directory, manager, root_source, include_source, leaf_source)) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    const std::array roots{
+        source_manager_image_root{root_source, project_item_role::type},
+        source_manager_image_root{include_source, project_item_role::source},
+    };
+
+    std::vector<std::byte> image;
+    if (!encode_source_manager_image(
+            manager, source_manager_image_options{73, roots}, image).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    source_manager_image_view view;
+    if (!view.bind(image).ok() || !view.valid() ||
+        view.generation() != 73 ||
+        view.source_count() != 3 ||
+        view.root_count() != 2 ||
+        !view.verify_contents().ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    if (view.path(root_source) != manager.path(root_source) ||
+        view.path(include_source) != manager.path(include_source) ||
+        view.path(leaf_source) != manager.path(leaf_source)) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    const auto root_includes = view.includes(root_source);
+    const auto include_includes = view.includes(include_source);
+    const auto leaf_dependents = view.dependents(leaf_source);
+    if (root_includes.size() != 2 ||
+        root_includes[0] != include_source ||
+        root_includes[1] != leaf_source ||
+        include_includes.size() != 1 ||
+        include_includes[0] != leaf_source ||
+        leaf_dependents.size() != 2) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    source_manager_image_physical_state physical;
+    const auto current = manager.current(root_source);
+    if (!view.physical(root_source, physical).ok() ||
+        !physical.present ||
+        physical.size != current.observation().size ||
+        physical.hash != current.hash()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    source_manager_image_root first_root;
+    source_manager_image_root second_root;
+    if (!view.root(0, first_root).ok() ||
+        !view.root(1, second_root).ok() ||
+        first_root.source != root_source ||
+        first_root.role != project_item_role::type ||
+        second_root.source != include_source ||
+        second_root.role != project_item_role::source) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    source_id found;
+    const bool pass =
+        view.find(manager.path(include_source), found).ok() &&
+        found == include_source;
+
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+bool test_source_manager_image_deterministic() {
+    const auto directory = std::filesystem::temp_directory_path() /
+        "server_engine_v310c_source_manager_deterministic";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    source_manager manager;
+    source_id root_source;
+    source_id include_source;
+    source_id leaf_source;
+    if (!prepare_source_manager_image_fixture(
+            directory, manager, root_source, include_source, leaf_source)) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    const std::array roots{
+        source_manager_image_root{root_source, project_item_role::type},
+    };
+
+    std::vector<std::byte> first;
+    std::vector<std::byte> second;
+    const bool pass =
+        encode_source_manager_image(
+            manager, source_manager_image_options{91, roots}, first).ok() &&
+        encode_source_manager_image(
+            manager, source_manager_image_options{91, roots}, second).ok() &&
+        first == second;
+
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+bool test_source_manager_image_mapped_baseline() {
+    const auto directory = std::filesystem::temp_directory_path() /
+        "server_engine_v310c_source_manager_mapped";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto project_path = directory / "project.json";
+    { std::ofstream file(project_path); file << "{}"; }
+
+    source_manager manager;
+    source_id root_source;
+    source_id include_source;
+    source_id leaf_source;
+    if (!prepare_source_manager_image_fixture(
+            directory, manager, root_source, include_source, leaf_source)) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    const std::array roots{
+        source_manager_image_root{root_source, project_item_role::type},
+    };
+
+    std::vector<std::byte> source_image;
+    if (!encode_source_manager_image(
+            manager, source_manager_image_options{105, roots}, source_image).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    baseline_store store{project_path};
+    baseline_commit_result committed;
+    const auto fingerprint = baseline_test_fingerprint(77);
+    if (!store.commit(
+            fingerprint,
+            {},
+            std::span<const std::byte>{source_image.data(), source_image.size()},
+            {},
+            committed).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    baseline_snapshot snapshot;
+    if (!store.open(fingerprint, snapshot).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    source_manager_image_view view;
+    const auto mapped =
+        snapshot.artifact(baseline_artifact_kind::source_manager);
+    source_id found;
+    const bool pass =
+        view.bind(mapped).ok() &&
+        view.generation() == 105 &&
+        view.source_count() == manager.source_count() &&
+        view.find(manager.path(leaf_source), found).ok() &&
+        found == leaf_source &&
+        view.includes(root_source).size() == 2;
+
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+bool test_source_manager_image_integrity() {
+    const auto directory = std::filesystem::temp_directory_path() /
+        "server_engine_v310c_source_manager_integrity";
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    source_manager manager;
+    source_id root_source;
+    source_id include_source;
+    source_id leaf_source;
+    if (!prepare_source_manager_image_fixture(
+            directory, manager, root_source, include_source, leaf_source)) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    const std::array roots{
+        source_manager_image_root{root_source, project_item_role::type},
+    };
+
+    std::vector<std::byte> image;
+    if (!encode_source_manager_image(
+            manager, source_manager_image_options{119, roots}, image).ok() ||
+        image.empty()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    source_manager_image_view before;
+    if (!before.bind(image).ok() || !before.verify_contents().ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    image.back() ^= std::byte{0x01};
+
+    source_manager_image_view after;
+    const bool pass =
+        after.bind(image).ok() &&
+        after.verify_contents().code == status_code::artifact_corrupt;
+
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
 using test_function = bool (*)();
 
 struct test_case {
@@ -2768,6 +3307,14 @@ constexpr std::array tests{
     test_case{"project_access_move_only", &test_project_access_move_only},
     test_case{"project_unload_stop_before_wait", &test_project_unload_stop_before_wait},
     test_case{"project_rebuild_failure_returns_unloaded", &test_project_rebuild_failure_returns_unloaded},
+    test_case{"baseline_store_commit_open", &test_baseline_store_commit_open},
+    test_case{"baseline_store_fingerprint_guard", &test_baseline_store_fingerprint_guard},
+    test_case{"baseline_store_pinned_gc", &test_baseline_store_pinned_gc},
+    test_case{"baseline_store_manifest_corruption", &test_baseline_store_manifest_corruption},
+    test_case{"source_manager_image_roundtrip", &test_source_manager_image_roundtrip},
+    test_case{"source_manager_image_deterministic", &test_source_manager_image_deterministic},
+    test_case{"source_manager_image_mapped_baseline", &test_source_manager_image_mapped_baseline},
+    test_case{"source_manager_image_integrity", &test_source_manager_image_integrity},
 };
 
 } // namespace

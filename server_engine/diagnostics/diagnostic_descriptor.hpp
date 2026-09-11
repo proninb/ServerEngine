@@ -87,10 +87,10 @@ inline constexpr diagnostic_descriptor generation_build_failed{
 
 inline constexpr diagnostic_descriptor persistence_save_failed{
     diagnostic_id{5501}, diagnostic_domain::persistence, diagnostic_severity::error,
-    "persistence.save_failed", "Graph snapshot could not be saved"};
+    "persistence.save_failed", "Project baseline could not be saved"};
 inline constexpr diagnostic_descriptor persistence_load_failed{
     diagnostic_id{5502}, diagnostic_domain::persistence, diagnostic_severity::error,
-    "persistence.load_failed", "Graph snapshot could not be loaded"};
+    "persistence.load_failed", "Project baseline could not be loaded"};
 
 } // namespace diagnostics
 

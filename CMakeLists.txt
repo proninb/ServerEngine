@@ -32,6 +32,8 @@ add_library(server_engine_core STATIC
     server_engine/project/project_context.cpp
     server_engine/project/project_build_orchestrator.cpp
     server_engine/project/project_manager.cpp
+    server_engine/project/persistence/baseline_store.cpp
+    server_engine/project/persistence/source_manager_image.cpp
 )
 
 target_include_directories(server_engine_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/server_engine)
@@ -146,3 +148,11 @@ add_test(NAME project_manager_rebuild_ready_unload COMMAND server_engine_tests p
 add_test(NAME project_access_move_only COMMAND server_engine_tests project_access_move_only)
 add_test(NAME project_unload_stop_before_wait COMMAND server_engine_tests project_unload_stop_before_wait)
 add_test(NAME project_rebuild_failure_returns_unloaded COMMAND server_engine_tests project_rebuild_failure_returns_unloaded)
+add_test(NAME baseline_store_commit_open COMMAND server_engine_tests baseline_store_commit_open)
+add_test(NAME baseline_store_fingerprint_guard COMMAND server_engine_tests baseline_store_fingerprint_guard)
+add_test(NAME baseline_store_pinned_gc COMMAND server_engine_tests baseline_store_pinned_gc)
+add_test(NAME baseline_store_manifest_corruption COMMAND server_engine_tests baseline_store_manifest_corruption)
+add_test(NAME source_manager_image_roundtrip COMMAND server_engine_tests source_manager_image_roundtrip)
+add_test(NAME source_manager_image_deterministic COMMAND server_engine_tests source_manager_image_deterministic)
+add_test(NAME source_manager_image_mapped_baseline COMMAND server_engine_tests source_manager_image_mapped_baseline)
+add_test(NAME source_manager_image_integrity COMMAND server_engine_tests source_manager_image_integrity)

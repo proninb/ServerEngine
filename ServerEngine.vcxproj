@@ -45,6 +45,8 @@
     <ClCompile Include="server_engine\project\project_context.cpp" />
     <ClCompile Include="server_engine\project\project_build_orchestrator.cpp" />
     <ClCompile Include="server_engine\project\project_manager.cpp" />
+    <ClCompile Include="server_engine\project\persistence\baseline_store.cpp" />
+    <ClCompile Include="server_engine\project\persistence\source_manager_image.cpp" />
     <ClCompile Include="server_engine\project\identity\identity_arena.cpp" />
     <ClCompile Include="server_engine\project\identity\identity_space.cpp" />
     <ClCompile Include="server_engine\project\string\string_table.cpp" />
@@ -85,6 +87,8 @@
     <ClInclude Include="server_engine\project\compiled_project_state.hpp" />
     <ClInclude Include="server_engine\project\project_build_orchestrator.hpp" />
     <ClInclude Include="server_engine\project\project_manager.hpp" />
+    <ClInclude Include="server_engine\project\persistence\baseline_store.hpp" />
+    <ClInclude Include="server_engine\project\persistence\source_manager_image.hpp" />
     <ClInclude Include="server_engine\project\identity\name_ref.hpp" />
     <ClInclude Include="server_engine\project\identity\identity_node.hpp" />
     <ClInclude Include="server_engine\project\identity\identity_arena.hpp" />
@@ -122,6 +126,8 @@
     <None Include="docs\SE_V3_08_PROJECT_BUILD_ORCHESTRATION.md" />
     <None Include="docs\SE_V3_09_COMPLETE_GRAPH.md" />
     <None Include="docs\SE_V3_10A_READY_LIFECYCLE.md" />
+    <None Include="docs\SE_V3_10B_PERSISTENT_BASELINE_STORAGE.md" />
+    <None Include="docs\SE_V3_10C_SOURCE_MANAGER_IMAGE_V1.md" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
