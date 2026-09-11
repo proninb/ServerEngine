@@ -2,12 +2,14 @@
 
 #include "project_build_orchestrator.hpp"
 #include "project_configuration_loader.hpp"
+#include "project_persistence.hpp"
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <string>
 #include <utility>
 
 namespace cw::server {
@@ -35,6 +37,11 @@ struct project_stop_request final {
     [[nodiscard]] explicit operator bool() const noexcept {
         return function != nullptr;
     }
+};
+
+struct project_load_result final {
+    std::string transaction;
+    bool build_cache_mapped = false;
 };
 
 // Admission/drain primitive for READY Project work. The coordinator closes
@@ -70,7 +77,8 @@ private:
     }
 
     void leave() noexcept {
-        const auto previous = state.fetch_sub(1, std::memory_order_acq_rel);
+        const auto previous =
+            state.fetch_sub(1, std::memory_order_acq_rel);
         if ((previous & count_mask) == 1)
             state.notify_all();
     }
@@ -104,7 +112,7 @@ private:
 };
 
 // Move-only lifetime token for one QUERY/RUN/SAVE task. Any Project pointer,
-// span, string_view or Graph view obtained through this token must not escape
+// span, string_view or mapped view obtained through this token must not escape
 // the token lifetime.
 class project_access final {
 public:
@@ -167,8 +175,8 @@ private:
 };
 
 // Coordinator-owned lifecycle. Construction is legal only from UNLOADED.
-// A successful construction opens one immutable READY Project. UNLOAD first
-// closes admission, then requests stop, drains task tokens, and destroys state.
+// LOAD publishes an mmap-native READY Project; REBUILD/full BUILD publish a
+// construction-backed READY Project. SAVE never rebinds the active READY state.
 class project_manager final {
 public:
     project_manager() noexcept = default;
@@ -176,6 +184,23 @@ public:
 
     project_manager(const project_manager&) = delete;
     project_manager& operator=(const project_manager&) = delete;
+
+    [[nodiscard]] status load(
+        const std::filesystem::path& configuration_path,
+        operation_id operation,
+        diagnostic_buffer& diagnostics,
+        project_load_result& output) noexcept;
+
+    // D3A baseline BUILD supports no-baseline full construction and unchanged
+    // baseline reuse. A changed persisted baseline returns rebuild_required;
+    // sparse mapped materialization is the next cut and is never silently replaced
+    // by REBUILD.
+    [[nodiscard]] status build(
+        const std::filesystem::path& configuration_path,
+        operation_id operation,
+        diagnostic_buffer& diagnostics,
+        project_build_result& output,
+        std::size_t worker_limit = 0) noexcept;
 
     [[nodiscard]] status rebuild(
         const std::filesystem::path& configuration_path,
@@ -191,9 +216,13 @@ public:
         project_build_result& output,
         std::size_t worker_limit = 0) noexcept;
 
+    [[nodiscard]] status save(
+        baseline_commit_result& output) noexcept;
+
     [[nodiscard]] status acquire(project_access& output) const noexcept;
 
-    [[nodiscard]] status unload(project_stop_request stop = {}) noexcept;
+    [[nodiscard]] status unload(
+        project_stop_request stop = {}) noexcept;
 
     [[nodiscard]] project_lifecycle_state state() const noexcept {
         return lifecycle.load(std::memory_order_acquire);
@@ -207,16 +236,25 @@ private:
     [[nodiscard]] bool reserve_construction() noexcept;
     void abandon_construction() noexcept;
 
-    [[nodiscard]] status rebuild_reserved(
+    [[nodiscard]] status construct_reserved(
         project_configuration configuration,
+        std::filesystem::path configuration_path,
         operation_id operation,
         diagnostic_buffer& diagnostics,
         project_build_result& output,
-        std::size_t worker_limit) noexcept;
+        std::size_t worker_limit,
+        bool mark_rebuild) noexcept;
+
+    [[nodiscard]] status activate_baseline_reserved(
+        project_configuration configuration,
+        std::filesystem::path configuration_path,
+        baseline_snapshot&& snapshot,
+        project_load_result* load_output) noexcept;
 
     mutable project_activity_gate activity;
     std::unique_ptr<project_context> project;
-    std::atomic<project_lifecycle_state> lifecycle{project_lifecycle_state::unloaded};
+    std::atomic<project_lifecycle_state> lifecycle{
+        project_lifecycle_state::unloaded};
 };
 
 } // namespace cw::server

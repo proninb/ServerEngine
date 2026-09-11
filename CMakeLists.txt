@@ -30,6 +30,7 @@ add_library(server_engine_core STATIC
     server_engine/project/parser/source_environment.cpp
     server_engine/project/parser/source_parser.cpp
     server_engine/project/project_context.cpp
+    server_engine/project/project_persistence.cpp
     server_engine/project/project_build_orchestrator.cpp
     server_engine/project/project_manager.cpp
     server_engine/project/persistence/baseline_store.cpp
@@ -170,3 +171,10 @@ add_test(NAME build_cache_image_cross_artifact COMMAND server_engine_tests build
 add_test(NAME build_cache_image_mapped_baseline COMMAND server_engine_tests build_cache_image_mapped_baseline)
 add_test(NAME build_cache_image_incremental_lineage COMMAND server_engine_tests build_cache_image_incremental_lineage)
 add_test(NAME build_cache_image_integrity COMMAND server_engine_tests build_cache_image_integrity)
+add_test(NAME project_persistence_save_load COMMAND server_engine_tests project_persistence_save_load)
+add_test(NAME project_load_does_not_map_build_cache COMMAND server_engine_tests project_load_does_not_map_build_cache)
+add_test(NAME project_load_fingerprint_guard COMMAND server_engine_tests project_load_fingerprint_guard)
+add_test(NAME project_save_after_load_keeps_active_baseline COMMAND server_engine_tests project_save_after_load_keeps_active_baseline)
+add_test(NAME project_build_no_change_reuses_baseline COMMAND server_engine_tests project_build_no_change_reuses_baseline)
+add_test(NAME project_build_changed_baseline_fail_closed COMMAND server_engine_tests project_build_changed_baseline_fail_closed)
+add_test(NAME project_build_without_baseline_full_no_save COMMAND server_engine_tests project_build_without_baseline_full_no_save)

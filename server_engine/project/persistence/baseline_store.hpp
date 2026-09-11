@@ -20,7 +20,8 @@ struct baseline_fingerprint final {
     std::array<std::uint8_t, baseline_fingerprint_size> bytes{};
 
     friend constexpr bool operator==(
-        const baseline_fingerprint&, const baseline_fingerprint&) noexcept = default;
+        const baseline_fingerprint&,
+        const baseline_fingerprint&) noexcept = default;
 };
 
 enum class baseline_artifact_kind : std::uint8_t {
@@ -58,8 +59,8 @@ private:
     friend class baseline_store;
 };
 
-// One committed persisted baseline. It owns the three mappings as one lifetime
-// unit so compiled/source/build-cache artifacts cannot be mixed across commits.
+// One committed persisted baseline. READY LOAD may intentionally own only the
+// compiled/source-manager mappings; BUILD/SAVE may open all three artifacts.
 class baseline_snapshot final {
 public:
     baseline_snapshot() noexcept = default;
@@ -70,6 +71,9 @@ public:
     baseline_snapshot& operator=(baseline_snapshot&&) noexcept = default;
 
     [[nodiscard]] std::span<const std::byte> artifact(
+        baseline_artifact_kind kind) const noexcept;
+
+    [[nodiscard]] bool mapped(
         baseline_artifact_kind kind) const noexcept;
 
     [[nodiscard]] const baseline_fingerprint& fingerprint() const noexcept {
@@ -95,7 +99,7 @@ private:
 };
 
 // Transactional persistent-baseline storage. Artifact directories are immutable;
-// CURRENT is the only selector changed during commit. LOAD maps artifacts read-only.
+// CURRENT is the only selector changed during commit.
 class baseline_store final {
 public:
     explicit baseline_store(std::filesystem::path project_configuration_path)
@@ -104,8 +108,22 @@ public:
     baseline_store(const baseline_store&) = delete;
     baseline_store& operator=(const baseline_store&) = delete;
 
+    // BUILD/SAVE boundary: maps all three artifacts.
     [[nodiscard]] status open(
         const baseline_fingerprint& expected,
+        baseline_snapshot& output) const noexcept;
+
+    // Fast LOAD boundary: maps compiled.bin and source_manager.bin only.
+    // build_cache.bin is not opened and therefore cannot fault on READY LOAD.
+    [[nodiscard]] status open_ready(
+        const baseline_fingerprint& expected,
+        baseline_snapshot& output) const noexcept;
+
+    // Opens one immutable transaction by name. SAVE-after-LOAD uses this to copy
+    // the active baseline without rebinding the READY Project to CURRENT.
+    [[nodiscard]] status open_transaction(
+        const baseline_fingerprint& expected,
+        std::string_view transaction,
         baseline_snapshot& output) const noexcept;
 
     [[nodiscard]] status commit(
@@ -121,6 +139,12 @@ public:
         std::string_view pinned_transaction = {}) const noexcept;
 
 private:
+    [[nodiscard]] status open_selected(
+        const baseline_fingerprint& expected,
+        std::string_view transaction,
+        bool include_build_cache,
+        baseline_snapshot& output) const noexcept;
+
     [[nodiscard]] std::filesystem::path root_path() const;
 
     std::filesystem::path configuration_path;

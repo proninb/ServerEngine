@@ -1,9 +1,13 @@
 #pragma once
 
 #include "compiled_project_state.hpp"
+#include "persistence/baseline_store.hpp"
+#include "persistence/compiled_image.hpp"
+#include "persistence/source_manager_image.hpp"
 #include "project_configuration.hpp"
 
 #include <cstddef>
+#include <filesystem>
 #include <memory>
 #include <string_view>
 
@@ -73,11 +77,13 @@ private:
     friend class project_context;
 };
 
-// Internal owner of one Project configuration plus one compiled construction state.
-// READY readers obtain project_read_view only while project_access is held.
+// Internal owner of one Project configuration and either one mutable construction
+// state or one mmap-native READY baseline. These storage modes never coexist.
 class project_context final {
 public:
-    explicit project_context(project_configuration configuration);
+    explicit project_context(
+        project_configuration configuration,
+        std::filesystem::path configuration_path = {});
 
     project_context(const project_context&) = delete;
     project_context& operator=(const project_context&) = delete;
@@ -86,38 +92,83 @@ public:
         return project_configuration_value;
     }
 
-    [[nodiscard]] identity_ref identity_root() const noexcept {
-        return compiled->identities.root();
+    [[nodiscard]] const std::filesystem::path& configuration_path() const noexcept {
+        return project_configuration_path;
     }
 
+    [[nodiscard]] bool construction_backed() const noexcept {
+        return compiled != nullptr;
+    }
+
+    [[nodiscard]] bool baseline_backed() const noexcept {
+        return baseline != nullptr;
+    }
+
+    [[nodiscard]] bool build_cache_mapped() const noexcept {
+        return baseline != nullptr &&
+            !baseline->artifact(baseline_artifact_kind::build_cache).empty();
+    }
+
+    [[nodiscard]] std::string_view baseline_transaction() const noexcept {
+        return baseline != nullptr ? baseline->transaction() : std::string_view{};
+    }
+
+    [[nodiscard]] identity_ref identity_root() const noexcept {
+        return compiled != nullptr
+            ? compiled->identities.root()
+            : mapped_compiled.identity_root();
+    }
+
+    // Construction-only metadata service. READY mapped readers use high-level
+    // project query functions backed directly by compiled_image_view.
     [[nodiscard]] identity_view identity_metadata() const noexcept {
-        return compiled->identities.view();
+        return compiled != nullptr
+            ? compiled->identities.view()
+            : identity_view{};
     }
 
     [[nodiscard]] status intern_string(
         std::string_view value,
         string_id& output) noexcept {
+        if (compiled == nullptr) {
+            output = {};
+            return {status_code::invalid_state};
+        }
         return compiled->strings.intern(value, output);
     }
 
     [[nodiscard]] string_id find_string(std::string_view value) const noexcept {
-        return compiled->strings.find(value);
+        if (compiled != nullptr)
+            return compiled->strings.find(value);
+
+        string_id output;
+        return mapped_compiled.find_string(value, output).ok()
+            ? output
+            : string_id{};
     }
 
     [[nodiscard]] std::string_view string(string_id id) const noexcept {
-        return compiled->strings.get(id);
+        return compiled != nullptr
+            ? compiled->strings.get(id)
+            : mapped_compiled.string(id);
     }
 
     [[nodiscard]] std::size_t string_count() const noexcept {
-        return compiled->strings.size();
+        return compiled != nullptr
+            ? compiled->strings.size()
+            : mapped_compiled.string_count();
     }
 
     [[nodiscard]] std::size_t string_slot_count() const noexcept {
-        return compiled->strings.slot_count();
+        return compiled != nullptr
+            ? compiled->strings.slot_count()
+            : mapped_compiled.string_slot_count();
     }
 
     [[nodiscard]] string_id string_at_slot(std::size_t index) const noexcept {
-        return compiled->strings.at_slot(index);
+        if (compiled != nullptr)
+            return compiled->strings.at_slot(index);
+        return {};
     }
 
     [[nodiscard]] status resolve_declaration(
@@ -125,6 +176,11 @@ public:
         std::string_view local_name,
         identity_kind kind,
         identity_ref& identity) noexcept {
+
+        if (compiled == nullptr) {
+            identity = {};
+            return {status_code::invalid_state};
+        }
 
         auto semantic = parser_services();
         return semantic.resolve_declaration(parent, local_name, kind, identity);
@@ -135,50 +191,86 @@ public:
         string_id local_name,
         identity_kind kind,
         identity_ref& identity) noexcept {
-        return compiled->identities.resolve_declaration(parent, local_name, kind, identity);
+
+        if (compiled == nullptr) {
+            identity = {};
+            return {status_code::invalid_state};
+        }
+
+        return compiled->identities.resolve_declaration(
+            parent, local_name, kind, identity);
     }
 
     [[nodiscard]] identity_ref find_identity(
         identity_ref parent,
         string_id local_name,
         identity_kind kind) const noexcept {
-        return compiled->identities.find(parent, local_name, kind);
+
+        if (compiled != nullptr)
+            return compiled->identities.find(parent, local_name, kind);
+
+        identity_ref output;
+        return mapped_compiled.find_identity(
+                   parent, local_name, kind, output).ok()
+            ? output
+            : identity_ref{};
     }
 
     [[nodiscard]] std::size_t identity_count() const noexcept {
-        return compiled->identities.size();
+        return compiled != nullptr
+            ? compiled->identities.size()
+            : mapped_compiled.identity_count();
     }
 
     [[nodiscard]] std::size_t identity_slot_count() const noexcept {
-        return compiled->identities.slot_count();
+        return compiled != nullptr
+            ? compiled->identities.slot_count()
+            : mapped_compiled.identity_slot_count();
     }
 
     [[nodiscard]] identity_ref identity_at_slot(std::size_t index) const noexcept {
-        return compiled->identities.at_slot(index);
+        if (compiled != nullptr)
+            return compiled->identities.at_slot(index);
+        return {};
     }
 
     [[nodiscard]] std::size_t identity_bytes_reserved() const noexcept {
-        return compiled->identities.bytes_reserved();
+        return compiled != nullptr
+            ? compiled->identities.bytes_reserved()
+            : 0;
     }
 
     [[nodiscard]] std::size_t identity_pages_reserved() const noexcept {
-        return compiled->identities.pages_reserved();
+        return compiled != nullptr
+            ? compiled->identities.pages_reserved()
+            : 0;
     }
 
     [[nodiscard]] std::size_t identity_bucket_count() const noexcept {
-        return compiled->identities.bucket_count();
+        return compiled != nullptr
+            ? compiled->identities.bucket_count()
+            : 0;
     }
 
     [[nodiscard]] identity_index_statistics identity_index_stats() const noexcept {
-        return compiled->identities.index_statistics();
+        return compiled != nullptr
+            ? compiled->identities.index_statistics()
+            : identity_index_statistics{};
     }
 
     [[nodiscard]] string_table_statistics string_table_stats() const noexcept {
-        return compiled->strings.statistics();
+        if (compiled != nullptr)
+            return compiled->strings.statistics();
+
+        string_table_statistics output;
+        output.strings = mapped_compiled.string_count();
+        return output;
     }
 
     [[nodiscard]] project_storage_pressure storage_pressure() const noexcept;
 
+    // Construction-only storage boundaries used by Parser/Builder and persistence
+    // encoders before READY publication.
     [[nodiscard]] const source_manager& sources() const noexcept {
         return compiled->sources;
     }
@@ -199,6 +291,45 @@ public:
         return project_semantic_services{*compiled};
     }
 
+    // Storage-neutral READY read boundaries.
+    [[nodiscard]] std::size_t source_count() const noexcept {
+        return compiled != nullptr
+            ? compiled->sources.source_count()
+            : mapped_sources.source_count();
+    }
+
+    [[nodiscard]] std::string_view source_path(source_id source) const noexcept {
+        return compiled != nullptr
+            ? compiled->sources.path(source)
+            : mapped_sources.path(source);
+    }
+
+    [[nodiscard]] status find_source(
+        std::string_view normalized_path,
+        source_id& output) const noexcept {
+        return compiled != nullptr
+            ? compiled->sources.find(normalized_path, output)
+            : mapped_sources.find(normalized_path, output);
+    }
+
+    [[nodiscard]] std::size_t type_count() const noexcept {
+        return compiled != nullptr
+            ? compiled->graph_value.type_count()
+            : mapped_compiled.type_count();
+    }
+
+    [[nodiscard]] std::size_t object_count() const noexcept {
+        return compiled != nullptr
+            ? compiled->graph_value.object_count()
+            : mapped_compiled.object_count();
+    }
+
+    [[nodiscard]] std::size_t link_count() const noexcept {
+        return compiled != nullptr
+            ? compiled->graph_value.link_count()
+            : mapped_compiled.link_count();
+    }
+
     [[nodiscard]] status find_type(
         std::string_view path,
         type_handle& output) const noexcept;
@@ -216,6 +347,13 @@ public:
         link_handle& output) const noexcept;
 
 private:
+    struct baseline_storage_tag final {};
+
+    project_context(
+        project_configuration configuration,
+        std::filesystem::path configuration_path,
+        baseline_storage_tag) noexcept;
+
     [[nodiscard]] identity_ref find_named_identity(
         std::string_view path,
         identity_kind final_kind) const noexcept;
@@ -232,12 +370,80 @@ private:
         compiled.swap(replacement);
     }
 
+    [[nodiscard]] status activate_ready_baseline(
+        baseline_snapshot&& snapshot) noexcept;
+
     project_configuration project_configuration_value;
+    std::filesystem::path project_configuration_path;
     std::unique_ptr<compiled_project_state> compiled;
+    std::unique_ptr<baseline_snapshot> baseline;
+    compiled_image_view mapped_compiled;
+    source_manager_image_view mapped_sources;
 
     friend class project_build_orchestrator;
     friend class project_manager;
     friend class source_frontend_generation;
+};
+
+// Storage-neutral Source Manager subset exposed to READY readers.
+class project_source_read_view final {
+public:
+    project_source_read_view() noexcept = default;
+
+    [[nodiscard]] std::size_t source_count() const noexcept {
+        return project != nullptr ? project->source_count() : 0;
+    }
+
+    [[nodiscard]] std::string_view path(source_id source) const noexcept {
+        return project != nullptr
+            ? project->source_path(source)
+            : std::string_view{};
+    }
+
+    [[nodiscard]] status find(
+        std::string_view normalized_path,
+        source_id& output) const noexcept {
+        if (project == nullptr) {
+            output = {};
+            return {status_code::not_found};
+        }
+        return project->find_source(normalized_path, output);
+    }
+
+private:
+    explicit project_source_read_view(const project_context& value) noexcept
+        : project(&value) {}
+
+    const project_context* project = nullptr;
+
+    friend class project_read_view;
+};
+
+// Storage-neutral Graph summary exposed to READY readers. Semantic queries remain
+// on project_read_view so no pointer-returning Graph API leaks mmap ownership.
+class project_graph_read_view final {
+public:
+    project_graph_read_view() noexcept = default;
+
+    [[nodiscard]] std::size_t type_count() const noexcept {
+        return project != nullptr ? project->type_count() : 0;
+    }
+
+    [[nodiscard]] std::size_t object_count() const noexcept {
+        return project != nullptr ? project->object_count() : 0;
+    }
+
+    [[nodiscard]] std::size_t link_count() const noexcept {
+        return project != nullptr ? project->link_count() : 0;
+    }
+
+private:
+    explicit project_graph_read_view(const project_context& value) noexcept
+        : project(&value) {}
+
+    const project_context* project = nullptr;
+
+    friend class project_read_view;
 };
 
 // Read-only façade. Any pointer/span/string_view obtained through it is valid only
@@ -252,12 +458,30 @@ public:
         return project->configuration();
     }
 
-    [[nodiscard]] const source_manager& sources() const noexcept {
-        return project->sources();
+    [[nodiscard]] project_source_read_view sources() const noexcept {
+        return project != nullptr
+            ? project_source_read_view{*project}
+            : project_source_read_view{};
     }
 
-    [[nodiscard]] const graph& compiled_graph() const noexcept {
-        return project->compiled_graph();
+    [[nodiscard]] project_graph_read_view compiled_graph() const noexcept {
+        return project != nullptr
+            ? project_graph_read_view{*project}
+            : project_graph_read_view{};
+    }
+
+    [[nodiscard]] bool baseline_backed() const noexcept {
+        return project != nullptr && project->baseline_backed();
+    }
+
+    [[nodiscard]] bool build_cache_mapped() const noexcept {
+        return project != nullptr && project->build_cache_mapped();
+    }
+
+    [[nodiscard]] std::string_view baseline_transaction() const noexcept {
+        return project != nullptr
+            ? project->baseline_transaction()
+            : std::string_view{};
     }
 
     [[nodiscard]] std::size_t identity_count() const noexcept {
@@ -276,19 +500,27 @@ public:
         return project->string(id);
     }
 
-    [[nodiscard]] status find_type(std::string_view path, type_handle& output) const noexcept {
+    [[nodiscard]] status find_type(
+        std::string_view path,
+        type_handle& output) const noexcept {
         return project->find_type(path, output);
     }
 
-    [[nodiscard]] status find_object(std::string_view path, object_handle& output) const noexcept {
+    [[nodiscard]] status find_object(
+        std::string_view path,
+        object_handle& output) const noexcept {
         return project->find_object(path, output);
     }
 
-    [[nodiscard]] status find_endpoint(std::string_view path, object_endpoint& output) const noexcept {
+    [[nodiscard]] status find_endpoint(
+        std::string_view path,
+        object_endpoint& output) const noexcept {
         return project->find_endpoint(path, output);
     }
 
-    [[nodiscard]] status find_link(std::string_view path, link_handle& output) const noexcept {
+    [[nodiscard]] status find_link(
+        std::string_view path,
+        link_handle& output) const noexcept {
         return project->find_link(path, output);
     }
 

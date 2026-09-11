@@ -43,6 +43,7 @@
     <ClCompile Include="server_engine\config\server_configuration_loader.cpp" />
     <ClCompile Include="server_engine\project\project_configuration_loader.cpp" />
     <ClCompile Include="server_engine\project\project_context.cpp" />
+    <ClCompile Include="server_engine\project\project_persistence.cpp" />
     <ClCompile Include="server_engine\project\project_build_orchestrator.cpp" />
     <ClCompile Include="server_engine\project\project_manager.cpp" />
     <ClCompile Include="server_engine\project\persistence\baseline_store.cpp" />
@@ -86,6 +87,7 @@
     <ClInclude Include="server_engine\project\project_configuration.hpp" />
     <ClInclude Include="server_engine\project\project_configuration_loader.hpp" />
     <ClInclude Include="server_engine\project\project_context.hpp" />
+    <ClInclude Include="server_engine\project\project_persistence.hpp" />
     <ClInclude Include="server_engine\project\compiled_project_state.hpp" />
     <ClInclude Include="server_engine\project\project_build_orchestrator.hpp" />
     <ClInclude Include="server_engine\project\project_manager.hpp" />
@@ -135,6 +137,7 @@
     <None Include="docs\SE_V3_10D0_COMPACT_IDENTITY_REF.md" />
     <None Include="docs\SE_V3_10D1_COMPILED_IMAGE_V1.md" />
     <None Include="docs\SE_V3_10D2_BUILD_CACHE_IMAGE_V1.md" />
+    <None Include="docs\SE_V3_10D3A_PERSISTENT_LIFECYCLE.md" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

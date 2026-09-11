@@ -11,13 +11,13 @@ namespace cw::server {
 project_manager::~project_manager() noexcept {
     activity.close();
 
-    // Explicit UNLOAD owns stop-before-wait. Destruction must never perform a
-    // blind wait that could deadlock on a long-running RUN task.
     if (activity.active_count() != 0)
         std::terminate();
 
     project.reset();
-    lifecycle.store(project_lifecycle_state::unloaded, std::memory_order_release);
+    lifecycle.store(
+        project_lifecycle_state::unloaded,
+        std::memory_order_release);
 }
 
 bool project_manager::reserve_construction() noexcept {
@@ -31,71 +31,43 @@ bool project_manager::reserve_construction() noexcept {
 
 void project_manager::abandon_construction() noexcept {
     project.reset();
-    lifecycle.store(project_lifecycle_state::unloaded, std::memory_order_release);
+    lifecycle.store(
+        project_lifecycle_state::unloaded,
+        std::memory_order_release);
 }
 
-status project_manager::rebuild(
-    const std::filesystem::path& configuration_path,
-    operation_id operation,
-    diagnostic_buffer& diagnostics,
-    project_build_result& output,
-    std::size_t worker_limit) noexcept {
-
-    output = {};
-    if (!reserve_construction())
-        return {status_code::invalid_state};
-
-    project_configuration configuration;
-    const auto configuration_result = load_project_configuration_file(
-        configuration_path, operation, diagnostics, configuration);
-    if (!configuration_result.ok()) {
-        abandon_construction();
-        return configuration_result;
-    }
-
-    return rebuild_reserved(
-        std::move(configuration), operation, diagnostics, output, worker_limit);
-}
-
-status project_manager::rebuild(
+status project_manager::activate_baseline_reserved(
     project_configuration configuration,
-    operation_id operation,
-    diagnostic_buffer& diagnostics,
-    project_build_result& output,
-    std::size_t worker_limit) noexcept {
-
-    output = {};
-    if (!reserve_construction())
-        return {status_code::invalid_state};
-
-    return rebuild_reserved(
-        std::move(configuration), operation, diagnostics, output, worker_limit);
-}
-
-status project_manager::rebuild_reserved(
-    project_configuration configuration,
-    operation_id operation,
-    diagnostic_buffer& diagnostics,
-    project_build_result& output,
-    std::size_t worker_limit) noexcept {
+    std::filesystem::path configuration_path,
+    baseline_snapshot&& snapshot,
+    project_load_result* load_output) noexcept {
 
     try {
-        auto candidate = std::make_unique<project_context>(std::move(configuration));
-        project_build_orchestrator builder{*candidate, worker_limit};
+        auto candidate = std::unique_ptr<project_context>{
+            new project_context(
+                std::move(configuration),
+                std::move(configuration_path),
+                project_context::baseline_storage_tag{})};
 
-        const auto result = builder.construct(operation, diagnostics, output);
-        if (!result.ok()) {
+        const auto activation =
+            candidate->activate_ready_baseline(std::move(snapshot));
+        if (!activation.ok()) {
             abandon_construction();
-            return result;
+            return activation;
+        }
+
+        if (load_output != nullptr) {
+            load_output->transaction.assign(
+                candidate->baseline_transaction());
+            load_output->build_cache_mapped =
+                candidate->build_cache_mapped();
         }
 
         project = std::move(candidate);
-        output.rebuilt = true;
-
-        // Project and gate are fully initialized before READY becomes observable.
-        // acquire() uses the READY release/acquire edge as the publication barrier.
         activity.open();
-        lifecycle.store(project_lifecycle_state::ready, std::memory_order_release);
+        lifecycle.store(
+            project_lifecycle_state::ready,
+            std::memory_order_release);
         return {};
     }
     catch (const std::bad_alloc&) {
@@ -112,18 +84,395 @@ status project_manager::rebuild_reserved(
     }
 }
 
-status project_manager::acquire(project_access& output) const noexcept {
+status project_manager::load(
+    const std::filesystem::path& configuration_path,
+    operation_id operation,
+    diagnostic_buffer& diagnostics,
+    project_load_result& output) noexcept {
+
+    output = {};
+    if (!reserve_construction())
+        return {status_code::invalid_state};
+
+    project_configuration configuration;
+    auto result = load_project_configuration_file(
+        configuration_path,
+        operation,
+        diagnostics,
+        configuration);
+
+    if (!result.ok()) {
+        abandon_construction();
+        return result;
+    }
+
+    baseline_fingerprint fingerprint;
+    result = make_project_baseline_fingerprint(
+        configuration,
+        fingerprint);
+    if (!result.ok()) {
+        abandon_construction();
+        return result;
+    }
+
+    baseline_store store{configuration_path};
+    baseline_snapshot snapshot;
+    result = store.open_ready(fingerprint, snapshot);
+    if (!result.ok()) {
+        abandon_construction();
+        return result;
+    }
+
+    if (snapshot.mapped(baseline_artifact_kind::build_cache) ||
+        !snapshot.mapped(baseline_artifact_kind::compiled) ||
+        !snapshot.mapped(baseline_artifact_kind::source_manager)) {
+        abandon_construction();
+        return {status_code::initialization_failed};
+    }
+
+    return activate_baseline_reserved(
+        std::move(configuration),
+        configuration_path,
+        std::move(snapshot),
+        &output);
+}
+
+status project_manager::build(
+    const std::filesystem::path& configuration_path,
+    operation_id operation,
+    diagnostic_buffer& diagnostics,
+    project_build_result& output,
+    std::size_t worker_limit) noexcept {
+
+    output = {};
+    if (!reserve_construction())
+        return {status_code::invalid_state};
+
+    project_configuration configuration;
+    auto result = load_project_configuration_file(
+        configuration_path,
+        operation,
+        diagnostics,
+        configuration);
+
+    if (!result.ok()) {
+        abandon_construction();
+        return result;
+    }
+
+    baseline_fingerprint fingerprint;
+    result = make_project_baseline_fingerprint(
+        configuration,
+        fingerprint);
+    if (!result.ok()) {
+        abandon_construction();
+        return result;
+    }
+
+    baseline_store store{configuration_path};
+    baseline_snapshot snapshot;
+    result = store.open(fingerprint, snapshot);
+
+    if (result.code == status_code::not_found ||
+        result.code == status_code::rebuild_required) {
+        return construct_reserved(
+            std::move(configuration),
+            configuration_path,
+            operation,
+            diagnostics,
+            output,
+            worker_limit,
+            false);
+    }
+
+    if (!result.ok()) {
+        abandon_construction();
+        return result;
+    }
+
+    compiled_image_view compiled;
+    source_manager_image_view sources;
+    build_cache_image_view cache;
+
+    result = compiled.bind(
+        snapshot.artifact(baseline_artifact_kind::compiled));
+    if (!result.ok()) {
+        abandon_construction();
+        return result;
+    }
+
+    result = sources.bind(
+        snapshot.artifact(baseline_artifact_kind::source_manager));
+    if (!result.ok()) {
+        abandon_construction();
+        return result;
+    }
+
+    result = cache.bind(
+        snapshot.artifact(baseline_artifact_kind::build_cache));
+    if (!result.ok()) {
+        abandon_construction();
+        return result;
+    }
+
+    result = compiled.verify_contents();
+    if (!result.ok()) {
+        abandon_construction();
+        return result;
+    }
+
+    result = sources.verify_contents();
+    if (!result.ok()) {
+        abandon_construction();
+        return result;
+    }
+
+    result = cache.verify_contents();
+    if (!result.ok()) {
+        abandon_construction();
+        return result;
+    }
+
+    result = cache.verify_against(compiled, sources);
+    if (!result.ok()) {
+        abandon_construction();
+        return result;
+    }
+
+    bool changed = false;
+    result = project_baseline_sources_changed(
+        sources,
+        changed);
+    if (!result.ok()) {
+        abandon_construction();
+        return result;
+    }
+
+    if (changed) {
+        abandon_construction();
+        return {status_code::rebuild_required};
+    }
+
+    return activate_baseline_reserved(
+        std::move(configuration),
+        configuration_path,
+        std::move(snapshot),
+        nullptr);
+}
+
+status project_manager::rebuild(
+    const std::filesystem::path& configuration_path,
+    operation_id operation,
+    diagnostic_buffer& diagnostics,
+    project_build_result& output,
+    std::size_t worker_limit) noexcept {
+
+    output = {};
+    if (!reserve_construction())
+        return {status_code::invalid_state};
+
+    project_configuration configuration;
+    const auto configuration_result =
+        load_project_configuration_file(
+            configuration_path,
+            operation,
+            diagnostics,
+            configuration);
+
+    if (!configuration_result.ok()) {
+        abandon_construction();
+        return configuration_result;
+    }
+
+    return construct_reserved(
+        std::move(configuration),
+        configuration_path,
+        operation,
+        diagnostics,
+        output,
+        worker_limit,
+        true);
+}
+
+status project_manager::rebuild(
+    project_configuration configuration,
+    operation_id operation,
+    diagnostic_buffer& diagnostics,
+    project_build_result& output,
+    std::size_t worker_limit) noexcept {
+
+    output = {};
+    if (!reserve_construction())
+        return {status_code::invalid_state};
+
+    return construct_reserved(
+        std::move(configuration),
+        {},
+        operation,
+        diagnostics,
+        output,
+        worker_limit,
+        true);
+}
+
+status project_manager::construct_reserved(
+    project_configuration configuration,
+    std::filesystem::path configuration_path,
+    operation_id operation,
+    diagnostic_buffer& diagnostics,
+    project_build_result& output,
+    std::size_t worker_limit,
+    bool mark_rebuild) noexcept {
+
+    try {
+        auto candidate = std::make_unique<project_context>(
+            std::move(configuration),
+            std::move(configuration_path));
+
+        project_build_orchestrator builder{
+            *candidate,
+            worker_limit};
+
+        const auto result =
+            builder.construct(
+                operation,
+                diagnostics,
+                output);
+
+        if (!result.ok()) {
+            abandon_construction();
+            return result;
+        }
+
+        project = std::move(candidate);
+        output.rebuilt = mark_rebuild;
+
+        activity.open();
+        lifecycle.store(
+            project_lifecycle_state::ready,
+            std::memory_order_release);
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        abandon_construction();
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        abandon_construction();
+        return {status_code::not_available};
+    }
+    catch (const std::system_error&) {
+        abandon_construction();
+        return {status_code::not_available};
+    }
+}
+
+status project_manager::save(
+    baseline_commit_result& output) noexcept {
+
+    output = {};
+
+    project_access access;
+    if (!acquire(access).ok() || !access)
+        return {status_code::invalid_state};
+
+    if (project == nullptr ||
+        project->configuration_path().empty()) {
+        return {status_code::invalid_state};
+    }
+
+    baseline_fingerprint fingerprint;
+    auto result = make_project_baseline_fingerprint(
+        project->configuration(),
+        fingerprint);
+    if (!result.ok())
+        return result;
+
+    baseline_store store{
+        project->configuration_path()};
+
+    if (project->construction_backed()) {
+        project_baseline_images images;
+        result = encode_project_baseline(
+            *project,
+            images);
+        if (!result.ok())
+            return result;
+
+        return store.commit(
+            fingerprint,
+            images.compiled,
+            images.source_manager,
+            images.build_cache,
+            output);
+    }
+
+    baseline_snapshot active;
+    result = store.open_transaction(
+        fingerprint,
+        project->baseline_transaction(),
+        active);
+    if (!result.ok())
+        return result;
+
+    compiled_image_view compiled;
+    source_manager_image_view sources;
+    build_cache_image_view cache;
+
+    result = compiled.bind(
+        active.artifact(baseline_artifact_kind::compiled));
+    if (!result.ok())
+        return result;
+
+    result = sources.bind(
+        active.artifact(baseline_artifact_kind::source_manager));
+    if (!result.ok())
+        return result;
+
+    result = cache.bind(
+        active.artifact(baseline_artifact_kind::build_cache));
+    if (!result.ok())
+        return result;
+
+    result = compiled.verify_contents();
+    if (!result.ok())
+        return result;
+
+    result = sources.verify_contents();
+    if (!result.ok())
+        return result;
+
+    result = cache.verify_contents();
+    if (!result.ok())
+        return result;
+
+    result = cache.verify_against(compiled, sources);
+    if (!result.ok())
+        return result;
+
+    return store.commit(
+        fingerprint,
+        active.artifact(baseline_artifact_kind::compiled),
+        active.artifact(baseline_artifact_kind::source_manager),
+        active.artifact(baseline_artifact_kind::build_cache),
+        output);
+}
+
+status project_manager::acquire(
+    project_access& output) const noexcept {
+
     output.reset();
 
-    // READY is the publication barrier. The second state check closes the race
-    // where UNLOAD changes READY -> DRAINING between the first check and gate entry.
-    if (lifecycle.load(std::memory_order_acquire) != project_lifecycle_state::ready)
+    if (lifecycle.load(std::memory_order_acquire) !=
+        project_lifecycle_state::ready) {
         return {status_code::not_found};
+    }
 
     if (!activity.try_enter())
         return {status_code::not_found};
 
-    if (lifecycle.load(std::memory_order_acquire) != project_lifecycle_state::ready) {
+    if (lifecycle.load(std::memory_order_acquire) !=
+        project_lifecycle_state::ready) {
         activity.leave();
         return {status_code::not_found};
     }
@@ -133,11 +482,15 @@ status project_manager::acquire(project_access& output) const noexcept {
         return {status_code::initialization_failed};
     }
 
-    output = project_access{activity, *project};
+    output = project_access{
+        activity,
+        *project};
     return {};
 }
 
-status project_manager::unload(project_stop_request stop) noexcept {
+status project_manager::unload(
+    project_stop_request stop) noexcept {
+
     auto expected = project_lifecycle_state::ready;
     if (!lifecycle.compare_exchange_strong(
             expected,
@@ -147,15 +500,15 @@ status project_manager::unload(project_stop_request stop) noexcept {
         return {status_code::invalid_state};
     }
 
-    // Admission must close before stop is requested. Long-running RUN/background
-    // work can then observe the stop request, release its token, and let drain finish.
     activity.close();
 
     stop();
     activity.wait_drained();
 
     project.reset();
-    lifecycle.store(project_lifecycle_state::unloaded, std::memory_order_release);
+    lifecycle.store(
+        project_lifecycle_state::unloaded,
+        std::memory_order_release);
     return {};
 }
 

@@ -464,8 +464,24 @@ std::span<const std::byte> baseline_snapshot::artifact(baseline_artifact_kind ki
     return {};
 }
 
+bool baseline_snapshot::mapped(
+    baseline_artifact_kind kind) const noexcept {
+
+    switch (kind) {
+    case baseline_artifact_kind::compiled:
+        return compiled.open();
+    case baseline_artifact_kind::source_manager:
+        return source_manager.open();
+    case baseline_artifact_kind::build_cache:
+        return build_cache.open();
+    }
+    return false;
+}
+
 std::filesystem::path baseline_store::root_path() const {
-    return configuration_path.parent_path() / ".serverengine" / configuration_path.filename();
+    return configuration_path.parent_path() /
+        ".serverengine" /
+        configuration_path.filename();
 }
 
 status baseline_store::open(
@@ -473,47 +489,162 @@ status baseline_store::open(
     baseline_snapshot& output) const noexcept {
 
     output = {};
+
     try {
-        const auto root = root_path();
         std::string transaction;
-        auto result = read_current_transaction(root, transaction);
+        const auto result =
+            read_current_transaction(
+                root_path(),
+                transaction);
         if (!result.ok())
             return result;
 
-        std::vector<std::byte> manifest_bytes;
-        result = read_small_file(root / transaction / manifest_name, manifest_size, manifest_bytes);
+        return open_selected(
+            expected,
+            transaction,
+            true,
+            output);
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+    catch (const std::filesystem::filesystem_error&) {
+        return {status_code::io_failed};
+    }
+}
+
+status baseline_store::open_ready(
+    const baseline_fingerprint& expected,
+    baseline_snapshot& output) const noexcept {
+
+    output = {};
+
+    try {
+        std::string transaction;
+        const auto result =
+            read_current_transaction(
+                root_path(),
+                transaction);
         if (!result.ok())
+            return result;
+
+        return open_selected(
+            expected,
+            transaction,
+            false,
+            output);
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+    catch (const std::filesystem::filesystem_error&) {
+        return {status_code::io_failed};
+    }
+}
+
+status baseline_store::open_transaction(
+    const baseline_fingerprint& expected,
+    std::string_view transaction,
+    baseline_snapshot& output) const noexcept {
+
+    output = {};
+
+    if (!valid_transaction_name(transaction))
+        return {status_code::invalid_argument};
+
+    return open_selected(
+        expected,
+        transaction,
+        true,
+        output);
+}
+
+status baseline_store::open_selected(
+    const baseline_fingerprint& expected,
+    std::string_view transaction,
+    bool include_build_cache,
+    baseline_snapshot& output) const noexcept {
+
+    output = {};
+
+    if (!valid_transaction_name(transaction))
+        return {status_code::invalid_argument};
+
+    try {
+        const auto root = root_path();
+        const auto directory =
+            root / std::string{transaction};
+
+        std::vector<std::byte> manifest_bytes;
+        auto result = read_small_file(
+            directory / manifest_name,
+            manifest_size,
+            manifest_bytes);
+
+        if (!result.ok()) {
             return result.code == status_code::not_found
                 ? status{status_code::artifact_corrupt}
                 : result;
+        }
 
         parsed_manifest manifest;
-        result = parse_manifest(manifest_bytes, manifest);
+        result = parse_manifest(
+            manifest_bytes,
+            manifest);
         if (!result.ok())
             return result;
+
         if (manifest.transaction != transaction)
             return {status_code::artifact_corrupt};
+
         if (!(manifest.fingerprint == expected))
             return {status_code::rebuild_required};
 
         baseline_snapshot candidate;
-        candidate.fingerprint_value = manifest.fingerprint;
-        candidate.transaction_value = transaction;
+        candidate.fingerprint_value =
+            manifest.fingerprint;
+        candidate.transaction_value =
+            manifest.transaction;
 
-        const auto directory = root / transaction;
-        result = candidate.compiled.map(directory / compiled_name);
-        if (!result.ok())
-            return result.code == status_code::not_found ? status{status_code::artifact_corrupt} : result;
-        result = candidate.source_manager.map(directory / source_manager_name);
-        if (!result.ok())
-            return result.code == status_code::not_found ? status{status_code::artifact_corrupt} : result;
-        result = candidate.build_cache.map(directory / build_cache_name);
-        if (!result.ok())
-            return result.code == status_code::not_found ? status{status_code::artifact_corrupt} : result;
+        result = candidate.compiled.map(
+            directory / compiled_name);
+        if (!result.ok()) {
+            return result.code == status_code::not_found
+                ? status{status_code::artifact_corrupt}
+                : result;
+        }
 
-        if (candidate.compiled.bytes().size() != manifest.compiled_size ||
-            candidate.source_manager.bytes().size() != manifest.source_manager_size ||
-            candidate.build_cache.bytes().size() != manifest.build_cache_size) {
+        result = candidate.source_manager.map(
+            directory / source_manager_name);
+        if (!result.ok()) {
+            return result.code == status_code::not_found
+                ? status{status_code::artifact_corrupt}
+                : result;
+        }
+
+        if (include_build_cache) {
+            result = candidate.build_cache.map(
+                directory / build_cache_name);
+            if (!result.ok()) {
+                return result.code == status_code::not_found
+                    ? status{status_code::artifact_corrupt}
+                    : result;
+            }
+        }
+
+        if (candidate.compiled.bytes().size() !=
+                manifest.compiled_size ||
+            candidate.source_manager.bytes().size() !=
+                manifest.source_manager_size ||
+            (include_build_cache &&
+             candidate.build_cache.bytes().size() !=
+                manifest.build_cache_size)) {
             return {status_code::artifact_corrupt};
         }
 

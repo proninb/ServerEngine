@@ -4213,6 +4213,495 @@ bool test_build_cache_image_integrity() {
     return pass;
 }
 
+
+struct persistent_lifecycle_fixture final {
+    std::filesystem::path directory;
+    std::filesystem::path configuration_path;
+    std::filesystem::path model_path;
+};
+
+[[nodiscard]] bool prepare_persistent_lifecycle_fixture(
+    std::string_view name,
+    persistent_lifecycle_fixture& output) {
+
+    output = {};
+    output.directory =
+        std::filesystem::temp_directory_path() /
+        std::filesystem::path{std::string{name}};
+    output.configuration_path =
+        output.directory / "project.json";
+    output.model_path =
+        output.directory / "model.hpp";
+
+    std::error_code error;
+    std::filesystem::remove_all(output.directory, error);
+    std::filesystem::create_directories(output.directory, error);
+    if (error)
+        return false;
+
+    {
+        std::ofstream file(output.model_path);
+        file << "struct IO { int IN; int OUT; }; "
+                "IO A; IO B; B.IN = A.OUT;";
+        if (!file)
+            return false;
+    }
+
+    {
+        std::ofstream file(output.configuration_path);
+        file <<
+            R"({"version":1,"name":"Persistent","project":[{"path":"model.hpp","role":"type"}],"configuration":{"abi":{"target":"windows-x64","pack":8}}})";
+        if (!file)
+            return false;
+    }
+
+    return true;
+}
+
+[[nodiscard]] bool create_saved_persistent_project(
+    const persistent_lifecycle_fixture& fixture,
+    baseline_commit_result& committed) {
+
+    project_manager manager;
+    diagnostic_buffer diagnostics;
+    project_build_result rebuild;
+
+    if (!manager.rebuild(
+            fixture.configuration_path,
+            operation_id{1400},
+            diagnostics,
+            rebuild,
+            1).ok() ||
+        diagnostics.has_errors() ||
+        !rebuild.changed ||
+        !rebuild.rebuilt) {
+        return false;
+    }
+
+    project_access before_save;
+    if (!manager.acquire(before_save).ok() ||
+        !before_save ||
+        before_save->baseline_backed()) {
+        return false;
+    }
+    before_save.reset();
+
+    if (!manager.save(committed).ok() ||
+        committed.transaction.empty() ||
+        committed.bytes_written == 0) {
+        return false;
+    }
+
+    project_access after_save;
+    if (!manager.acquire(after_save).ok() ||
+        !after_save ||
+        after_save->baseline_backed()) {
+        return false;
+    }
+    after_save.reset();
+
+    return manager.unload().ok();
+}
+
+bool test_project_persistence_save_load() {
+    persistent_lifecycle_fixture fixture;
+    if (!prepare_persistent_lifecycle_fixture(
+            "server_engine_v310d3a_save_load",
+            fixture)) {
+        return false;
+    }
+
+    baseline_commit_result committed;
+    if (!create_saved_persistent_project(
+            fixture,
+            committed)) {
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    project_manager manager;
+    diagnostic_buffer diagnostics;
+    project_load_result loaded;
+
+    if (!manager.load(
+            fixture.configuration_path,
+            operation_id{1401},
+            diagnostics,
+            loaded).ok() ||
+        diagnostics.has_errors() ||
+        loaded.transaction != committed.transaction ||
+        loaded.build_cache_mapped ||
+        manager.state() != project_lifecycle_state::ready) {
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    project_access access;
+    object_handle a;
+    object_handle b;
+    link_handle link;
+
+    const bool pass =
+        manager.acquire(access).ok() &&
+        access &&
+        access->baseline_backed() &&
+        !access->build_cache_mapped() &&
+        access->baseline_transaction() ==
+            committed.transaction &&
+        access->sources().source_count() == 1 &&
+        access->compiled_graph().type_count() == 1 &&
+        access->compiled_graph().object_count() == 2 &&
+        access->compiled_graph().link_count() == 1 &&
+        access->identity_count() != 0 &&
+        access->find_object("A", a).ok() &&
+        access->find_object("B", b).ok() &&
+        access->find_link("B.IN", link).ok() &&
+        a && b && link;
+
+    access.reset();
+    const bool unloaded = manager.unload().ok();
+
+    std::error_code error;
+    std::filesystem::remove_all(fixture.directory, error);
+    return pass && unloaded;
+}
+
+bool test_project_load_does_not_map_build_cache() {
+    persistent_lifecycle_fixture fixture;
+    if (!prepare_persistent_lifecycle_fixture(
+            "server_engine_v310d3a_load_no_build_cache",
+            fixture)) {
+        return false;
+    }
+
+    baseline_commit_result committed;
+    if (!create_saved_persistent_project(
+            fixture,
+            committed)) {
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    const auto build_cache_path =
+        fixture.directory /
+        ".serverengine" /
+        fixture.configuration_path.filename() /
+        committed.transaction /
+        "build_cache.bin";
+
+    std::error_code error;
+    if (!std::filesystem::remove(build_cache_path, error) || error) {
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    project_manager manager;
+    diagnostic_buffer diagnostics;
+    project_load_result loaded;
+    const auto result = manager.load(
+        fixture.configuration_path,
+        operation_id{1402},
+        diagnostics,
+        loaded);
+
+    project_access access;
+    object_handle object;
+
+    const bool pass =
+        result.ok() &&
+        !diagnostics.has_errors() &&
+        !loaded.build_cache_mapped &&
+        manager.acquire(access).ok() &&
+        access &&
+        access->baseline_backed() &&
+        !access->build_cache_mapped() &&
+        access->find_object("A", object).ok() &&
+        object;
+
+    access.reset();
+    if (manager.ready())
+        (void)manager.unload();
+
+    std::filesystem::remove_all(fixture.directory, error);
+    return pass;
+}
+
+bool test_project_load_fingerprint_guard() {
+    persistent_lifecycle_fixture fixture;
+    if (!prepare_persistent_lifecycle_fixture(
+            "server_engine_v310d3a_fingerprint",
+            fixture)) {
+        return false;
+    }
+
+    baseline_commit_result committed;
+    if (!create_saved_persistent_project(
+            fixture,
+            committed)) {
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    {
+        std::ofstream file(
+            fixture.configuration_path,
+            std::ios::trunc);
+        file <<
+            R"({"version":1,"name":"Different","project":[{"path":"model.hpp","role":"type"}],"configuration":{"abi":{"target":"windows-x64","pack":8}}})";
+        if (!file)
+            return false;
+    }
+
+    project_manager manager;
+    diagnostic_buffer diagnostics;
+    project_load_result loaded;
+
+    const auto result = manager.load(
+        fixture.configuration_path,
+        operation_id{1403},
+        diagnostics,
+        loaded);
+
+    project_access access;
+    const bool pass =
+        result.code == status_code::rebuild_required &&
+        manager.state() == project_lifecycle_state::unloaded &&
+        manager.acquire(access).code ==
+            status_code::not_found &&
+        !access;
+
+    std::error_code error;
+    std::filesystem::remove_all(fixture.directory, error);
+    return pass;
+}
+
+bool test_project_save_after_load_keeps_active_baseline() {
+    persistent_lifecycle_fixture fixture;
+    if (!prepare_persistent_lifecycle_fixture(
+            "server_engine_v310d3a_save_after_load",
+            fixture)) {
+        return false;
+    }
+
+    baseline_commit_result first;
+    if (!create_saved_persistent_project(
+            fixture,
+            first)) {
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    project_manager manager;
+    diagnostic_buffer diagnostics;
+    project_load_result loaded;
+    if (!manager.load(
+            fixture.configuration_path,
+            operation_id{1404},
+            diagnostics,
+            loaded).ok()) {
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    baseline_commit_result second;
+    if (!manager.save(second).ok() ||
+        second.transaction.empty() ||
+        second.transaction == first.transaction) {
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    project_access access;
+    const bool pass =
+        manager.acquire(access).ok() &&
+        access &&
+        access->baseline_backed() &&
+        access->baseline_transaction() ==
+            first.transaction &&
+        access->baseline_transaction() !=
+            second.transaction;
+
+    access.reset();
+    if (manager.ready())
+        (void)manager.unload();
+
+    std::error_code error;
+    std::filesystem::remove_all(fixture.directory, error);
+    return pass;
+}
+
+bool test_project_build_no_change_reuses_baseline() {
+    persistent_lifecycle_fixture fixture;
+    if (!prepare_persistent_lifecycle_fixture(
+            "server_engine_v310d3a_build_no_change",
+            fixture)) {
+        return false;
+    }
+
+    baseline_commit_result committed;
+    if (!create_saved_persistent_project(
+            fixture,
+            committed)) {
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    project_manager manager;
+    diagnostic_buffer diagnostics;
+    project_build_result build;
+
+    const auto result = manager.build(
+        fixture.configuration_path,
+        operation_id{1405},
+        diagnostics,
+        build,
+        1);
+
+    project_access access;
+    object_handle object;
+
+    const bool pass =
+        result.ok() &&
+        !diagnostics.has_errors() &&
+        !build.changed &&
+        !build.rebuilt &&
+        manager.state() == project_lifecycle_state::ready &&
+        manager.acquire(access).ok() &&
+        access &&
+        access->baseline_backed() &&
+        access->build_cache_mapped() &&
+        access->baseline_transaction() ==
+            committed.transaction &&
+        access->find_object("B", object).ok() &&
+        object;
+
+    access.reset();
+    if (manager.ready())
+        (void)manager.unload();
+
+    std::error_code error;
+    std::filesystem::remove_all(fixture.directory, error);
+    return pass;
+}
+
+bool test_project_build_changed_baseline_fail_closed() {
+    persistent_lifecycle_fixture fixture;
+    if (!prepare_persistent_lifecycle_fixture(
+            "server_engine_v310d3a_build_changed",
+            fixture)) {
+        return false;
+    }
+
+    baseline_commit_result committed;
+    if (!create_saved_persistent_project(
+            fixture,
+            committed)) {
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    {
+        std::ofstream file(
+            fixture.model_path,
+            std::ios::trunc);
+        file <<
+            "struct IO { int IN; int OUT; int AUX; }; "
+            "IO A; IO B; B.IN = A.OUT;";
+        if (!file)
+            return false;
+    }
+
+    project_manager manager;
+    diagnostic_buffer diagnostics;
+    project_build_result build;
+
+    const auto result = manager.build(
+        fixture.configuration_path,
+        operation_id{1406},
+        diagnostics,
+        build,
+        1);
+
+    project_access access;
+    const bool pass =
+        result.code == status_code::rebuild_required &&
+        manager.state() == project_lifecycle_state::unloaded &&
+        !build.rebuilt &&
+        manager.acquire(access).code ==
+            status_code::not_found &&
+        !access;
+
+    std::error_code error;
+    std::filesystem::remove_all(fixture.directory, error);
+    return pass;
+}
+
+bool test_project_build_without_baseline_full_no_save() {
+    persistent_lifecycle_fixture fixture;
+    if (!prepare_persistent_lifecycle_fixture(
+            "server_engine_v310d3a_build_full",
+            fixture)) {
+        return false;
+    }
+
+    project_manager manager;
+    diagnostic_buffer diagnostics;
+    project_build_result build;
+
+    const auto result = manager.build(
+        fixture.configuration_path,
+        operation_id{1407},
+        diagnostics,
+        build,
+        1);
+
+    const auto current_path =
+        fixture.directory /
+        ".serverengine" /
+        fixture.configuration_path.filename() /
+        "CURRENT";
+
+    project_access access;
+    object_handle object;
+
+    std::error_code exists_error;
+    const auto current_exists =
+        std::filesystem::exists(
+            current_path,
+            exists_error);
+
+    const bool pass =
+        result.ok() &&
+        !diagnostics.has_errors() &&
+        build.changed &&
+        !build.rebuilt &&
+        manager.state() == project_lifecycle_state::ready &&
+        manager.acquire(access).ok() &&
+        access &&
+        !access->baseline_backed() &&
+        access->find_object("A", object).ok() &&
+        object &&
+        !exists_error &&
+        !current_exists;
+
+    access.reset();
+    if (manager.ready())
+        (void)manager.unload();
+
+    std::error_code error;
+    std::filesystem::remove_all(fixture.directory, error);
+    return pass;
+}
+
 using test_function = bool (*)();
 
 struct test_case {
@@ -4299,6 +4788,13 @@ constexpr std::array tests{
     test_case{"build_cache_image_mapped_baseline", &test_build_cache_image_mapped_baseline},
     test_case{"build_cache_image_incremental_lineage", &test_build_cache_image_incremental_lineage},
     test_case{"build_cache_image_integrity", &test_build_cache_image_integrity},
+    test_case{"project_persistence_save_load", &test_project_persistence_save_load},
+    test_case{"project_load_does_not_map_build_cache", &test_project_load_does_not_map_build_cache},
+    test_case{"project_load_fingerprint_guard", &test_project_load_fingerprint_guard},
+    test_case{"project_save_after_load_keeps_active_baseline", &test_project_save_after_load_keeps_active_baseline},
+    test_case{"project_build_no_change_reuses_baseline", &test_project_build_no_change_reuses_baseline},
+    test_case{"project_build_changed_baseline_fail_closed", &test_project_build_changed_baseline_fail_closed},
+    test_case{"project_build_without_baseline_full_no_save", &test_project_build_without_baseline_full_no_save},
 };
 
 } // namespace
