@@ -39,6 +39,13 @@ public:
         return live_count.load(std::memory_order_relaxed);
     }
 
+    [[nodiscard]] std::size_t slot_count() const noexcept {
+        const auto next = next_id.load(std::memory_order_relaxed);
+        return next > 1 ? static_cast<std::size_t>(next - 1) : 0;
+    }
+
+    [[nodiscard]] string_id at_slot(std::size_t index) const noexcept;
+
     [[nodiscard]] string_table_statistics statistics() const noexcept;
 
 private:

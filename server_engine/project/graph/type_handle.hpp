@@ -7,6 +7,7 @@ namespace cw::server {
 
 class graph;
 class generation_builder;
+class compiled_image_view;
 
 // Identifies one user-type slot inside the current committed Graph. The value
 // is Graph-local and is not a persistent semantic identity.
@@ -27,6 +28,7 @@ private:
 
     friend class graph;
     friend class generation_builder;
+    friend class compiled_image_view;
 };
 
 static_assert(sizeof(type_handle) == 4);

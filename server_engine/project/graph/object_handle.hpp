@@ -6,6 +6,7 @@ namespace cw::server {
 
 class graph;
 class generation_builder;
+class compiled_image_view;
 
 // Identifies one object slot in the single current compiled Graph. The handle is
 // not Project semantic identity and becomes invalid when the Project is unloaded.
@@ -26,6 +27,7 @@ private:
 
     friend class graph;
     friend class generation_builder;
+    friend class compiled_image_view;
 };
 
 static_assert(sizeof(object_handle) == 4);

@@ -88,6 +88,8 @@ public:
         return next > 1 ? static_cast<std::size_t>(next - 1) : 1;
     }
 
+    [[nodiscard]] identity_ref at_slot(std::size_t index) const noexcept;
+
     [[nodiscard]] std::size_t bytes_reserved() const noexcept {
         return semantic_bucket_bytes + sizeof(directories) +
             allocated_directory_bytes.load(std::memory_order_relaxed) +

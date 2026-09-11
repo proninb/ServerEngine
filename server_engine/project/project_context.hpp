@@ -108,6 +108,18 @@ public:
         return compiled->strings.get(id);
     }
 
+    [[nodiscard]] std::size_t string_count() const noexcept {
+        return compiled->strings.size();
+    }
+
+    [[nodiscard]] std::size_t string_slot_count() const noexcept {
+        return compiled->strings.slot_count();
+    }
+
+    [[nodiscard]] string_id string_at_slot(std::size_t index) const noexcept {
+        return compiled->strings.at_slot(index);
+    }
+
     [[nodiscard]] status resolve_declaration(
         identity_ref parent,
         std::string_view local_name,
@@ -135,6 +147,14 @@ public:
 
     [[nodiscard]] std::size_t identity_count() const noexcept {
         return compiled->identities.size();
+    }
+
+    [[nodiscard]] std::size_t identity_slot_count() const noexcept {
+        return compiled->identities.slot_count();
+    }
+
+    [[nodiscard]] identity_ref identity_at_slot(std::size_t index) const noexcept {
+        return compiled->identities.at_slot(index);
     }
 
     [[nodiscard]] std::size_t identity_bytes_reserved() const noexcept {

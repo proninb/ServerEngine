@@ -47,6 +47,7 @@
     <ClCompile Include="server_engine\project\project_manager.cpp" />
     <ClCompile Include="server_engine\project\persistence\baseline_store.cpp" />
     <ClCompile Include="server_engine\project\persistence\source_manager_image.cpp" />
+    <ClCompile Include="server_engine\project\persistence\compiled_image.cpp" />
     <ClCompile Include="server_engine\project\storage\byte_arena.cpp" />
     <ClCompile Include="server_engine\project\identity\identity_space.cpp" />
     <ClCompile Include="server_engine\project\string\string_table.cpp" />
@@ -89,6 +90,7 @@
     <ClInclude Include="server_engine\project\project_manager.hpp" />
     <ClInclude Include="server_engine\project\persistence\baseline_store.hpp" />
     <ClInclude Include="server_engine\project\persistence\source_manager_image.hpp" />
+    <ClInclude Include="server_engine\project\persistence\compiled_image.hpp" />
     <ClInclude Include="server_engine\project\identity\name_ref.hpp" />
     <ClInclude Include="server_engine\project\identity\identity_node.hpp" />
     <ClInclude Include="server_engine\project\storage\byte_arena.hpp" />
@@ -129,6 +131,7 @@
     <None Include="docs\SE_V3_10B_PERSISTENT_BASELINE_STORAGE.md" />
     <None Include="docs\SE_V3_10C_SOURCE_MANAGER_IMAGE_V1.md" />
     <None Include="docs\SE_V3_10D0_COMPACT_IDENTITY_REF.md" />
+    <None Include="docs\SE_V3_10D1_COMPILED_IMAGE_V1.md" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

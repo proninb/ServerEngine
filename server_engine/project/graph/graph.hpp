@@ -162,6 +162,22 @@ struct graph_canonical_type_record final {
 
 static_assert(sizeof(graph_canonical_type_record) == 16);
 
+// Read-only physical semantic arrays of the current Graph. Builder-only
+// acceleration indexes and dependency caches are intentionally excluded.
+struct graph_data_view final {
+    std::span<const type_entry> types;
+    std::span<const identity_ref> type_identities;
+    std::span<const member_record> members;
+    std::span<const enum_value_record> enum_values;
+    std::span<const object_entry> objects;
+    std::span<const identity_ref> object_identities;
+    std::span<const link_record> links;
+    std::span<const graph_canonical_type_record> canonical_types;
+    std::size_t live_types = 0;
+    std::size_t live_objects = 0;
+    std::size_t live_links = 0;
+};
+
 // Detached complete Graph storage. Generation Builder performs all
 // allocation and validation here; Graph publication is a no-fail swap only.
 class prepared_graph_generation final {
@@ -305,6 +321,22 @@ public:
     [[nodiscard]] std::size_t link_slot_count() const noexcept { return link_records.size(); }
     [[nodiscard]] std::size_t canonical_type_count() const noexcept {
         return canonical_types.empty() ? 0 : canonical_types.size() - 1;
+    }
+
+    [[nodiscard]] graph_data_view data_view() const noexcept {
+        return {
+            types,
+            identities,
+            member_records,
+            enum_value_records,
+            object_entries,
+            object_identities,
+            link_records,
+            canonical_types,
+            live_type_count,
+            live_object_count,
+            live_link_count,
+        };
     }
 
     [[nodiscard]] type_handle type_at(std::size_t index) const noexcept;

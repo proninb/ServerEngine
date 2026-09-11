@@ -235,6 +235,34 @@ string_id identity_space::name(identity_ref identity) const noexcept {
     return record == nullptr ? string_id{} : record->identity.name();
 }
 
+identity_ref identity_space::at_slot(std::size_t index) const noexcept {
+    if (index >= slot_count() ||
+        index >= identity_ref::maximum_slot) {
+        return {};
+    }
+
+    const auto slot = static_cast<std::uint32_t>(index + 1);
+    if (slot == 1)
+        return root();
+
+    const auto* item = slot_record(slot);
+    if (item == nullptr ||
+        (item->fingerprint & identity_ref::slot_mask) == 0 ||
+        !item->identity.name()) {
+        return {};
+    }
+
+    const auto kind = static_cast<identity_kind>(
+        item->fingerprint >> identity_ref::kind_shift);
+    if (kind == identity_kind::root)
+        return {};
+
+    const auto identity = identity_ref::make(slot, kind);
+    return published_record(identity) != nullptr
+        ? identity
+        : identity_ref{};
+}
+
 identity_ref identity_space::find_record(
     identity_ref parent,
     string_id local_name,

@@ -189,6 +189,25 @@ std::string_view string_table::get(string_id id) const noexcept {
     return {value->bytes(), value->length};
 }
 
+string_id string_table::at_slot(std::size_t index) const noexcept {
+    if (index >= maximum_id)
+        return {};
+
+    const auto raw_id = static_cast<std::uint32_t>(index + 1);
+    auto* direct_page = page(raw_id);
+    if (direct_page == nullptr)
+        return {};
+
+    const auto slot_index =
+        static_cast<std::size_t>(raw_id - 1) & page_mask;
+    const auto* value =
+        direct_page->slots[slot_index].load(std::memory_order_acquire);
+
+    return value != nullptr && value->id == raw_id
+        ? string_id{raw_id}
+        : string_id{};
+}
+
 string_table_statistics string_table::statistics() const noexcept {
     string_table_statistics output;
     output.strings = size();

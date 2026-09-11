@@ -34,6 +34,7 @@ add_library(server_engine_core STATIC
     server_engine/project/project_manager.cpp
     server_engine/project/persistence/baseline_store.cpp
     server_engine/project/persistence/source_manager_image.cpp
+    server_engine/project/persistence/compiled_image.cpp
 )
 
 target_include_directories(server_engine_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/server_engine)
@@ -157,3 +158,8 @@ add_test(NAME source_manager_image_roundtrip COMMAND server_engine_tests source_
 add_test(NAME source_manager_image_deterministic COMMAND server_engine_tests source_manager_image_deterministic)
 add_test(NAME source_manager_image_mapped_baseline COMMAND server_engine_tests source_manager_image_mapped_baseline)
 add_test(NAME source_manager_image_integrity COMMAND server_engine_tests source_manager_image_integrity)
+add_test(NAME compiled_image_roundtrip COMMAND server_engine_tests compiled_image_roundtrip)
+add_test(NAME compiled_image_deterministic COMMAND server_engine_tests compiled_image_deterministic)
+add_test(NAME compiled_image_mapped_baseline COMMAND server_engine_tests compiled_image_mapped_baseline)
+add_test(NAME compiled_image_tombstone_preservation COMMAND server_engine_tests compiled_image_tombstone_preservation)
+add_test(NAME compiled_image_integrity COMMAND server_engine_tests compiled_image_integrity)

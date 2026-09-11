@@ -5,6 +5,7 @@
 #include "../server_engine/project/project_manager.hpp"
 #include "../server_engine/project/persistence/baseline_store.hpp"
 #include "../server_engine/project/persistence/source_manager_image.hpp"
+#include "../server_engine/project/persistence/compiled_image.hpp"
 #include "../server_engine/project/frontend/source_facts_validation.hpp"
 #include "../server_engine/project/frontend/include_discovery.hpp"
 #include "../server_engine/project/frontend/source_frontend_generation.hpp"
@@ -23,6 +24,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -3279,6 +3281,431 @@ bool test_source_manager_image_integrity() {
     return pass;
 }
 
+
+[[nodiscard]] bool prepare_compiled_image_fixture(
+    const std::filesystem::path& directory,
+    std::unique_ptr<project_context>& output) {
+
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto model_path = directory / "model.hpp";
+    {
+        std::ofstream file(model_path);
+        file << "namespace N { "
+                "struct IO { int IN; int OUT; }; "
+                "IO A; IO B; B.IN = A.OUT; "
+                "}";
+        if (!file)
+            return false;
+    }
+
+    project_configuration configuration;
+    configuration.version = 1;
+    configuration.name = "CompiledImage";
+    configuration.project.push_back(
+        project_item_configuration{model_path, project_item_role::type});
+
+    auto candidate =
+        std::make_unique<project_context>(std::move(configuration));
+    project_build_orchestrator orchestrator{*candidate, 1};
+    diagnostic_buffer diagnostics;
+    project_build_result build;
+
+    if (!orchestrator.rebuild(
+            operation_id{1200},
+            diagnostics,
+            build).ok() ||
+        diagnostics.has_errors() ||
+        !build.changed) {
+        return false;
+    }
+
+    output = std::move(candidate);
+    return true;
+}
+
+bool test_compiled_image_roundtrip() {
+    static_assert(compiled_image_directory_count == 16);
+    static_assert(
+        static_cast<std::uint32_t>(
+            compiled_image_section::graph_link_index) == 16);
+
+    const auto directory =
+        std::filesystem::temp_directory_path() /
+        "server_engine_v310d1_compiled_roundtrip";
+
+    std::unique_ptr<project_context> context;
+    if (!prepare_compiled_image_fixture(directory, context))
+        return false;
+
+    type_handle io;
+    object_handle a;
+    object_handle b;
+    object_endpoint a_out;
+    object_endpoint b_in;
+    link_handle link;
+
+    if (!context->find_type("N::IO", io).ok() ||
+        !context->find_object("N::A", a).ok() ||
+        !context->find_object("N::B", b).ok() ||
+        !context->find_endpoint("N::A.OUT", a_out).ok() ||
+        !context->find_endpoint("N::B.IN", b_in).ok() ||
+        !context->find_link("N::B.IN", link).ok()) {
+        std::error_code error;
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    std::vector<std::byte> image;
+    if (!encode_compiled_image(*context, image).ok() || image.empty()) {
+        std::error_code error;
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    compiled_image_view view;
+    if (!view.bind(image).ok() ||
+        !view.verify_contents().ok() ||
+        view.type_count() != 1 ||
+        view.object_count() != 2 ||
+        view.link_count() != 1 ||
+        view.identity_count() != context->identity_count()) {
+        std::error_code error;
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    string_id n_name;
+    string_id io_name;
+    string_id a_name;
+    string_id b_name;
+    string_id in_name;
+    string_id out_name;
+
+    if (!view.find_string("N", n_name).ok() ||
+        !view.find_string("IO", io_name).ok() ||
+        !view.find_string("A", a_name).ok() ||
+        !view.find_string("B", b_name).ok() ||
+        !view.find_string("IN", in_name).ok() ||
+        !view.find_string("OUT", out_name).ok()) {
+        std::error_code error;
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    identity_ref n_identity;
+    identity_ref io_identity;
+    identity_ref a_identity;
+    identity_ref b_identity;
+
+    const auto root = view.identity_root();
+    if (!view.find_identity(
+            root,
+            n_name,
+            identity_kind::namespace_scope,
+            n_identity).ok() ||
+        !view.find_identity(
+            n_identity,
+            io_name,
+            identity_kind::type,
+            io_identity).ok() ||
+        !view.find_identity(
+            n_identity,
+            a_name,
+            identity_kind::object,
+            a_identity).ok() ||
+        !view.find_identity(
+            n_identity,
+            b_name,
+            identity_kind::object,
+            b_identity).ok()) {
+        std::error_code error;
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    const auto image_io = view.find_type(io_identity);
+    const auto image_a = view.find_object(a_identity);
+    const auto image_b = view.find_object(b_identity);
+
+    const auto current_io_identity =
+        context->compiled_graph().identity(io);
+    const auto current_a_identity =
+        context->compiled_graph().identity(a);
+    const auto current_b_identity =
+        context->compiled_graph().identity(b);
+
+    if (n_name != context->find_string("N") ||
+        io_name != context->find_string("IO") ||
+        a_name != context->find_string("A") ||
+        b_name != context->find_string("B") ||
+        in_name != context->find_string("IN") ||
+        out_name != context->find_string("OUT") ||
+        io_identity != current_io_identity ||
+        a_identity != current_a_identity ||
+        b_identity != current_b_identity) {
+        std::error_code error;
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    const auto image_in = view.find_member(image_io, in_name);
+    const auto image_out = view.find_member(image_io, out_name);
+    const object_endpoint image_a_out{image_a, image_out};
+    const object_endpoint image_b_in{image_b, image_in};
+    const auto image_link = view.find_link(image_b_in);
+
+    compiled_image_object_record b_record;
+    type_handle b_type;
+    compiled_image_link_record link_record;
+    const auto* current_b_record =
+        context->compiled_graph().find(b);
+
+    const bool pass =
+        image_io == io &&
+        image_a == a &&
+        image_b == b &&
+        image_in == b_in.member &&
+        image_out == a_out.member &&
+        image_link == link &&
+        view.object(image_b, b_record).ok() &&
+        current_b_record != nullptr &&
+        b_record.type == current_b_record->type &&
+        view.named(b_record.type, b_type) &&
+        b_type == io &&
+        view.link(image_link, link_record).ok() &&
+        link_record.source == image_a_out &&
+        link_record.target == image_b_in &&
+        view.string(io_name) == "IO" &&
+        view.identity_name(io_identity) == io_name;
+
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+bool test_compiled_image_deterministic() {
+    const auto directory =
+        std::filesystem::temp_directory_path() /
+        "server_engine_v310d1_compiled_deterministic";
+
+    std::unique_ptr<project_context> context;
+    if (!prepare_compiled_image_fixture(directory, context))
+        return false;
+
+    std::vector<std::byte> first;
+    std::vector<std::byte> second;
+
+    const bool pass =
+        encode_compiled_image(*context, first).ok() &&
+        encode_compiled_image(*context, second).ok() &&
+        !first.empty() &&
+        first == second;
+
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+bool test_compiled_image_mapped_baseline() {
+    const auto directory =
+        std::filesystem::temp_directory_path() /
+        "server_engine_v310d1_compiled_mapped";
+
+    std::unique_ptr<project_context> context;
+    if (!prepare_compiled_image_fixture(directory, context))
+        return false;
+
+    std::vector<std::byte> image;
+    if (!encode_compiled_image(*context, image).ok()) {
+        std::error_code error;
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    const auto project_path = directory / "project.json";
+    {
+        std::ofstream file(project_path);
+        file << "{}";
+    }
+
+    baseline_store store{project_path};
+    baseline_commit_result committed;
+    const auto fingerprint = baseline_test_fingerprint(131);
+
+    if (!store.commit(
+            fingerprint,
+            std::span<const std::byte>{image.data(), image.size()},
+            {},
+            {},
+            committed).ok()) {
+        std::error_code error;
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    baseline_snapshot snapshot;
+    if (!store.open(fingerprint, snapshot).ok()) {
+        std::error_code error;
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    compiled_image_view view;
+    const auto mapped =
+        snapshot.artifact(baseline_artifact_kind::compiled);
+
+    string_id io_name;
+    const bool pass =
+        view.bind(mapped).ok() &&
+        view.type_count() == 1 &&
+        view.object_count() == 2 &&
+        view.link_count() == 1 &&
+        view.find_string("IO", io_name).ok() &&
+        view.string(io_name) == "IO";
+
+    snapshot = {};
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+
+bool test_compiled_image_tombstone_preservation() {
+    const auto directory =
+        std::filesystem::temp_directory_path() /
+        "server_engine_v310d1_compiled_tombstone";
+
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    if (error)
+        return false;
+
+    const auto model_path = directory / "model.hpp";
+    {
+        std::ofstream file(model_path);
+        file << "struct IO { int value; }; IO A;";
+        if (!file) {
+            std::filesystem::remove_all(directory, error);
+            return false;
+        }
+    }
+
+    project_configuration configuration;
+    configuration.version = 1;
+    configuration.name = "CompiledTombstone";
+    configuration.project.push_back(
+        project_item_configuration{model_path, project_item_role::type});
+
+    project_context context{std::move(configuration)};
+    project_build_orchestrator orchestrator{context, 1};
+    diagnostic_buffer diagnostics;
+    project_build_result full;
+
+    if (!orchestrator.rebuild(
+            operation_id{1201},
+            diagnostics,
+            full).ok() ||
+        diagnostics.has_errors()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    object_handle original;
+    if (!context.find_object("A", original).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    std::string normalized;
+    source_id source;
+    if (!normalize_source_path(model_path, normalized).ok() ||
+        !context.sources().find(normalized, source).ok()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    {
+        std::ofstream file(model_path, std::ios::trunc);
+        file << "struct IO { int value; };";
+        if (!file) {
+            std::filesystem::remove_all(directory, error);
+            return false;
+        }
+    }
+
+    diagnostics.clear();
+    project_build_result update;
+    const std::array dirty{source};
+    if (!orchestrator.update(
+            dirty,
+            operation_id{1202},
+            diagnostics,
+            update).ok() ||
+        diagnostics.has_errors() ||
+        context.compiled_graph().object_count() != 0 ||
+        context.compiled_graph().object_slot_count() != 1) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    std::vector<std::byte> image;
+    compiled_image_view view;
+
+    const bool pass =
+        encode_compiled_image(context, image).ok() &&
+        view.bind(image).ok() &&
+        view.verify_contents().ok() &&
+        view.object_count() == 0 &&
+        view.object_slot_count() == 1 &&
+        !view.object_at(original.value() - 1);
+
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
+bool test_compiled_image_integrity() {
+    const auto directory =
+        std::filesystem::temp_directory_path() /
+        "server_engine_v310d1_compiled_integrity";
+
+    std::unique_ptr<project_context> context;
+    if (!prepare_compiled_image_fixture(directory, context))
+        return false;
+
+    std::vector<std::byte> image;
+    if (!encode_compiled_image(*context, image).ok() || image.empty()) {
+        std::error_code error;
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    compiled_image_view before;
+    if (!before.bind(image).ok() ||
+        !before.verify_contents().ok()) {
+        std::error_code error;
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    image.back() ^= std::byte{0x01};
+
+    compiled_image_view after;
+    const bool pass =
+        after.bind(image).ok() &&
+        after.verify_contents().code ==
+            status_code::artifact_corrupt;
+
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    return pass;
+}
+
 using test_function = bool (*)();
 
 struct test_case {
@@ -3354,6 +3781,11 @@ constexpr std::array tests{
     test_case{"source_manager_image_deterministic", &test_source_manager_image_deterministic},
     test_case{"source_manager_image_mapped_baseline", &test_source_manager_image_mapped_baseline},
     test_case{"source_manager_image_integrity", &test_source_manager_image_integrity},
+    test_case{"compiled_image_roundtrip", &test_compiled_image_roundtrip},
+    test_case{"compiled_image_deterministic", &test_compiled_image_deterministic},
+    test_case{"compiled_image_mapped_baseline", &test_compiled_image_mapped_baseline},
+    test_case{"compiled_image_tombstone_preservation", &test_compiled_image_tombstone_preservation},
+    test_case{"compiled_image_integrity", &test_compiled_image_integrity},
 };
 
 } // namespace
