@@ -7,6 +7,7 @@ namespace cw::server {
 class graph;
 class generation_builder;
 class compiled_image_view;
+class build_cache_image_view;
 
 // Identifies one link slot in the single current compiled Graph. A link is
 // canonical by its target endpoint; no textual name survives Graph construction.
@@ -28,6 +29,7 @@ private:
     friend class graph;
     friend class generation_builder;
     friend class compiled_image_view;
+    friend class build_cache_image_view;
 };
 
 static_assert(sizeof(link_handle) == 4);

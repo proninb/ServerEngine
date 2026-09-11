@@ -7,6 +7,7 @@
 #include "type_ref.hpp"
 #include "../frontend/source_facts.hpp"
 #include "../identity/identity_node.hpp"
+#include "../storage/mapped_vector.hpp"
 
 #include <array>
 #include <cstddef>
@@ -17,6 +18,8 @@
 
 namespace cw::server {
 
+class build_cache_image_view;
+class compiled_image_view;
 class generation_builder;
 
 inline constexpr std::size_t graph_intrinsic_type_count =
@@ -165,14 +168,14 @@ static_assert(sizeof(graph_canonical_type_record) == 16);
 // Read-only physical semantic arrays of the current Graph. Builder-only
 // acceleration indexes and dependency caches are intentionally excluded.
 struct graph_data_view final {
-    std::span<const type_entry> types;
-    std::span<const identity_ref> type_identities;
-    std::span<const member_record> members;
-    std::span<const enum_value_record> enum_values;
-    std::span<const object_entry> objects;
-    std::span<const identity_ref> object_identities;
-    std::span<const link_record> links;
-    std::span<const graph_canonical_type_record> canonical_types;
+    mapped_vector_view<type_entry> types;
+    mapped_vector_view<identity_ref> type_identities;
+    mapped_vector_view<member_record> members;
+    mapped_vector_view<enum_value_record> enum_values;
+    mapped_vector_view<object_entry> objects;
+    mapped_vector_view<identity_ref> object_identities;
+    mapped_vector_view<link_record> links;
+    mapped_vector_view<graph_canonical_type_record> canonical_types;
     std::size_t live_types = 0;
     std::size_t live_objects = 0;
     std::size_t live_links = 0;
@@ -182,12 +185,15 @@ struct graph_data_view final {
 // Runtime/READY semantic ownership. The query indexes remain in compiled.bin.
 struct graph_build_data_view final {
     std::span<const TypeRef> intrinsic_refs;
-    std::span<const TypeRef> named_refs;
-    std::span<const graph_derived_index_slot> derived_index;
+    mapped_vector_view<TypeRef> named_refs;
+    mapped_vector_view<graph_derived_index_slot> derived_index;
     std::size_t derived_index_entries = 0;
-    std::span<const std::uint32_t> dependency_versions;
-    std::span<const std::uint32_t> reverse_dependency_heads;
-    std::span<const graph_dependency_edge> dependency_edges;
+    mapped_vector_view<std::uint32_t> dependency_versions;
+    mapped_vector_view<std::uint32_t> reverse_dependency_heads;
+    mapped_vector_view<graph_dependency_edge> dependency_edges;
+    mapped_vector_view<graph_identity_index_slot> type_identity_index;
+    mapped_vector_view<graph_object_identity_index_slot> object_identity_index;
+    mapped_vector_view<graph_link_index_slot> link_target_index;
 };
 
 // Detached complete Graph storage. Generation Builder performs all
@@ -317,6 +323,9 @@ private:
 class graph final {
 public:
     graph() noexcept = default;
+    graph(
+        const compiled_image_view& compiled,
+        const build_cache_image_view& build_cache) noexcept;
 
     graph(const graph&) = delete;
     graph& operator=(const graph&) = delete;
@@ -337,14 +346,14 @@ public:
 
     [[nodiscard]] graph_data_view data_view() const noexcept {
         return {
-            types,
-            identities,
-            member_records,
-            enum_value_records,
-            object_entries,
-            object_identities,
-            link_records,
-            canonical_types,
+            mapped_vector_view<type_entry>{types},
+            mapped_vector_view<identity_ref>{identities},
+            mapped_vector_view<member_record>{member_records},
+            mapped_vector_view<enum_value_record>{enum_value_records},
+            mapped_vector_view<object_entry>{object_entries},
+            mapped_vector_view<identity_ref>{object_identities},
+            mapped_vector_view<link_record>{link_records},
+            mapped_vector_view<graph_canonical_type_record>{canonical_types},
             live_type_count,
             live_object_count,
             live_link_count,
@@ -354,12 +363,15 @@ public:
     [[nodiscard]] graph_build_data_view build_data_view() const noexcept {
         return {
             intrinsic_refs,
-            named_refs,
-            derived_index,
+            mapped_vector_view<TypeRef>{named_refs},
+            mapped_vector_view<graph_derived_index_slot>{derived_index},
             derived_index_entries,
-            dependency_versions,
-            reverse_dependency_heads,
-            dependency_edges,
+            mapped_vector_view<std::uint32_t>{dependency_versions},
+            mapped_vector_view<std::uint32_t>{reverse_dependency_heads},
+            mapped_vector_view<graph_dependency_edge>{dependency_edges},
+            mapped_vector_view<graph_identity_index_slot>{identity_index},
+            mapped_vector_view<graph_object_identity_index_slot>{object_identity_index},
+            mapped_vector_view<graph_link_index_slot>{link_index},
         };
     }
 
@@ -374,6 +386,9 @@ public:
 
     [[nodiscard]] object_handle object_at(std::size_t index) const noexcept;
     [[nodiscard]] const object_entry* find(object_handle handle) const noexcept;
+    [[nodiscard]] bool object_type(
+        object_handle handle,
+        TypeRef& output) const noexcept;
     [[nodiscard]] identity_ref identity(object_handle handle) const noexcept;
     [[nodiscard]] object_handle find_object(identity_ref identity) const noexcept;
 
@@ -389,7 +404,14 @@ public:
         std::size_t live_members,
         std::size_t live_enum_values) const noexcept;
 
+    [[nodiscard]] bool baseline_backed() const noexcept {
+        return baseline_compiled != nullptr;
+    }
+
 private:
+    [[nodiscard]] status prepare_sparse_publication(
+        prepared_graph_update& prepared) noexcept;
+
     void publish_prepared(prepared_graph_generation& prepared) noexcept;
     void publish_prepared(prepared_graph_update& prepared) noexcept;
 
@@ -400,26 +422,29 @@ private:
     [[nodiscard]] const type_entry* find_raw(type_handle handle) const noexcept;
     [[nodiscard]] bool named_raw(TypeRef type, type_handle& output) const noexcept;
 
-    std::vector<type_entry> types;
-    std::vector<identity_ref> identities;
-    std::vector<member_record> member_records;
-    std::vector<enum_value_record> enum_value_records;
-    std::vector<object_entry> object_entries;
-    std::vector<identity_ref> object_identities;
-    std::vector<link_record> link_records;
-    std::vector<graph_canonical_type_record> canonical_types;
+    const compiled_image_view* baseline_compiled = nullptr;
+    const build_cache_image_view* baseline_build_cache = nullptr;
 
-    std::vector<graph_identity_index_slot> identity_index;
-    std::vector<graph_object_identity_index_slot> object_identity_index;
-    std::vector<graph_link_index_slot> link_index;
+    mapped_vector<type_entry> types;
+    mapped_vector<identity_ref> identities;
+    mapped_vector<member_record> member_records;
+    mapped_vector<enum_value_record> enum_value_records;
+    mapped_vector<object_entry> object_entries;
+    mapped_vector<identity_ref> object_identities;
+    mapped_vector<link_record> link_records;
+    mapped_vector<graph_canonical_type_record> canonical_types;
+
+    mapped_vector<graph_identity_index_slot> identity_index;
+    mapped_vector<graph_object_identity_index_slot> object_identity_index;
+    mapped_vector<graph_link_index_slot> link_index;
     std::array<TypeRef, graph_intrinsic_type_count> intrinsic_refs{};
-    std::vector<TypeRef> named_refs;
-    std::vector<graph_derived_index_slot> derived_index;
+    mapped_vector<TypeRef> named_refs;
+    mapped_vector<graph_derived_index_slot> derived_index;
     std::size_t derived_index_entries = 0;
 
-    std::vector<std::uint32_t> dependency_versions;
-    std::vector<std::uint32_t> reverse_dependency_heads;
-    std::vector<graph_dependency_edge> dependency_edges;
+    mapped_vector<std::uint32_t> dependency_versions;
+    mapped_vector<std::uint32_t> reverse_dependency_heads;
+    mapped_vector<graph_dependency_edge> dependency_edges;
 
     std::size_t live_type_count = 0;
     std::size_t live_object_count = 0;

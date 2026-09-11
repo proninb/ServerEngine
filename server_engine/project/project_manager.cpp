@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 namespace cw::server {
 
@@ -190,17 +191,10 @@ status project_manager::build(
         return result;
     }
 
-    compiled_image_view compiled;
+    // BUILD change detection is intentionally Source-Manager-only. Full artifact
+    // CRC/cross-image verification is a cold SAVE/test boundary; doing it here
+    // would fault the complete baseline before a sparse update can begin.
     source_manager_image_view sources;
-    build_cache_image_view cache;
-
-    result = compiled.bind(
-        snapshot.artifact(baseline_artifact_kind::compiled));
-    if (!result.ok()) {
-        abandon_construction();
-        return result;
-    }
-
     result = sources.bind(
         snapshot.artifact(baseline_artifact_kind::source_manager));
     if (!result.ok()) {
@@ -208,56 +202,72 @@ status project_manager::build(
         return result;
     }
 
-    result = cache.bind(
-        snapshot.artifact(baseline_artifact_kind::build_cache));
-    if (!result.ok()) {
-        abandon_construction();
-        return result;
-    }
-
-    result = compiled.verify_contents();
-    if (!result.ok()) {
-        abandon_construction();
-        return result;
-    }
-
-    result = sources.verify_contents();
-    if (!result.ok()) {
-        abandon_construction();
-        return result;
-    }
-
-    result = cache.verify_contents();
-    if (!result.ok()) {
-        abandon_construction();
-        return result;
-    }
-
-    result = cache.verify_against(compiled, sources);
-    if (!result.ok()) {
-        abandon_construction();
-        return result;
-    }
-
-    bool changed = false;
-    result = project_baseline_sources_changed(
+    std::vector<source_id> dirty_sources;
+    result = project_baseline_dirty_sources(
         sources,
-        changed);
+        dirty_sources);
     if (!result.ok()) {
         abandon_construction();
         return result;
     }
 
-    if (changed) {
-        abandon_construction();
-        return {status_code::rebuild_required};
+    if (dirty_sources.empty()) {
+        return activate_baseline_reserved(
+            std::move(configuration),
+            configuration_path,
+            std::move(snapshot),
+            nullptr);
     }
 
-    return activate_baseline_reserved(
-        std::move(configuration),
-        configuration_path,
-        std::move(snapshot),
-        nullptr);
+    try {
+        auto candidate = std::unique_ptr<project_context>{
+            new project_context(
+                std::move(configuration),
+                configuration_path,
+                project_context::baseline_storage_tag{})};
+
+        result = candidate->activate_build_baseline(
+            std::move(snapshot));
+        if (!result.ok()) {
+            abandon_construction();
+            return result;
+        }
+
+        project_build_orchestrator builder{
+            *candidate,
+            worker_limit};
+
+        result = builder.update(
+            dirty_sources,
+            operation,
+            diagnostics,
+            output);
+        if (!result.ok()) {
+            abandon_construction();
+            return result;
+        }
+
+        project = std::move(candidate);
+        output.rebuilt = false;
+
+        activity.open();
+        lifecycle.store(
+            project_lifecycle_state::ready,
+            std::memory_order_release);
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        abandon_construction();
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        abandon_construction();
+        return {status_code::not_available};
+    }
+    catch (const std::system_error&) {
+        abandon_construction();
+        return {status_code::not_available};
+    }
 }
 
 status project_manager::rebuild(

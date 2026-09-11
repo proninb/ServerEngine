@@ -12,6 +12,8 @@
 
 namespace cw::server {
 
+class compiled_image_view;
+
 struct string_table_statistics final {
     std::size_t strings = 0;
     std::size_t occupied_buckets = 0;
@@ -20,12 +22,12 @@ struct string_table_statistics final {
     std::size_t bytes_reserved = 0;
 };
 
-// Owns canonical Project-lifetime identifier/text atoms. Bytes are interned once;
-// all semantic layers thereafter carry 32-bit string_id values. The table is safe
-// for concurrent Parser identity resolution and performs no semantic lookup.
+// Owns Project-lifetime text atoms created after the active baseline. Persisted
+// IDs stay mmap-backed and immutable; only post-baseline atoms enter local pages.
 class string_table final {
 public:
     string_table() noexcept;
+    explicit string_table(const compiled_image_view& baseline_value) noexcept;
     ~string_table() noexcept;
 
     string_table(const string_table&) = delete;
@@ -36,7 +38,7 @@ public:
     [[nodiscard]] std::string_view get(string_id id) const noexcept;
 
     [[nodiscard]] std::size_t size() const noexcept {
-        return live_count.load(std::memory_order_relaxed);
+        return baseline_live_count + live_count.load(std::memory_order_relaxed);
     }
 
     [[nodiscard]] std::size_t slot_count() const noexcept {
@@ -45,7 +47,6 @@ public:
     }
 
     [[nodiscard]] string_id at_slot(std::size_t index) const noexcept;
-
     [[nodiscard]] string_table_statistics statistics() const noexcept;
 
 private:
@@ -73,10 +74,16 @@ private:
         std::atomic<record*> slots[page_size]{};
     };
 
+    void initialize_indexes() noexcept;
+
     [[nodiscard]] static std::uint64_t hash_text(std::string_view value) noexcept;
     [[nodiscard]] record* find_record(std::string_view value, std::uint64_t hash) const noexcept;
     [[nodiscard]] record_page* ensure_page(std::uint32_t id) noexcept;
     [[nodiscard]] record_page* page(std::uint32_t id) const noexcept;
+
+    const compiled_image_view* baseline = nullptr;
+    std::size_t baseline_slot_count = 0;
+    std::size_t baseline_live_count = 0;
 
     byte_arena storage;
     std::unique_ptr<std::atomic<record*>[]> buckets;

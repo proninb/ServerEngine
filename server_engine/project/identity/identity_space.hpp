@@ -11,6 +11,8 @@
 
 namespace cw::server {
 
+class compiled_image_view;
+
 struct identity_index_statistics {
     std::size_t entry_count = 0;
     std::size_t occupied_buckets = 0;
@@ -49,6 +51,7 @@ private:
 class identity_space final {
 public:
     identity_space() noexcept;
+    explicit identity_space(const compiled_image_view& baseline_value) noexcept;
     ~identity_space() noexcept;
 
     identity_space(const identity_space&) = delete;
@@ -78,7 +81,7 @@ public:
     [[nodiscard]] string_id name(identity_ref identity) const noexcept;
 
     [[nodiscard]] std::size_t size() const noexcept {
-        return identity_count.load(std::memory_order_relaxed);
+        return baseline_identity_count + identity_count.load(std::memory_order_relaxed);
     }
 
     // Includes rare unpublished holes left by losing concurrent candidates.
@@ -185,6 +188,10 @@ private:
         record*& output) noexcept;
 
     void discard_candidate(record& candidate) noexcept;
+
+    const compiled_image_view* baseline = nullptr;
+    std::size_t baseline_slot_count = 0;
+    std::size_t baseline_identity_count = 0;
 
     record root_record{};
     std::unique_ptr<std::atomic<std::uint32_t>[]> buckets;

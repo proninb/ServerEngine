@@ -3838,10 +3838,13 @@ struct build_cache_fixture final {
 }
 
 bool test_build_cache_image_roundtrip() {
-    static_assert(build_cache_image_directory_count == 20);
+    static_assert(build_cache_image_directory_count == 23);
     static_assert(
         static_cast<std::uint32_t>(
             build_cache_image_section::graph_dependency_edges) == 20);
+    static_assert(
+        static_cast<std::uint32_t>(
+            build_cache_image_section::graph_link_target_index) == 23);
 
     build_cache_fixture fixture;
     if (!prepare_build_cache_fixture(fixture))
@@ -4592,21 +4595,57 @@ bool test_project_build_no_change_reuses_baseline() {
     return pass;
 }
 
-bool test_project_build_changed_baseline_fail_closed() {
+bool test_project_build_changed_baseline_sparse_save_load() {
     persistent_lifecycle_fixture fixture;
     if (!prepare_persistent_lifecycle_fixture(
-            "server_engine_v310d3a_build_changed",
+            "server_engine_v310d3b_sparse_save_load",
             fixture)) {
         return false;
     }
 
-    baseline_commit_result committed;
+    baseline_commit_result baseline_commit;
     if (!create_saved_persistent_project(
             fixture,
-            committed)) {
+            baseline_commit)) {
         std::error_code error;
         std::filesystem::remove_all(fixture.directory, error);
         return false;
+    }
+
+    object_handle initial_a;
+    object_handle initial_b;
+    link_handle initial_link;
+
+    {
+        project_manager manager;
+        diagnostic_buffer diagnostics;
+        project_load_result loaded;
+        if (!manager.load(
+                fixture.configuration_path,
+                operation_id{1410},
+                diagnostics,
+                loaded).ok() ||
+            diagnostics.has_errors() ||
+            loaded.transaction != baseline_commit.transaction) {
+            std::error_code error;
+            std::filesystem::remove_all(fixture.directory, error);
+            return false;
+        }
+
+        project_access access;
+        const bool queried =
+            manager.acquire(access).ok() &&
+            access &&
+            access->find_object("A", initial_a).ok() &&
+            access->find_object("B", initial_b).ok() &&
+            access->find_link("B.IN", initial_link).ok() &&
+            initial_a && initial_b && initial_link;
+        access.reset();
+        if (!queried || !manager.unload().ok()) {
+            std::error_code error;
+            std::filesystem::remove_all(fixture.directory, error);
+            return false;
+        }
     }
 
     {
@@ -4621,24 +4660,258 @@ bool test_project_build_changed_baseline_fail_closed() {
     }
 
     project_manager manager;
+    diagnostic_buffer build_diagnostics;
+    project_build_result build;
+    const auto build_result = manager.build(
+        fixture.configuration_path,
+        operation_id{1411},
+        build_diagnostics,
+        build,
+        2);
+
+    project_access sparse;
+    object_handle sparse_a;
+    object_handle sparse_b;
+    link_handle sparse_link;
+    object_endpoint aux;
+
+    if (!build_result.ok() ||
+        build_diagnostics.has_errors() ||
+        !build.changed ||
+        build.rebuilt ||
+        manager.state() != project_lifecycle_state::ready ||
+        !manager.acquire(sparse).ok() ||
+        !sparse ||
+        !sparse->baseline_backed() ||
+        !sparse->build_cache_mapped() ||
+        sparse->baseline_transaction() != baseline_commit.transaction ||
+        !sparse->find_object("A", sparse_a).ok() ||
+        !sparse->find_object("B", sparse_b).ok() ||
+        !sparse->find_link("B.IN", sparse_link).ok() ||
+        !sparse->find_endpoint("A.AUX", aux).ok() ||
+        sparse_a != initial_a ||
+        sparse_b != initial_b ||
+        sparse_link != initial_link) {
+        sparse.reset();
+        if (manager.ready())
+            (void)manager.unload();
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+    sparse.reset();
+
+    baseline_commit_result sparse_commit;
+    if (!manager.save(sparse_commit).ok() ||
+        sparse_commit.transaction.empty() ||
+        sparse_commit.transaction == baseline_commit.transaction) {
+        if (manager.ready())
+            (void)manager.unload();
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    project_access after_save;
+    if (!manager.acquire(after_save).ok() ||
+        !after_save ||
+        after_save->baseline_transaction() != baseline_commit.transaction ||
+        !after_save->find_endpoint("A.AUX", aux).ok()) {
+        after_save.reset();
+        if (manager.ready())
+            (void)manager.unload();
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+    after_save.reset();
+
+    if (!manager.unload().ok()) {
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    diagnostic_buffer load_diagnostics;
+    project_load_result loaded;
+    const auto load_result = manager.load(
+        fixture.configuration_path,
+        operation_id{1412},
+        load_diagnostics,
+        loaded);
+
+    project_access reloaded;
+    object_handle reloaded_a;
+    object_handle reloaded_b;
+    link_handle reloaded_link;
+
+    const bool pass =
+        load_result.ok() &&
+        !load_diagnostics.has_errors() &&
+        loaded.transaction == sparse_commit.transaction &&
+        !loaded.build_cache_mapped &&
+        manager.acquire(reloaded).ok() &&
+        reloaded &&
+        reloaded->baseline_backed() &&
+        !reloaded->build_cache_mapped() &&
+        reloaded->find_object("A", reloaded_a).ok() &&
+        reloaded->find_object("B", reloaded_b).ok() &&
+        reloaded->find_link("B.IN", reloaded_link).ok() &&
+        reloaded->find_endpoint("A.AUX", aux).ok() &&
+        reloaded_a == initial_a &&
+        reloaded_b == initial_b &&
+        reloaded_link == initial_link;
+
+    reloaded.reset();
+    if (manager.ready())
+        (void)manager.unload();
+
+    std::error_code error;
+    std::filesystem::remove_all(fixture.directory, error);
+    return pass;
+}
+
+bool test_project_build_link_tombstone_handle_restore() {
+    persistent_lifecycle_fixture fixture;
+    if (!prepare_persistent_lifecycle_fixture(
+            "server_engine_v310d3b_link_tombstone",
+            fixture)) {
+        return false;
+    }
+
+    baseline_commit_result initial_commit;
+    if (!create_saved_persistent_project(
+            fixture,
+            initial_commit)) {
+        std::error_code error;
+        std::filesystem::remove_all(fixture.directory, error);
+        return false;
+    }
+
+    link_handle original_link;
+    {
+        project_manager manager;
+        diagnostic_buffer diagnostics;
+        project_load_result loaded;
+        if (!manager.load(
+                fixture.configuration_path,
+                operation_id{1420},
+                diagnostics,
+                loaded).ok()) {
+            std::error_code error;
+            std::filesystem::remove_all(fixture.directory, error);
+            return false;
+        }
+
+        project_access access;
+        const bool queried =
+            manager.acquire(access).ok() &&
+            access &&
+            access->find_link("B.IN", original_link).ok() &&
+            original_link;
+        access.reset();
+        if (!queried || !manager.unload().ok()) {
+            std::error_code error;
+            std::filesystem::remove_all(fixture.directory, error);
+            return false;
+        }
+    }
+
+    {
+        std::ofstream file(
+            fixture.model_path,
+            std::ios::trunc);
+        file <<
+            "struct IO { int IN; int OUT; }; "
+            "IO A; IO B;";
+        if (!file)
+            return false;
+    }
+
+    baseline_commit_result tombstone_commit;
+    {
+        project_manager manager;
+        diagnostic_buffer diagnostics;
+        project_build_result build;
+        if (!manager.build(
+                fixture.configuration_path,
+                operation_id{1421},
+                diagnostics,
+                build,
+                1).ok() ||
+            diagnostics.has_errors() ||
+            !build.changed ||
+            build.rebuilt) {
+            std::error_code error;
+            std::filesystem::remove_all(fixture.directory, error);
+            return false;
+        }
+
+        project_access access;
+        link_handle removed;
+        if (!manager.acquire(access).ok() ||
+            !access ||
+            access->compiled_graph().link_count() != 0 ||
+            access->find_link("B.IN", removed).code != status_code::not_found ||
+            removed) {
+            access.reset();
+            if (manager.ready())
+                (void)manager.unload();
+            std::error_code error;
+            std::filesystem::remove_all(fixture.directory, error);
+            return false;
+        }
+        access.reset();
+
+        if (!manager.save(tombstone_commit).ok() ||
+            tombstone_commit.transaction.empty() ||
+            tombstone_commit.transaction == initial_commit.transaction ||
+            !manager.unload().ok()) {
+            std::error_code error;
+            std::filesystem::remove_all(fixture.directory, error);
+            return false;
+        }
+    }
+
+    {
+        std::ofstream file(
+            fixture.model_path,
+            std::ios::trunc);
+        file <<
+            "struct IO { int IN; int OUT; }; "
+            "IO A; IO B; B.IN = A.OUT;";
+        if (!file)
+            return false;
+    }
+
+    project_manager manager;
     diagnostic_buffer diagnostics;
     project_build_result build;
-
     const auto result = manager.build(
         fixture.configuration_path,
-        operation_id{1406},
+        operation_id{1422},
         diagnostics,
         build,
         1);
 
     project_access access;
+    link_handle restored_link;
     const bool pass =
-        result.code == status_code::rebuild_required &&
-        manager.state() == project_lifecycle_state::unloaded &&
+        result.ok() &&
+        !diagnostics.has_errors() &&
+        build.changed &&
         !build.rebuilt &&
-        manager.acquire(access).code ==
-            status_code::not_found &&
-        !access;
+        manager.acquire(access).ok() &&
+        access &&
+        access->baseline_backed() &&
+        access->build_cache_mapped() &&
+        access->baseline_transaction() == tombstone_commit.transaction &&
+        access->find_link("B.IN", restored_link).ok() &&
+        restored_link == original_link;
+
+    access.reset();
+    if (manager.ready())
+        (void)manager.unload();
 
     std::error_code error;
     std::filesystem::remove_all(fixture.directory, error);
@@ -4793,7 +5066,8 @@ constexpr std::array tests{
     test_case{"project_load_fingerprint_guard", &test_project_load_fingerprint_guard},
     test_case{"project_save_after_load_keeps_active_baseline", &test_project_save_after_load_keeps_active_baseline},
     test_case{"project_build_no_change_reuses_baseline", &test_project_build_no_change_reuses_baseline},
-    test_case{"project_build_changed_baseline_fail_closed", &test_project_build_changed_baseline_fail_closed},
+    test_case{"project_build_changed_baseline_sparse_save_load", &test_project_build_changed_baseline_sparse_save_load},
+    test_case{"project_build_link_tombstone_handle_restore", &test_project_build_link_tombstone_handle_restore},
     test_case{"project_build_without_baseline_full_no_save", &test_project_build_without_baseline_full_no_save},
 };
 

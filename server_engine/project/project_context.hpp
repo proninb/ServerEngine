@@ -2,6 +2,7 @@
 
 #include "compiled_project_state.hpp"
 #include "persistence/baseline_store.hpp"
+#include "persistence/build_cache_image.hpp"
 #include "persistence/compiled_image.hpp"
 #include "persistence/source_manager_image.hpp"
 #include "project_configuration.hpp"
@@ -77,8 +78,9 @@ private:
     friend class project_context;
 };
 
-// Internal owner of one Project configuration and either one mutable construction
-// state or one mmap-native READY baseline. These storage modes never coexist.
+// Internal owner of one Project configuration. LOAD uses a pure mmap READY view;
+// changed BUILD owns the same immutable mappings as a baseline plus one sparse
+// construction overlay that is fully prepared before READY publication.
 class project_context final {
 public:
     explicit project_context(
@@ -373,12 +375,16 @@ private:
     [[nodiscard]] status activate_ready_baseline(
         baseline_snapshot&& snapshot) noexcept;
 
+    [[nodiscard]] status activate_build_baseline(
+        baseline_snapshot&& snapshot) noexcept;
+
     project_configuration project_configuration_value;
     std::filesystem::path project_configuration_path;
     std::unique_ptr<compiled_project_state> compiled;
     std::unique_ptr<baseline_snapshot> baseline;
     compiled_image_view mapped_compiled;
     source_manager_image_view mapped_sources;
+    build_cache_image_view mapped_build_cache;
 
     friend class project_build_orchestrator;
     friend class project_manager;

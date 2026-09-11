@@ -1,5 +1,8 @@
 #include "graph.hpp"
 
+#include "../persistence/build_cache_image.hpp"
+#include "../persistence/compiled_image.hpp"
+
 #include <cstdint>
 #include <type_traits>
 #include <limits>
@@ -34,9 +37,10 @@ namespace {
         (static_cast<std::uint64_t>(child) << 16) ^ mix64(payload));
 }
 
+template<class SlotContainer, class IdentityContainer>
 void insert_identity_index(
-    std::vector<graph_identity_index_slot>& slots,
-    std::span<const identity_ref> identities,
+    SlotContainer& slots,
+    const IdentityContainer& identities,
     identity_ref identity,
     std::uint32_t handle) noexcept {
 
@@ -59,9 +63,10 @@ void insert_identity_index(
     }
 }
 
+template<class SlotContainer, class IdentityContainer>
 void insert_object_identity_index(
-    std::vector<graph_object_identity_index_slot>& slots,
-    std::span<const identity_ref> identities,
+    SlotContainer& slots,
+    const IdentityContainer& identities,
     identity_ref identity,
     std::uint32_t handle) noexcept {
 
@@ -90,9 +95,10 @@ void insert_object_identity_index(
         static_cast<std::uint64_t>(endpoint.member.value()));
 }
 
+template<class SlotContainer, class LinkContainer>
 void insert_link_index(
-    std::vector<graph_link_index_slot>& slots,
-    std::span<const link_record> links,
+    SlotContainer& slots,
+    const LinkContainer& links,
     object_endpoint target,
     std::uint32_t handle) noexcept {
 
@@ -115,9 +121,10 @@ void insert_link_index(
     }
 }
 
+template<class SlotContainer, class CanonicalContainer>
 void insert_derived_index(
-    std::vector<graph_derived_index_slot>& slots,
-    const std::vector<graph_canonical_type_record>& canonical_types,
+    SlotContainer& slots,
+    const CanonicalContainer& canonical_types,
     std::uint32_t type_ref) noexcept {
 
     const auto& record = canonical_types[type_ref];
@@ -138,17 +145,188 @@ void insert_derived_index(
 }
 
 template<class T>
-void append_prepared(std::vector<T>& target, const std::vector<T>& source) noexcept {
+void append_prepared(mapped_vector<T>& target, const std::vector<T>& source) noexcept {
     for (const auto& value : source)
         target.push_back(value);
 }
 
 } // namespace
 
+graph::graph(
+    const compiled_image_view& compiled,
+    const build_cache_image_view& build_cache) noexcept
+    : baseline_compiled(&compiled),
+      baseline_build_cache(&build_cache),
+      derived_index_entries(build_cache.derived_index_entries()),
+      live_type_count(compiled.type_count()),
+      live_object_count(compiled.object_count()),
+      live_link_count(compiled.link_count()) {
+
+    types.bind_baseline(
+        &compiled, compiled.type_slot_count(),
+        [](const void* context, std::size_t index, type_entry& output) noexcept {
+            if (index >= (std::numeric_limits<std::uint32_t>::max)())
+                return status{status_code::artifact_corrupt};
+            compiled_image_type_record value;
+            const auto result = static_cast<const compiled_image_view*>(context)->type_raw(
+                type_handle{static_cast<std::uint32_t>(index + 1)}, value);
+            if (!result.ok())
+                return result;
+            output.definition = value.definition;
+            output.kind = value.kind;
+            output.record_kind = value.record_kind;
+            output.enum_underlying = value.enum_underlying;
+            output.flags = value.flags;
+            return status{};
+        });
+    identities.bind_baseline(
+        &compiled, compiled.type_slot_count(),
+        [](const void* context, std::size_t index, identity_ref& output) noexcept {
+            output = static_cast<const compiled_image_view*>(context)->type_identity_at_slot(index);
+            return output ? status{} : status{status_code::artifact_corrupt};
+        });
+    member_records.bind_baseline(
+        &compiled, compiled.member_slot_count(),
+        [](const void* context, std::size_t index, member_record& output) noexcept {
+            compiled_image_member_record value;
+            const auto result = static_cast<const compiled_image_view*>(context)->member_at_slot(index, value);
+            if (!result.ok())
+                return result;
+            output = member_record{value.name, value.type, value.access};
+            return status{};
+        });
+    enum_value_records.bind_baseline(
+        &compiled, compiled.enum_value_slot_count(),
+        [](const void* context, std::size_t index, enum_value_record& output) noexcept {
+            compiled_image_enum_value_record value;
+            const auto result = static_cast<const compiled_image_view*>(context)->enum_value_at_slot(index, value);
+            if (!result.ok())
+                return result;
+            output = enum_value_record{value.bits, value.name, value.intrinsic};
+            return status{};
+        });
+    object_entries.bind_baseline(
+        &compiled, compiled.object_slot_count(),
+        [](const void* context, std::size_t index, object_entry& output) noexcept {
+            if (index >= (std::numeric_limits<std::uint32_t>::max)())
+                return status{status_code::artifact_corrupt};
+            compiled_image_object_record value;
+            const auto result = static_cast<const compiled_image_view*>(context)->object_raw(
+                object_handle{static_cast<std::uint32_t>(index + 1)}, value);
+            if (!result.ok())
+                return result;
+            output = object_entry{value.type, value.flags};
+            return status{};
+        });
+    object_identities.bind_baseline(
+        &compiled, compiled.object_slot_count(),
+        [](const void* context, std::size_t index, identity_ref& output) noexcept {
+            output = static_cast<const compiled_image_view*>(context)->object_identity_at_slot(index);
+            return output ? status{} : status{status_code::artifact_corrupt};
+        });
+    link_records.bind_baseline(
+        &compiled, compiled.link_slot_count(),
+        [](const void* context, std::size_t index, link_record& output) noexcept {
+            if (index >= (std::numeric_limits<std::uint32_t>::max)())
+                return status{status_code::artifact_corrupt};
+            compiled_image_link_record value;
+            const auto result = static_cast<const compiled_image_view*>(context)->link_raw(
+                link_handle{static_cast<std::uint32_t>(index + 1)}, value);
+            if (!result.ok())
+                return result;
+            output = link_record{value.source, value.target};
+            return status{};
+        });
+    canonical_types.bind_baseline(
+        &compiled, compiled.canonical_type_slot_count(),
+        [](const void* context, std::size_t index, graph_canonical_type_record& output) noexcept {
+            compiled_image_canonical_type_record value;
+            const auto result = static_cast<const compiled_image_view*>(context)->canonical_type_at_slot(index, value);
+            if (!result.ok())
+                return result;
+            output.payload = value.payload;
+            output.child_or_handle = value.child_or_handle;
+            output.kind = value.kind;
+            output.detail = value.detail;
+            output.reserved = 0;
+            return status{};
+        });
+
+    identity_index.bind_baseline(
+        &build_cache, build_cache.type_identity_index_slot_count(),
+        [](const void* context, std::size_t index, graph_identity_index_slot& output) noexcept {
+            return static_cast<const build_cache_image_view*>(context)->type_identity_index_slot(index, output);
+        });
+    object_identity_index.bind_baseline(
+        &build_cache, build_cache.object_identity_index_slot_count(),
+        [](const void* context, std::size_t index, graph_object_identity_index_slot& output) noexcept {
+            return static_cast<const build_cache_image_view*>(context)->object_identity_index_slot(index, output);
+        });
+    link_index.bind_baseline(
+        &build_cache, build_cache.link_target_index_slot_count(),
+        [](const void* context, std::size_t index, graph_link_index_slot& output) noexcept {
+            return static_cast<const build_cache_image_view*>(context)->link_target_index_slot(index, output);
+        });
+
+    named_refs.bind_baseline(
+        &build_cache, build_cache.named_ref_count(),
+        [](const void* context, std::size_t index, TypeRef& output) noexcept {
+            if (index == 0) {
+                output = {};
+                return status{};
+            }
+            if (index > (std::numeric_limits<std::uint32_t>::max)())
+                return status{status_code::artifact_corrupt};
+            output = static_cast<const build_cache_image_view*>(context)->named_ref(
+                type_handle{static_cast<std::uint32_t>(index)});
+            return status{};
+        });
+    derived_index.bind_baseline(
+        &build_cache, build_cache.derived_index_slot_count(),
+        [](const void* context, std::size_t index, graph_derived_index_slot& output) noexcept {
+            build_cache_derived_index_slot value;
+            const auto result = static_cast<const build_cache_image_view*>(context)->derived_index_slot(index, value);
+            if (!result.ok())
+                return result;
+            output = graph_derived_index_slot{value.fingerprint, value.type.value()};
+            return status{};
+        });
+    dependency_versions.bind_baseline(
+        &build_cache, build_cache.dependency_version_count(),
+        [](const void* context, std::size_t index, std::uint32_t& output) noexcept {
+            if (index >= (std::numeric_limits<std::uint32_t>::max)())
+                return status{status_code::artifact_corrupt};
+            output = static_cast<const build_cache_image_view*>(context)->dependency_version(
+                type_handle{static_cast<std::uint32_t>(index + 1)});
+            return status{};
+        });
+    reverse_dependency_heads.bind_baseline(
+        &build_cache, build_cache.dependency_version_count(),
+        [](const void* context, std::size_t index, std::uint32_t& output) noexcept {
+            if (index >= (std::numeric_limits<std::uint32_t>::max)())
+                return status{status_code::artifact_corrupt};
+            output = static_cast<const build_cache_image_view*>(context)->reverse_dependency_head(
+                type_handle{static_cast<std::uint32_t>(index + 1)});
+            return status{};
+        });
+    dependency_edges.bind_baseline(
+        &build_cache, build_cache.dependency_edge_count(),
+        [](const void* context, std::size_t index, graph_dependency_edge& output) noexcept {
+            return static_cast<const build_cache_image_view*>(context)->dependency_edge(index, output);
+        });
+
+    for (std::size_t index = 0; index < intrinsic_refs.size(); ++index)
+        intrinsic_refs[index] = build_cache.intrinsic_ref(static_cast<intrinsic_type>(index));
+}
+
 type_handle graph::type_at(std::size_t index) const noexcept {
-    if (index >= types.size() || index >= 0xffffffffu || !types[index].live())
+    if (index >= types.size() || index >= 0xffffffffu)
         return {};
-    return type_handle{static_cast<std::uint32_t>(index + 1)};
+
+    type_entry entry;
+    return types.read(index, entry).ok() && entry.live()
+        ? type_handle{static_cast<std::uint32_t>(index + 1)}
+        : type_handle{};
 }
 
 const type_entry* graph::find_raw(type_handle handle) const noexcept {
@@ -164,29 +342,47 @@ const type_entry* graph::find(type_handle handle) const noexcept {
 
 identity_ref graph::identity_raw(type_handle handle) const noexcept {
     if (!handle || handle.value() > identities.size())
-        return nullptr;
-    return identities[handle.value() - 1];
+        return {};
+
+    identity_ref output;
+    return identities.read(handle.value() - 1, output).ok()
+        ? output
+        : identity_ref{};
 }
 
 identity_ref graph::identity(type_handle handle) const noexcept {
-    return find(handle) == nullptr ? nullptr : identity_raw(handle);
+    if (!handle || handle.value() > types.size())
+        return {};
+
+    type_entry entry;
+    if (!types.read(handle.value() - 1, entry).ok() || !entry.live())
+        return {};
+    return identity_raw(handle);
 }
 
 type_handle graph::find_identity(identity_ref identity_value) const noexcept {
-    if (identity_value == nullptr || identity_index.empty())
+    if (!identity_value || identity_index.empty())
         return {};
 
     const auto hash = identity_hash(identity_value);
     const auto fingerprint = fold32(hash);
     const auto mask = identity_index.size() - 1;
     auto position = static_cast<std::size_t>(hash) & mask;
+
     for (std::size_t probe = 0; probe < identity_index.size(); ++probe) {
-        const auto& slot = identity_index[position];
+        graph_identity_index_slot slot;
+        if (!identity_index.read(position, slot).ok())
+            return {};
         if (slot.handle == 0)
             return {};
-        if (slot.fingerprint == fingerprint && slot.handle <= identities.size() &&
-            identities[slot.handle - 1] == identity_value) {
-            return type_handle{slot.handle};
+
+        if (slot.fingerprint == fingerprint &&
+            slot.handle <= identities.size()) {
+            identity_ref candidate;
+            if (identities.read(slot.handle - 1, candidate).ok() &&
+                candidate == identity_value) {
+                return type_handle{slot.handle};
+            }
         }
         position = (position + 1) & mask;
     }
@@ -195,7 +391,13 @@ type_handle graph::find_identity(identity_ref identity_value) const noexcept {
 
 type_handle graph::find_type(identity_ref identity_value) const noexcept {
     const auto handle = find_identity(identity_value);
-    return find(handle) == nullptr ? type_handle{} : handle;
+    if (!handle)
+        return {};
+
+    type_entry entry;
+    return types.read(handle.value() - 1, entry).ok() && entry.live()
+        ? handle
+        : type_handle{};
 }
 
 std::span<const member_record> graph::members(type_handle handle) const noexcept {
@@ -207,7 +409,7 @@ std::span<const member_record> graph::members(type_handle handle) const noexcept
     const auto count = static_cast<std::size_t>(entry->definition.count);
     if (begin > member_records.size() || count > member_records.size() - begin || count == 0)
         return {};
-    return {member_records.data() + begin, count};
+    return member_records.span(begin, count);
 }
 
 std::span<const enum_value_record> graph::enum_values(type_handle handle) const noexcept {
@@ -219,24 +421,47 @@ std::span<const enum_value_record> graph::enum_values(type_handle handle) const 
     const auto count = static_cast<std::size_t>(entry->definition.count);
     if (begin > enum_value_records.size() || count > enum_value_records.size() - begin || count == 0)
         return {};
-    return {enum_value_records.data() + begin, count};
+    return enum_value_records.span(begin, count);
 }
 
 member_index graph::find_member(type_handle handle, string_id name) const noexcept {
-    if (!name)
+    if (!handle || !name || handle.value() > types.size())
         return {};
-    const auto values = members(handle);
-    for (std::size_t index = 0; index < values.size(); ++index) {
-        if (values[index].name == name && index <= (std::numeric_limits<std::uint32_t>::max)())
-            return member_index::from_zero_based(static_cast<std::uint32_t>(index));
+
+    type_entry entry;
+    if (!types.read(handle.value() - 1, entry).ok() ||
+        !entry.live() ||
+        entry.kind != graph_type_kind::record ||
+        !entry.definition) {
+        return {};
+    }
+
+    const auto begin = static_cast<std::size_t>(entry.definition.begin - 1);
+    const auto count = static_cast<std::size_t>(entry.definition.count);
+    if (begin > member_records.size() || count > member_records.size() - begin)
+        return {};
+
+    for (std::size_t index = 0; index < count; ++index) {
+        member_record value;
+        if (!member_records.read(begin + index, value).ok())
+            return {};
+        if (value.name == name &&
+            index <= (std::numeric_limits<std::uint32_t>::max)()) {
+            return member_index::from_zero_based(
+                static_cast<std::uint32_t>(index));
+        }
     }
     return {};
 }
 
 object_handle graph::object_at(std::size_t index) const noexcept {
-    if (index >= object_entries.size() || index >= 0xffffffffu || !object_entries[index].live())
+    if (index >= object_entries.size() || index >= 0xffffffffu)
         return {};
-    return object_handle{static_cast<std::uint32_t>(index + 1)};
+
+    object_entry entry;
+    return object_entries.read(index, entry).ok() && entry.live()
+        ? object_handle{static_cast<std::uint32_t>(index + 1)}
+        : object_handle{};
 }
 
 const object_entry* graph::find(object_handle handle) const noexcept {
@@ -246,26 +471,61 @@ const object_entry* graph::find(object_handle handle) const noexcept {
     return entry.live() ? &entry : nullptr;
 }
 
+bool graph::object_type(
+    object_handle handle,
+    TypeRef& output) const noexcept {
+
+    output = {};
+    if (!handle || handle.value() > object_entries.size())
+        return false;
+
+    object_entry entry;
+    if (!object_entries.read(handle.value() - 1, entry).ok() || !entry.live())
+        return false;
+
+    output = entry.type;
+    return static_cast<bool>(output);
+}
+
 identity_ref graph::identity(object_handle handle) const noexcept {
-    return find(handle) == nullptr || handle.value() > object_identities.size()
-        ? nullptr
-        : object_identities[handle.value() - 1];
+    if (!handle || handle.value() > object_entries.size() ||
+        handle.value() > object_identities.size()) {
+        return {};
+    }
+
+    object_entry entry;
+    if (!object_entries.read(handle.value() - 1, entry).ok() || !entry.live())
+        return {};
+
+    identity_ref output;
+    return object_identities.read(handle.value() - 1, output).ok()
+        ? output
+        : identity_ref{};
 }
 
 object_handle graph::find_object_identity(identity_ref identity_value) const noexcept {
-    if (identity_value == nullptr || object_identity_index.empty())
+    if (!identity_value || object_identity_index.empty())
         return {};
+
     const auto hash = identity_hash(identity_value);
     const auto fingerprint = fold32(hash);
     const auto mask = object_identity_index.size() - 1;
     auto position = static_cast<std::size_t>(hash) & mask;
+
     for (std::size_t probe = 0; probe < object_identity_index.size(); ++probe) {
-        const auto& slot = object_identity_index[position];
+        graph_object_identity_index_slot slot;
+        if (!object_identity_index.read(position, slot).ok())
+            return {};
         if (slot.handle == 0)
             return {};
-        if (slot.fingerprint == fingerprint && slot.handle <= object_identities.size() &&
-            object_identities[slot.handle - 1] == identity_value) {
-            return object_handle{slot.handle};
+
+        if (slot.fingerprint == fingerprint &&
+            slot.handle <= object_identities.size()) {
+            identity_ref candidate;
+            if (object_identities.read(slot.handle - 1, candidate).ok() &&
+                candidate == identity_value) {
+                return object_handle{slot.handle};
+            }
         }
         position = (position + 1) & mask;
     }
@@ -274,7 +534,13 @@ object_handle graph::find_object_identity(identity_ref identity_value) const noe
 
 object_handle graph::find_object(identity_ref identity_value) const noexcept {
     const auto handle = find_object_identity(identity_value);
-    return find(handle) == nullptr ? object_handle{} : handle;
+    if (!handle)
+        return {};
+
+    object_entry entry;
+    return object_entries.read(handle.value() - 1, entry).ok() && entry.live()
+        ? handle
+        : object_handle{};
 }
 
 const link_record* graph::find(link_handle handle) const noexcept {
@@ -287,17 +553,25 @@ const link_record* graph::find(link_handle handle) const noexcept {
 link_handle graph::find_link_raw(object_endpoint target) const noexcept {
     if (!target.object || !target.member || link_index.empty())
         return {};
+
     const auto hash = endpoint_hash(target);
     const auto fingerprint = fold32(hash);
     const auto mask = link_index.size() - 1;
     auto position = static_cast<std::size_t>(hash) & mask;
+
     for (std::size_t probe = 0; probe < link_index.size(); ++probe) {
-        const auto& slot = link_index[position];
+        graph_link_index_slot slot;
+        if (!link_index.read(position, slot).ok())
+            return {};
         if (slot.handle == 0)
             return {};
-        if (slot.fingerprint == fingerprint && slot.handle <= link_records.size() &&
-            link_records[slot.handle - 1].target == target) {
-            return link_handle{slot.handle};
+
+        if (slot.fingerprint == fingerprint && slot.handle <= link_records.size()) {
+            link_record value;
+            if (link_records.read(slot.handle - 1, value).ok() &&
+                value.target == target) {
+                return link_handle{slot.handle};
+            }
         }
         position = (position + 1) & mask;
     }
@@ -306,13 +580,23 @@ link_handle graph::find_link_raw(object_endpoint target) const noexcept {
 
 link_handle graph::find_link(object_endpoint target) const noexcept {
     const auto handle = find_link_raw(target);
-    return find(handle) == nullptr ? link_handle{} : handle;
+    if (!handle)
+        return {};
+
+    link_record value;
+    return link_records.read(handle.value() - 1, value).ok() && value.live()
+        ? handle
+        : link_handle{};
 }
 
 canonical_type_kind graph::kind(TypeRef type) const noexcept {
     if (!type || type.value() >= canonical_types.size())
         return canonical_type_kind::intrinsic;
-    return canonical_types[type.value()].kind;
+
+    graph_canonical_type_record record;
+    return canonical_types.read(type.value(), record).ok()
+        ? record.kind
+        : canonical_type_kind::intrinsic;
 }
 
 bool graph::intrinsic(TypeRef type, intrinsic_type& output) const noexcept {
@@ -320,9 +604,12 @@ bool graph::intrinsic(TypeRef type, intrinsic_type& output) const noexcept {
     if (!type || type.value() >= canonical_types.size())
         return false;
 
-    const auto& record = canonical_types[type.value()];
-    if (record.kind != canonical_type_kind::intrinsic)
+    graph_canonical_type_record record;
+    if (!canonical_types.read(type.value(), record).ok() ||
+        record.kind != canonical_type_kind::intrinsic) {
         return false;
+    }
+
     output = static_cast<intrinsic_type>(record.detail);
     return true;
 }
@@ -332,11 +619,14 @@ bool graph::named_raw(TypeRef type, type_handle& output) const noexcept {
     if (!type || type.value() >= canonical_types.size())
         return false;
 
-    const auto& record = canonical_types[type.value()];
-    if (record.kind != canonical_type_kind::named || record.child_or_handle == 0 ||
+    graph_canonical_type_record record;
+    if (!canonical_types.read(type.value(), record).ok() ||
+        record.kind != canonical_type_kind::named ||
+        record.child_or_handle == 0 ||
         record.child_or_handle > types.size()) {
         return false;
     }
+
     output = type_handle{record.child_or_handle};
     return true;
 }
@@ -344,7 +634,9 @@ bool graph::named_raw(TypeRef type, type_handle& output) const noexcept {
 bool graph::named(TypeRef type, type_handle& output) const noexcept {
     if (!named_raw(type, output))
         return false;
-    if (find(output) == nullptr) {
+
+    type_entry entry;
+    if (!types.read(output.value() - 1, entry).ok() || !entry.live()) {
         output = {};
         return false;
     }
@@ -356,8 +648,10 @@ bool graph::derived(TypeRef type, derived_type_record& output) const noexcept {
     if (!type || type.value() >= canonical_types.size())
         return false;
 
-    const auto& record = canonical_types[type.value()];
-    if (record.kind != canonical_type_kind::derived || record.child_or_handle == 0 ||
+    graph_canonical_type_record record;
+    if (!canonical_types.read(type.value(), record).ok() ||
+        record.kind != canonical_type_kind::derived ||
+        record.child_or_handle == 0 ||
         record.child_or_handle >= canonical_types.size()) {
         return false;
     }
@@ -375,15 +669,18 @@ graph_storage_usage graph::storage_usage(
     graph_storage_usage output;
     const auto add_vector = [&](const auto& values) noexcept {
         using value_type = typename std::remove_reference_t<decltype(values)>::value_type;
-        output.retained_bytes += values.capacity() * sizeof(value_type);
-        output.reserve_bytes += (values.capacity() - values.size()) * sizeof(value_type);
+        output.retained_bytes += values.heap_record_capacity() * sizeof(value_type);
+        if (values.local_capacity() > values.local_size())
+            output.reserve_bytes += (values.local_capacity() - values.local_size()) * sizeof(value_type);
     };
     const auto add_index = [&](const auto& values, std::size_t entries) noexcept {
         using value_type = typename std::remove_reference_t<decltype(values)>::value_type;
-        output.retained_bytes += values.size() * sizeof(value_type);
-        const auto safe_entries = values.size() / 2;
-        if (safe_entries > entries)
-            output.reserve_bytes += (safe_entries - entries) * sizeof(value_type);
+        output.retained_bytes += values.heap_record_capacity() * sizeof(value_type);
+        if (!values.baseline_backed()) {
+            const auto safe_entries = values.size() / 2;
+            if (safe_entries > entries)
+                output.reserve_bytes += (safe_entries - entries) * sizeof(value_type);
+        }
     };
     const auto stale_count = [](std::size_t physical, std::size_t live) noexcept {
         return physical > live ? physical - live : std::size_t{0};
@@ -421,6 +718,189 @@ graph_storage_usage graph::storage_usage(
     // edge. Anything beyond that bound is certainly stale append-only history.
     output.stale_bytes += stale_count(dependency_edges.size(), live_members) * sizeof(graph_dependency_edge);
     return output;
+}
+
+status graph::prepare_sparse_publication(
+    prepared_graph_update& prepared) noexcept {
+
+    try {
+        if (!baseline_backed()) {
+            if (member_records.size() + prepared.members.size() > member_records.capacity() ||
+                enum_value_records.size() + prepared.enum_values.size() > enum_value_records.capacity() ||
+                canonical_types.size() + prepared.canonical_types.size() > canonical_types.capacity() ||
+                types.size() + prepared.new_types.size() > types.capacity() ||
+                identities.size() + prepared.new_identities.size() > identities.capacity() ||
+                object_entries.size() + prepared.new_objects.size() > object_entries.capacity() ||
+                object_identities.size() + prepared.new_object_identities.size() > object_identities.capacity() ||
+                link_records.size() + prepared.new_links.size() > link_records.capacity() ||
+                named_refs.size() + prepared.new_types.size() > named_refs.capacity() ||
+                dependency_versions.size() + prepared.new_types.size() > dependency_versions.capacity() ||
+                reverse_dependency_heads.size() + prepared.new_types.size() > reverse_dependency_heads.capacity() ||
+                dependency_edges.size() + prepared.dependency_edges.size() > dependency_edges.capacity()) {
+                return {status_code::rebuild_required};
+            }
+            return {};
+        }
+
+        member_records.reserve(member_records.size() + prepared.members.size());
+        enum_value_records.reserve(enum_value_records.size() + prepared.enum_values.size());
+        canonical_types.reserve(canonical_types.size() + prepared.canonical_types.size());
+        types.reserve(types.size() + prepared.new_types.size());
+        identities.reserve(identities.size() + prepared.new_identities.size());
+        object_entries.reserve(object_entries.size() + prepared.new_objects.size());
+        object_identities.reserve(object_identities.size() + prepared.new_object_identities.size());
+        link_records.reserve(link_records.size() + prepared.new_links.size());
+        named_refs.reserve(named_refs.size() + prepared.new_types.size());
+        dependency_versions.reserve(dependency_versions.size() + prepared.new_types.size());
+        reverse_dependency_heads.reserve(reverse_dependency_heads.size() + prepared.new_types.size());
+        dependency_edges.reserve(dependency_edges.size() + prepared.dependency_edges.size());
+
+        const auto touch_identity_slot = [&](identity_ref identity) noexcept -> bool {
+            if (!identity || identity_index.empty())
+                return false;
+            const auto hash = identity_hash(identity);
+            const auto fingerprint = fold32(hash);
+            const auto mask = identity_index.size() - 1;
+            auto position = static_cast<std::size_t>(hash) & mask;
+            for (std::size_t probe = 0; probe < identity_index.size(); ++probe) {
+                graph_identity_index_slot slot;
+                if (!identity_index.read(position, slot).ok())
+                    return false;
+                if (slot.handle == 0) {
+                    (void)identity_index[position];
+                    return true;
+                }
+                if (slot.fingerprint == fingerprint && slot.handle <= identities.size()) {
+                    identity_ref candidate;
+                    if (identities.read(slot.handle - 1, candidate).ok() &&
+                        candidate == identity) {
+                        return true;
+                    }
+                }
+                position = (position + 1) & mask;
+            }
+            return false;
+        };
+        if (!prepared.replace_identity_index) {
+            for (const auto identity : prepared.new_identities) {
+                if (!touch_identity_slot(identity))
+                    return {status_code::rebuild_required};
+            }
+        }
+
+        const auto touch_object_slot = [&](identity_ref identity) noexcept -> bool {
+            if (!identity || object_identity_index.empty())
+                return false;
+            const auto hash = identity_hash(identity);
+            const auto fingerprint = fold32(hash);
+            const auto mask = object_identity_index.size() - 1;
+            auto position = static_cast<std::size_t>(hash) & mask;
+            for (std::size_t probe = 0; probe < object_identity_index.size(); ++probe) {
+                graph_object_identity_index_slot slot;
+                if (!object_identity_index.read(position, slot).ok())
+                    return false;
+                if (slot.handle == 0) {
+                    (void)object_identity_index[position];
+                    return true;
+                }
+                if (slot.fingerprint == fingerprint && slot.handle <= object_identities.size()) {
+                    identity_ref candidate;
+                    if (object_identities.read(slot.handle - 1, candidate).ok() &&
+                        candidate == identity) {
+                        return true;
+                    }
+                }
+                position = (position + 1) & mask;
+            }
+            return false;
+        };
+        if (!prepared.replace_object_identity_index) {
+            for (const auto identity : prepared.new_object_identities) {
+                if (!touch_object_slot(identity))
+                    return {status_code::rebuild_required};
+            }
+        }
+
+        if (!prepared.replace_link_index) {
+            for (const auto& link : prepared.new_links) {
+            const auto hash = endpoint_hash(link.target);
+            const auto mask = link_index.size() - 1;
+            auto position = static_cast<std::size_t>(hash) & mask;
+            bool touched = false;
+            for (std::size_t probe = 0; probe < link_index.size(); ++probe) {
+                graph_link_index_slot slot;
+                if (!link_index.read(position, slot).ok())
+                    return {status_code::artifact_corrupt};
+                if (slot.handle == 0) {
+                    (void)link_index[position];
+                    touched = true;
+                    break;
+                }
+                position = (position + 1) & mask;
+            }
+                if (!touched)
+                    return {status_code::rebuild_required};
+            }
+        }
+
+        const auto canonical_base = canonical_types.size();
+        if (!prepared.replace_derived_index) {
+            for (std::size_t index = 0; index < prepared.canonical_types.size(); ++index) {
+            const auto& record = prepared.canonical_types[index];
+            if (record.kind != canonical_type_kind::derived)
+                continue;
+            if (derived_index.empty())
+                return {status_code::rebuild_required};
+            const auto hash = derived_hash(
+                static_cast<derived_type_kind>(record.detail),
+                record.child_or_handle,
+                record.payload);
+            const auto mask = derived_index.size() - 1;
+            auto position = static_cast<std::size_t>(hash) & mask;
+            bool touched = false;
+            for (std::size_t probe = 0; probe < derived_index.size(); ++probe) {
+                graph_derived_index_slot slot;
+                if (!derived_index.read(position, slot).ok())
+                    return {status_code::artifact_corrupt};
+                if (slot.type_ref == 0) {
+                    (void)derived_index[position];
+                    touched = true;
+                    break;
+                }
+                position = (position + 1) & mask;
+            }
+                if (!touched)
+                    return {status_code::rebuild_required};
+                (void)canonical_base;
+            }
+        }
+
+        for (const auto& pending : prepared.dependency_edges) {
+            if (pending.target_handle == 0 ||
+                pending.target_handle > reverse_dependency_heads.size()) {
+                return {status_code::invalid_argument};
+            }
+            (void)reverse_dependency_heads[pending.target_handle - 1];
+        }
+
+        if (!types.read_status().ok() || !identities.read_status().ok() ||
+            !member_records.read_status().ok() || !enum_value_records.read_status().ok() ||
+            !object_entries.read_status().ok() || !object_identities.read_status().ok() ||
+            !link_records.read_status().ok() || !canonical_types.read_status().ok() ||
+            !identity_index.read_status().ok() || !object_identity_index.read_status().ok() ||
+            !link_index.read_status().ok() || !named_refs.read_status().ok() ||
+            !derived_index.read_status().ok() || !dependency_versions.read_status().ok() ||
+            !reverse_dependency_heads.read_status().ok() || !dependency_edges.read_status().ok()) {
+            return {status_code::artifact_corrupt};
+        }
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
 }
 
 void graph::publish_prepared(prepared_graph_generation& prepared) noexcept {

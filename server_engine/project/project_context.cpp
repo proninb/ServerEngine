@@ -56,6 +56,54 @@ status project_context::activate_ready_baseline(
     }
 }
 
+status project_context::activate_build_baseline(
+    baseline_snapshot&& snapshot) noexcept {
+
+    if (!snapshot.valid() ||
+        snapshot.artifact(baseline_artifact_kind::compiled).empty() ||
+        snapshot.artifact(baseline_artifact_kind::source_manager).empty() ||
+        snapshot.artifact(baseline_artifact_kind::build_cache).empty()) {
+        return {status_code::artifact_corrupt};
+    }
+
+    compiled_image_view compiled_view;
+    auto result = compiled_view.bind(
+        snapshot.artifact(baseline_artifact_kind::compiled));
+    if (!result.ok())
+        return result;
+
+    source_manager_image_view source_view;
+    result = source_view.bind(
+        snapshot.artifact(baseline_artifact_kind::source_manager));
+    if (!result.ok())
+        return result;
+
+    build_cache_image_view build_view;
+    result = build_view.bind(
+        snapshot.artifact(baseline_artifact_kind::build_cache));
+    if (!result.ok())
+        return result;
+
+    try {
+        auto owner =
+            std::make_unique<baseline_snapshot>(std::move(snapshot));
+
+        mapped_compiled = compiled_view;
+        mapped_sources = source_view;
+        mapped_build_cache = build_view;
+        baseline = std::move(owner);
+        compiled = std::make_unique<compiled_project_state>(
+            mapped_compiled,
+            mapped_sources,
+            mapped_build_cache);
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+}
+
+
 project_storage_pressure project_context::storage_pressure() const noexcept {
     if (compiled == nullptr)
         return {};
@@ -222,11 +270,11 @@ status project_context::find_endpoint(
     member_index member;
 
     if (compiled != nullptr) {
-        const auto* entry = compiled->graph_value.find(object);
-        if (entry == nullptr)
+        TypeRef object_type;
+        if (!compiled->graph_value.object_type(object, object_type))
             return {status_code::not_found};
 
-        if (!compiled->graph_value.named(entry->type, type))
+        if (!compiled->graph_value.named(object_type, type))
             return {status_code::not_found};
 
         member = compiled->graph_value.find_member(type, name);

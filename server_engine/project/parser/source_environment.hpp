@@ -13,6 +13,8 @@
 
 namespace cw::server {
 
+class build_cache_image_view;
+
 struct source_interface_object final {
     identity_ref identity{};
     identity_ref named_type{};
@@ -66,6 +68,13 @@ public:
     [[nodiscard]] status initialize(
         const source_facts& facts,
         identity_view identities,
+        std::span<const source_interface* const> imports = {}) noexcept;
+
+    // Restores one immutable Parser interface from build_cache.bin without
+    // reparsing its Source. Import pointers are rebound process-locally.
+    [[nodiscard]] status initialize_persisted(
+        const build_cache_image_view& cache,
+        source_id source,
         std::span<const source_interface* const> imports = {}) noexcept;
 
     [[nodiscard]] identity_ref find_type(

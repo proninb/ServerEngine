@@ -32,6 +32,10 @@ struct project_baseline_images final {
 
 // Compares filesystem Sources with one persisted Source Manager image. Metadata is
 // only a fast path; content hash decides semantic equality after a metadata miss.
+[[nodiscard]] status project_baseline_dirty_sources(
+    const source_manager_image_view& sources,
+    std::vector<source_id>& dirty_sources) noexcept;
+
 [[nodiscard]] status project_baseline_sources_changed(
     const source_manager_image_view& sources,
     bool& changed) noexcept;

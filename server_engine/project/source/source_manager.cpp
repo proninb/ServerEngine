@@ -1,5 +1,7 @@
 #include "source_manager.hpp"
 
+#include "../persistence/build_cache_image.hpp"
+#include "../persistence/source_manager_image.hpp"
 #include "../../diagnostics/diagnostic_descriptor.hpp"
 
 #include <algorithm>
@@ -287,6 +289,98 @@ void emit_source_failure(
 
 } // namespace
 
+source_manager::source_manager(
+    const source_manager_image_view& baseline_sources_value,
+    const build_cache_image_view& baseline_cache_value) noexcept
+    : baseline_sources(&baseline_sources_value),
+      baseline_cache(&baseline_cache_value),
+      baseline_source_count(baseline_sources_value.source_count()) {
+
+    records.bind_baseline(
+        this,
+        baseline_source_count,
+        &source_manager::read_baseline_record);
+    states.bind_baseline(
+        this,
+        baseline_source_count,
+        &source_manager::read_baseline_state);
+}
+
+status source_manager::read_baseline_record(
+    const void* context,
+    std::size_t index,
+    source_record& output) noexcept {
+
+    output = {};
+    const auto* owner = static_cast<const source_manager*>(context);
+    if (owner == nullptr || owner->baseline_sources == nullptr ||
+        index >= owner->baseline_source_count) {
+        return {status_code::not_found};
+    }
+    return {};
+}
+
+status source_manager::read_baseline_state(
+    const void* context,
+    std::size_t index,
+    committed_source& output) noexcept {
+
+    output = {};
+    const auto* owner = static_cast<const source_manager*>(context);
+    if (owner == nullptr || owner->baseline_sources == nullptr ||
+        owner->baseline_cache == nullptr ||
+        index >= owner->baseline_source_count ||
+        index >= (std::numeric_limits<std::uint32_t>::max)()) {
+        return {status_code::not_found};
+    }
+
+    const source_id source{static_cast<std::uint32_t>(index + 1)};
+    source_manager_image_physical_state physical;
+    auto result = owner->baseline_sources->physical(source, physical);
+    if (!result.ok())
+        return result;
+
+    try {
+        if (physical.present) {
+            if (physical.size >
+                (std::numeric_limits<std::uintmax_t>::max)()) {
+                return {status_code::artifact_corrupt};
+            }
+
+            const auto text = owner->baseline_cache->source_text(source);
+            if (text.size() != physical.size)
+                return {status_code::artifact_corrupt};
+
+            output.snapshot = source_snapshot{
+                source,
+                owner->baseline_sources->path(source),
+                text,
+                file_snapshot_observation{
+                    physical.write_time_ticks,
+                    static_cast<std::uintmax_t>(physical.size)},
+                physical.hash};
+        }
+
+        const auto includes = owner->baseline_sources->includes(source);
+        output.includes.reserve(includes.size());
+        for (std::size_t edge = 0; edge < includes.size(); ++edge)
+            output.includes.push_back(includes[edge]);
+
+        const auto dependents = owner->baseline_sources->dependents(source);
+        output.dependents.reserve(dependents.size());
+        for (std::size_t edge = 0; edge < dependents.size(); ++edge)
+            output.dependents.push_back(dependents[edge]);
+
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+}
+
 status normalize_source_path(
     const std::filesystem::path& input,
     std::string& output) noexcept {
@@ -335,22 +429,10 @@ status source_manager::find_in_index(
         if (!slot.source)
             return {status_code::not_found};
 
-        if (slot.fingerprint == fingerprint) {
-            // path_index is rebuilt from committed Source records, so a live slot
-            // always addresses one valid dense record. Avoid the public path()
-            // validation path here: this is the Source Manager hot identity loop.
-            const auto source_index =
-                static_cast<std::size_t>(slot.source.value() - 1);
-            const auto& record = records[source_index];
-            const auto length = static_cast<std::size_t>(record.path_length);
-            if (length == normalized_path.size() &&
-                std::memcmp(
-                    path_storage.data() + record.path_offset,
-                    normalized_path.data(),
-                    length) == 0) {
-                output = slot.source;
-                return {};
-            }
+        if (slot.fingerprint == fingerprint &&
+            path(slot.source) == normalized_path) {
+            output = slot.source;
+            return {};
         }
 
         position = (position + 1) & mask;
@@ -360,6 +442,11 @@ status source_manager::find_in_index(
 }
 
 status source_manager::find(std::string_view normalized_path, source_id& output) const noexcept {
+    output = {};
+    if (baseline_sources != nullptr &&
+        baseline_sources->find(normalized_path, output).ok()) {
+        return {};
+    }
     return find_in_index(normalized_path, path_index, output);
 }
 
@@ -367,9 +454,9 @@ status source_manager::rebuild_path_index(
     std::size_t additional,
     std::vector<path_slot>& output) const noexcept {
 
-    if (records.size() > (std::numeric_limits<std::size_t>::max)() - additional)
+    if (records.local_size() > (std::numeric_limits<std::size_t>::max)() - additional)
         return {status_code::not_available};
-    const auto count = records.size() + additional;
+    const auto count = records.local_size() + additional;
     const auto required = count > ((std::numeric_limits<std::size_t>::max)() / 2)
         ? 0
         : count * 2 + 1;
@@ -380,8 +467,11 @@ status source_manager::rebuild_path_index(
     try {
         output.assign(capacity, path_slot{});
         const auto mask = capacity - 1;
-        for (std::size_t index = 0; index < records.size(); ++index) {
-            const auto source = source_id{static_cast<std::uint32_t>(index + 1)};
+        for (std::size_t index = 0; index < records.local_size(); ++index) {
+            const auto absolute = baseline_source_count + index + 1;
+            if (absolute > (std::numeric_limits<std::uint32_t>::max)())
+                return {status_code::not_available};
+            const auto source = source_id{static_cast<std::uint32_t>(absolute)};
             const auto normalized = path(source);
             const auto hash = hash_path(normalized);
             auto position = static_cast<std::size_t>(hash) & mask;
@@ -406,8 +496,37 @@ source_manager_update source_manager::begin_update() noexcept {
 source_snapshot source_manager::current(source_id source) const noexcept {
     if (!source)
         return {};
+
     const auto index = static_cast<std::size_t>(source.value() - 1);
-    return index < states.size() ? states[index].snapshot : source_snapshot{};
+    if (index >= states.size())
+        return {};
+
+    if (const auto* state = states.materialized(index); state != nullptr)
+        return state->snapshot;
+
+    if (baseline_sources == nullptr || baseline_cache == nullptr ||
+        index >= baseline_source_count) {
+        return {};
+    }
+
+    source_manager_image_physical_state physical;
+    if (!baseline_sources->physical(source, physical).ok() || !physical.present)
+        return {};
+    if (physical.size > (std::numeric_limits<std::uintmax_t>::max)())
+        return {};
+
+    const auto text = baseline_cache->source_text(source);
+    if (text.size() != physical.size)
+        return {};
+
+    return source_snapshot{
+        source,
+        baseline_sources->path(source),
+        text,
+        file_snapshot_observation{
+            physical.write_time_ticks,
+            static_cast<std::uintmax_t>(physical.size)},
+        physical.hash};
 }
 
 std::span<const source_id> source_manager::includes(source_id source) const noexcept {
@@ -426,6 +545,76 @@ std::span<const source_id> source_manager::dependents(source_id source) const no
     return index < states.size()
         ? std::span<const source_id>{states[index].dependents}
         : std::span<const source_id>{};
+}
+
+std::size_t source_manager::include_count(source_id source) const noexcept {
+    if (!source)
+        return 0;
+    const auto index = static_cast<std::size_t>(source.value() - 1);
+    if (index >= states.size())
+        return 0;
+
+    if (const auto* state = states.materialized(index); state != nullptr)
+        return state->includes.size();
+
+    if (baseline_sources != nullptr && index < baseline_source_count)
+        return baseline_sources->includes(source).size();
+    return 0;
+}
+
+source_id source_manager::include_at(
+    source_id source,
+    std::size_t edge) const noexcept {
+
+    if (!source)
+        return {};
+    const auto index = static_cast<std::size_t>(source.value() - 1);
+    if (index >= states.size())
+        return {};
+
+    if (const auto* state = states.materialized(index); state != nullptr)
+        return edge < state->includes.size() ? state->includes[edge] : source_id{};
+
+    if (baseline_sources != nullptr && index < baseline_source_count) {
+        const auto values = baseline_sources->includes(source);
+        return edge < values.size() ? values[edge] : source_id{};
+    }
+    return {};
+}
+
+std::size_t source_manager::dependent_count(source_id source) const noexcept {
+    if (!source)
+        return 0;
+    const auto index = static_cast<std::size_t>(source.value() - 1);
+    if (index >= states.size())
+        return 0;
+
+    if (const auto* state = states.materialized(index); state != nullptr)
+        return state->dependents.size();
+
+    if (baseline_sources != nullptr && index < baseline_source_count)
+        return baseline_sources->dependents(source).size();
+    return 0;
+}
+
+source_id source_manager::dependent_at(
+    source_id source,
+    std::size_t edge) const noexcept {
+
+    if (!source)
+        return {};
+    const auto index = static_cast<std::size_t>(source.value() - 1);
+    if (index >= states.size())
+        return {};
+
+    if (const auto* state = states.materialized(index); state != nullptr)
+        return edge < state->dependents.size() ? state->dependents[edge] : source_id{};
+
+    if (baseline_sources != nullptr && index < baseline_source_count) {
+        const auto values = baseline_sources->dependents(source);
+        return edge < values.size() ? values[edge] : source_id{};
+    }
+    return {};
 }
 
 status source_manager::collect_dependents(
@@ -482,6 +671,9 @@ std::string_view source_manager::path(source_id source) const noexcept {
     const auto index = static_cast<std::size_t>(source.value() - 1);
     if (index >= records.size())
         return {};
+
+    if (baseline_sources != nullptr && index < baseline_source_count)
+        return baseline_sources->path(source);
 
     const auto& record = records[index];
     const auto offset = static_cast<std::size_t>(record.path_offset);
@@ -1175,7 +1367,7 @@ status source_manager_update::build_sparse_path_insertions() noexcept {
     if (owner->path_index.empty())
         return build_prepared_path_index();
 
-    const auto required_count = owner->records.size() + new_sources.size();
+    const auto required_count = owner->records.local_size() + new_sources.size();
     if (required_count > owner->path_index.size() / 2)
         return {status_code::rebuild_required};
 
@@ -1222,9 +1414,11 @@ status source_manager_update::prepare_publish() noexcept {
 
     std::size_t added_path_bytes = 0;
     if (!new_sources.empty()) {
-        result = owner->records.empty()
+        result = owner->baseline_backed()
             ? build_prepared_path_index()
-            : build_sparse_path_insertions();
+            : (owner->records.empty()
+                ? build_prepared_path_index()
+                : build_sparse_path_insertions());
         if (!result.ok())
             return result;
 
@@ -1245,7 +1439,32 @@ status source_manager_update::prepare_publish() noexcept {
     if (!new_sources.empty()) {
         prepared_path_storage_size = owner->path_storage.size() + added_path_bytes;
 
-        if (owner->records.empty()) {
+        if (owner->baseline_backed()) {
+            // BUILD runs while Project is CONSTRUCTING with no admitted readers.
+            // Reserve only post-baseline append storage; mmap baseline slots remain
+            // untouched and do not participate in vector relocation.
+            try {
+                owner->records.reserve(owner->records.size() + new_sources.size());
+                owner->states.reserve(owner->states.size() + new_sources.size());
+                owner->path_storage.reserve(prepared_path_storage_size);
+
+                // Publication must be allocation-free even for metadata-only
+                // Source updates whose semantic closure is empty.
+                for (const auto& item : candidates) {
+                    const auto index = static_cast<std::size_t>(item.source.value() - 1);
+                    if (index < owner->baseline_source_count)
+                        (void)owner->states[index];
+                }
+                if (!owner->states.read_status().ok())
+                    return owner->states.read_status();
+            }
+            catch (const std::bad_alloc&) {
+                return {status_code::not_available};
+            }
+            catch (const std::length_error&) {
+                return {status_code::not_available};
+            }
+        } else if (owner->records.empty()) {
             // Full construction happens in a detached Project and therefore has no
             // externally readable committed storage to invalidate.
             try {
@@ -1268,9 +1487,7 @@ status source_manager_update::prepare_publish() noexcept {
         } else if (owner->records.size() + new_sources.size() > owner->records.capacity() ||
                    owner->states.size() + new_sources.size() > owner->states.capacity() ||
                    prepared_path_storage_size > owner->path_storage.capacity()) {
-            // Incremental prepare never grows committed containers. Reallocation
-            // here would invalidate Source views held by concurrent read guards
-            // before the publication barrier.
+            // Legacy in-memory incremental mode retains its no-relocation contract.
             prepared_path_index.clear();
             prepared_path_insertions.clear();
             prepared_path_storage_size = 0;

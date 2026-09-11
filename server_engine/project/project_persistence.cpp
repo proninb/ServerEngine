@@ -17,7 +17,7 @@ namespace {
 
 constexpr std::string_view fingerprint_tag =
     "SE-V3-PROJECT-BASELINE-COMPATIBILITY-V1";
-constexpr std::uint32_t build_contract_version = 1;
+constexpr std::uint32_t build_contract_version = 2;
 
 void append_u32(std::string& output, std::uint32_t value) {
     output.push_back(static_cast<char>(value & 0xffu));
@@ -193,80 +193,98 @@ status encode_project_baseline(
     return build_cache.verify_against(compiled, sources);
 }
 
+status project_baseline_dirty_sources(
+    const source_manager_image_view& sources,
+    std::vector<source_id>& dirty_sources) noexcept {
+
+    dirty_sources.clear();
+    if (!sources.valid())
+        return {status_code::invalid_state};
+
+    try {
+        for (std::size_t index = 0; index < sources.source_count(); ++index) {
+            if (index >= (std::numeric_limits<std::uint32_t>::max)())
+                return {status_code::artifact_corrupt};
+
+            const source_id source{
+                static_cast<std::uint32_t>(index + 1)};
+
+            source_manager_image_physical_state physical;
+            auto result = sources.physical(source, physical);
+            if (!result.ok())
+                return result;
+
+            const auto path_text = sources.path(source);
+            if (path_text.empty())
+                return {status_code::artifact_corrupt};
+
+            std::optional<file_snapshot_observation> baseline;
+            if (physical.present) {
+                if (physical.size >
+                    (std::numeric_limits<std::uintmax_t>::max)()) {
+                    return {status_code::artifact_corrupt};
+                }
+
+                baseline = file_snapshot_observation{
+                    physical.write_time_ticks,
+                    static_cast<std::uintmax_t>(physical.size)};
+            }
+
+            file_snapshot acquired;
+            const auto acquisition = acquire_file_snapshot(
+                std::filesystem::path{path_text},
+                baseline,
+                acquired);
+
+            bool dirty = false;
+            switch (acquisition) {
+            case file_snapshot_result::unchanged:
+                if (!physical.present)
+                    return {status_code::artifact_corrupt};
+                break;
+
+            case file_snapshot_result::missing:
+                dirty = physical.present;
+                break;
+
+            case file_snapshot_result::acquired:
+                dirty = !physical.present ||
+                    acquired.hash != physical.hash;
+                break;
+
+            case file_snapshot_result::changed_during_read:
+            case file_snapshot_result::failed:
+                return {status_code::io_failed};
+
+            case file_snapshot_result::allocation_failed:
+                return {status_code::not_available};
+            }
+
+            if (dirty)
+                dirty_sources.push_back(source);
+        }
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        dirty_sources.clear();
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        dirty_sources.clear();
+        return {status_code::not_available};
+    }
+}
+
 status project_baseline_sources_changed(
     const source_manager_image_view& sources,
     bool& changed) noexcept {
 
-    changed = false;
-
-    if (!sources.valid())
-        return {status_code::invalid_state};
-
-    for (std::size_t index = 0; index < sources.source_count(); ++index) {
-        if (index >= (std::numeric_limits<std::uint32_t>::max)())
-            return {status_code::artifact_corrupt};
-
-        const source_id source{
-            static_cast<std::uint32_t>(index + 1)};
-
-        source_manager_image_physical_state physical;
-        auto result = sources.physical(source, physical);
-        if (!result.ok())
-            return result;
-
-        const auto path_text = sources.path(source);
-        if (path_text.empty())
-            return {status_code::artifact_corrupt};
-
-        std::optional<file_snapshot_observation> baseline;
-        if (physical.present) {
-            if (physical.size >
-                (std::numeric_limits<std::uintmax_t>::max)()) {
-                return {status_code::artifact_corrupt};
-            }
-
-            baseline = file_snapshot_observation{
-                physical.write_time_ticks,
-                static_cast<std::uintmax_t>(physical.size)};
-        }
-
-        file_snapshot acquired;
-        const auto acquisition = acquire_file_snapshot(
-            std::filesystem::path{path_text},
-            baseline,
-            acquired);
-
-        switch (acquisition) {
-        case file_snapshot_result::unchanged:
-            if (!physical.present)
-                return {status_code::artifact_corrupt};
-            break;
-
-        case file_snapshot_result::missing:
-            if (physical.present) {
-                changed = true;
-                return {};
-            }
-            break;
-
-        case file_snapshot_result::acquired:
-            if (!physical.present ||
-                acquired.hash != physical.hash) {
-                changed = true;
-                return {};
-            }
-            break;
-
-        case file_snapshot_result::changed_during_read:
-        case file_snapshot_result::failed:
-            return {status_code::io_failed};
-
-        case file_snapshot_result::allocation_failed:
-            return {status_code::not_available};
-        }
-    }
-
-    return {};
+    std::vector<source_id> dirty_sources;
+    const auto result = project_baseline_dirty_sources(
+        sources,
+        dirty_sources);
+    changed = result.ok() && !dirty_sources.empty();
+    return result;
 }
 
 } // namespace cw::server

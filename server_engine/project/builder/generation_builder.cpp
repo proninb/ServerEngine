@@ -1923,41 +1923,35 @@ status generation_builder::prepare_incremental_graph(
 
         const auto total_identity_count = target.identities.size() + prepared_update.new_identities.size();
         if (!prepared_update.new_identities.empty() &&
-            (target.identity_index.empty() || total_identity_count * 2 > target.identity_index.size())) {
+            (target.identity_index.empty() ||
+             total_identity_count > target.identity_index.size() - target.identity_index.size() / 4)) {
             return {status_code::rebuild_required};
         }
 
         const auto total_object_count = target.object_identities.size() + prepared_update.new_object_identities.size();
         if (!prepared_update.new_object_identities.empty() &&
-            (target.object_identity_index.empty() || total_object_count * 2 > target.object_identity_index.size())) {
+            (target.object_identity_index.empty() ||
+             total_object_count > target.object_identity_index.size() - target.object_identity_index.size() / 4)) {
             return {status_code::rebuild_required};
         }
         const auto total_link_slots = target.link_records.size() + prepared_update.new_links.size();
         if (!prepared_update.new_links.empty() &&
-            (target.link_index.empty() || total_link_slots * 2 > target.link_index.size())) {
+            (target.link_index.empty() ||
+             total_link_slots > target.link_index.size() - target.link_index.size() / 4)) {
             return {status_code::rebuild_required};
         }
 
         prepared_update.derived_index_entries = target.derived_index_entries + static_cast<std::size_t>(new_derived_count);
         if (new_derived_count != 0 &&
-            (target.derived_index.empty() || prepared_update.derived_index_entries * 2 > target.derived_index.size())) {
+            (target.derived_index.empty() ||
+             prepared_update.derived_index_entries >
+                 target.derived_index.size() - target.derived_index.size() / 4)) {
             return {status_code::rebuild_required};
         }
 
-        if (target.member_records.size() + prepared_update.members.size() > target.member_records.capacity() ||
-            target.enum_value_records.size() + prepared_update.enum_values.size() > target.enum_value_records.capacity() ||
-            target.canonical_types.size() + prepared_update.canonical_types.size() > target.canonical_types.capacity() ||
-            target.types.size() + prepared_update.new_types.size() > target.types.capacity() ||
-            target.identities.size() + prepared_update.new_identities.size() > target.identities.capacity() ||
-            target.object_entries.size() + prepared_update.new_objects.size() > target.object_entries.capacity() ||
-            target.object_identities.size() + prepared_update.new_object_identities.size() > target.object_identities.capacity() ||
-            target.link_records.size() + prepared_update.new_links.size() > target.link_records.capacity() ||
-            target.named_refs.size() + prepared_update.new_types.size() > target.named_refs.capacity() ||
-            target.dependency_versions.size() + prepared_update.new_types.size() > target.dependency_versions.capacity() ||
-            target.reverse_dependency_heads.size() + prepared_update.new_types.size() > target.reverse_dependency_heads.capacity() ||
-            target.dependency_edges.size() + prepared_update.dependency_edges.size() > target.dependency_edges.capacity()) {
-            return {status_code::rebuild_required};
-        }
+        result = target.prepare_sparse_publication(prepared_update);
+        if (!result.ok())
+            return result;
 
         return {};
     } catch (const std::bad_alloc&) {

@@ -629,8 +629,8 @@ status encode_source_manager_image(
             return {status_code::not_available};
 
         if (!add_u64(path_bytes, source_path.size(), path_bytes) ||
-            !add_u64(forward_edges, manager.includes(source).size(), forward_edges) ||
-            !add_u64(reverse_edges, manager.dependents(source).size(), reverse_edges)) {
+            !add_u64(forward_edges, manager.include_count(source), forward_edges) ||
+            !add_u64(reverse_edges, manager.dependent_count(source), reverse_edges)) {
             return {status_code::not_available};
         }
     }
@@ -740,7 +740,9 @@ status encode_source_manager_image(
                 snapshot.hash().bytes.size());
         }
 
-        for (const auto dependency : manager.includes(source)) {
+        const auto include_count = manager.include_count(source);
+        for (std::size_t edge = 0; edge < include_count; ++edge) {
+            const auto dependency = manager.include_at(source, edge);
             if (!dependency ||
                 static_cast<std::size_t>(dependency.value()) > source_count) {
                 output.clear();
@@ -753,7 +755,9 @@ status encode_source_manager_image(
         }
         write_u64(forward_offsets + (index + 1) * 8, forward_cursor);
 
-        for (const auto dependent : manager.dependents(source)) {
+        const auto dependent_count = manager.dependent_count(source);
+        for (std::size_t edge = 0; edge < dependent_count; ++edge) {
+            const auto dependent = manager.dependent_at(source, edge);
             if (!dependent ||
                 static_cast<std::size_t>(dependent.value()) > source_count) {
                 output.clear();

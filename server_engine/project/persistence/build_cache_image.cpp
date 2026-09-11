@@ -64,6 +64,7 @@ constexpr std::uint32_t type_ref_record_size = 4;
 constexpr std::uint32_t derived_index_record_size = 8;
 constexpr std::uint32_t u32_record_size = 4;
 constexpr std::uint32_t dependency_edge_record_size = 12;
+constexpr std::uint32_t historical_index_record_size = 8;
 
 struct layout_section final {
     build_cache_image_section kind{};
@@ -167,6 +168,29 @@ constexpr std::uint64_t crc64_polynomial = 0x42f0e1eba9ea3693ULL;
     return true;
 }
 
+[[nodiscard]] constexpr std::uint64_t mix64(std::uint64_t value) noexcept {
+    value ^= value >> 30;
+    value *= 0xbf58476d1ce4e5b9ULL;
+    value ^= value >> 27;
+    value *= 0x94d049bb133111ebULL;
+    return value ^ (value >> 31);
+}
+
+[[nodiscard]] constexpr std::uint32_t fold32(std::uint64_t value) noexcept {
+    auto result = static_cast<std::uint32_t>(value ^ (value >> 32));
+    return result == 0 ? 1u : result;
+}
+
+[[nodiscard]] constexpr std::uint64_t graph_identity_hash(identity_ref identity) noexcept {
+    return mix64(static_cast<std::uint64_t>(identity.value()));
+}
+
+[[nodiscard]] constexpr std::uint64_t endpoint_hash(object_endpoint endpoint) noexcept {
+    return mix64(
+        (static_cast<std::uint64_t>(endpoint.object.value()) << 32) ^
+        static_cast<std::uint64_t>(endpoint.member.value()));
+}
+
 [[nodiscard]] constexpr std::uint32_t expected_record_size(
     build_cache_image_section kind) noexcept {
 
@@ -208,6 +232,10 @@ constexpr std::uint64_t crc64_polynomial = 0x42f0e1eba9ea3693ULL;
         return derived_index_record_size;
     case build_cache_image_section::graph_dependency_edges:
         return dependency_edge_record_size;
+    case build_cache_image_section::graph_type_identity_index:
+    case build_cache_image_section::graph_object_identity_index:
+    case build_cache_image_section::graph_link_target_index:
+        return historical_index_record_size;
     }
     return 0;
 }
@@ -451,6 +479,16 @@ status build_cache_image_view::bind(
         candidate[section_index(build_cache_image_section::graph_dependency_versions)];
     const auto& reverse_heads =
         candidate[section_index(build_cache_image_section::graph_reverse_dependency_heads)];
+    const auto& type_identity_index =
+        candidate[section_index(build_cache_image_section::graph_type_identity_index)];
+    const auto& object_identity_index =
+        candidate[section_index(build_cache_image_section::graph_object_identity_index)];
+    const auto& link_target_index =
+        candidate[section_index(build_cache_image_section::graph_link_target_index)];
+
+    const auto valid_historical_index = [](std::uint64_t count) noexcept {
+        return count != 0 && (count & (count - 1)) == 0;
+    };
 
     if (source_count > (std::numeric_limits<std::uint32_t>::max)() ||
         frontend_count > source_count ||
@@ -460,6 +498,9 @@ status build_cache_image_view::bind(
         intrinsic_refs.count != graph_intrinsic_type_count ||
         named_refs.count != dependency_versions.count + 1 ||
         reverse_heads.count != dependency_versions.count ||
+        !valid_historical_index(type_identity_index.count) ||
+        !valid_historical_index(object_identity_index.count) ||
+        !valid_historical_index(link_target_index.count) ||
         derived_entries > derived_index.count ||
         source_count > (std::numeric_limits<std::size_t>::max)() ||
         frontend_count > (std::numeric_limits<std::size_t>::max)() ||
@@ -1064,6 +1105,27 @@ status build_cache_image_view::construction(
     return {};
 }
 
+status build_cache_image_view::construction_at_slot(
+    std::size_t index,
+    source_construction_state& output) const noexcept {
+
+    output = {};
+
+    const auto& values =
+        section(build_cache_image_section::construction_states);
+    if (index >= values.count)
+        return {status_code::not_found};
+    if (index == 0)
+        return {};
+
+    if (index > (std::numeric_limits<std::uint32_t>::max)())
+        return {status_code::artifact_corrupt};
+
+    return construction(
+        type_handle{static_cast<std::uint32_t>(index)},
+        output);
+}
+
 TypeRef build_cache_image_view::intrinsic_ref(
     intrinsic_type type) const noexcept {
 
@@ -1182,6 +1244,153 @@ status build_cache_image_view::dependency_edge(
     return output.owner_handle != 0 && output.owner_version != 0
         ? status{}
         : status{status_code::artifact_corrupt};
+}
+
+type_handle build_cache_image_view::find_type_identity(
+    identity_ref identity,
+    const compiled_image_view& compiled) const noexcept {
+
+    if (!identity || identity.kind() != identity_kind::type)
+        return {};
+    const auto& index = section(build_cache_image_section::graph_type_identity_index);
+    if (index.count == 0 || (index.count & (index.count - 1)) != 0)
+        return {};
+    const auto hash = graph_identity_hash(identity);
+    const auto fingerprint = fold32(hash);
+    const auto mask = static_cast<std::size_t>(index.count - 1);
+    auto position = static_cast<std::size_t>(hash) & mask;
+    for (std::size_t probe = 0; probe < index.count; ++probe) {
+        const auto* slot = index.data + position * historical_index_record_size;
+        const auto handle = read_u32(slot + 4);
+        if (handle == 0)
+            return {};
+        if (read_u32(slot) == fingerprint &&
+            compiled.type_identity_at_slot(static_cast<std::size_t>(handle - 1)) == identity) {
+            return type_handle{handle};
+        }
+        position = (position + 1) & mask;
+    }
+    return {};
+}
+
+object_handle build_cache_image_view::find_object_identity(
+    identity_ref identity,
+    const compiled_image_view& compiled) const noexcept {
+
+    if (!identity || identity.kind() != identity_kind::object)
+        return {};
+    const auto& index = section(build_cache_image_section::graph_object_identity_index);
+    if (index.count == 0 || (index.count & (index.count - 1)) != 0)
+        return {};
+    const auto hash = graph_identity_hash(identity);
+    const auto fingerprint = fold32(hash);
+    const auto mask = static_cast<std::size_t>(index.count - 1);
+    auto position = static_cast<std::size_t>(hash) & mask;
+    for (std::size_t probe = 0; probe < index.count; ++probe) {
+        const auto* slot = index.data + position * historical_index_record_size;
+        const auto handle = read_u32(slot + 4);
+        if (handle == 0)
+            return {};
+        if (read_u32(slot) == fingerprint &&
+            compiled.object_identity_at_slot(static_cast<std::size_t>(handle - 1)) == identity) {
+            return object_handle{handle};
+        }
+        position = (position + 1) & mask;
+    }
+    return {};
+}
+
+link_handle build_cache_image_view::find_link_target(
+    object_endpoint target,
+    const compiled_image_view& compiled) const noexcept {
+
+    if (!target.object || !target.member)
+        return {};
+    const auto& index = section(build_cache_image_section::graph_link_target_index);
+    if (index.count == 0 || (index.count & (index.count - 1)) != 0)
+        return {};
+    const auto hash = endpoint_hash(target);
+    const auto fingerprint = fold32(hash);
+    const auto mask = static_cast<std::size_t>(index.count - 1);
+    auto position = static_cast<std::size_t>(hash) & mask;
+    for (std::size_t probe = 0; probe < index.count; ++probe) {
+        const auto* slot = index.data + position * historical_index_record_size;
+        const auto handle = read_u32(slot + 4);
+        if (handle == 0)
+            return {};
+        if (read_u32(slot) == fingerprint) {
+            compiled_image_link_record record;
+            if (compiled.link_raw(link_handle{handle}, record).ok() && record.target == target)
+                return link_handle{handle};
+        }
+        position = (position + 1) & mask;
+    }
+    return {};
+}
+
+std::size_t build_cache_image_view::type_identity_index_slot_count() const noexcept {
+    return static_cast<std::size_t>(
+        section(build_cache_image_section::graph_type_identity_index).count);
+}
+
+status build_cache_image_view::type_identity_index_slot(
+    std::size_t index,
+    graph_identity_index_slot& output) const noexcept {
+
+    output = {};
+    const auto& values =
+        section(build_cache_image_section::graph_type_identity_index);
+    if (index >= values.count)
+        return {status_code::not_found};
+    const auto* slot = values.data + index * historical_index_record_size;
+    output.fingerprint = read_u32(slot);
+    output.handle = read_u32(slot + 4);
+    return {};
+}
+
+std::size_t build_cache_image_view::object_identity_index_slot_count() const noexcept {
+    return static_cast<std::size_t>(
+        section(build_cache_image_section::graph_object_identity_index).count);
+}
+
+status build_cache_image_view::object_identity_index_slot(
+    std::size_t index,
+    graph_object_identity_index_slot& output) const noexcept {
+
+    output = {};
+    const auto& values =
+        section(build_cache_image_section::graph_object_identity_index);
+    if (index >= values.count)
+        return {status_code::not_found};
+    const auto* slot = values.data + index * historical_index_record_size;
+    output.fingerprint = read_u32(slot);
+    output.handle = read_u32(slot + 4);
+    return {};
+}
+
+std::size_t build_cache_image_view::link_target_index_slot_count() const noexcept {
+    return static_cast<std::size_t>(
+        section(build_cache_image_section::graph_link_target_index).count);
+}
+
+status build_cache_image_view::link_target_index_slot(
+    std::size_t index,
+    graph_link_index_slot& output) const noexcept {
+
+    output = {};
+    const auto& values =
+        section(build_cache_image_section::graph_link_target_index);
+    if (index >= values.count)
+        return {status_code::not_found};
+    const auto* slot = values.data + index * historical_index_record_size;
+    output.fingerprint = read_u32(slot);
+    output.handle = read_u32(slot + 4);
+    return {};
+}
+
+std::size_t build_cache_image_view::named_ref_count() const noexcept {
+    return static_cast<std::size_t>(
+        section(build_cache_image_section::graph_named_refs).count);
 }
 
 status build_cache_image_view::verify_contents() const noexcept {
@@ -1516,6 +1725,28 @@ status build_cache_image_view::verify_contents() const noexcept {
         }
     }
 
+    const auto verify_historical_index = [&](build_cache_image_section kind) noexcept {
+        const auto& values = section(kind);
+        for (std::size_t index = 0; index < values.count; ++index) {
+            const auto* slot = values.data + index * historical_index_record_size;
+            const auto fingerprint = read_u32(slot);
+            const auto handle = read_u32(slot + 4);
+            if (handle == 0) {
+                if (fingerprint != 0)
+                    return false;
+            } else if (fingerprint == 0) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    if (!verify_historical_index(build_cache_image_section::graph_type_identity_index) ||
+        !verify_historical_index(build_cache_image_section::graph_object_identity_index) ||
+        !verify_historical_index(build_cache_image_section::graph_link_target_index)) {
+        return {status_code::artifact_corrupt};
+    }
+
     return {};
 }
 
@@ -1760,6 +1991,33 @@ status build_cache_image_view::verify_against(
         }
     }
 
+    for (std::size_t index = 0; index < compiled.type_slot_count(); ++index) {
+        const auto identity = compiled.type_identity_at_slot(index);
+        if (!identity ||
+            find_type_identity(identity, compiled).value() != index + 1) {
+            return {status_code::artifact_corrupt};
+        }
+    }
+
+    for (std::size_t index = 0; index < compiled.object_slot_count(); ++index) {
+        const auto identity = compiled.object_identity_at_slot(index);
+        if (!identity ||
+            find_object_identity(identity, compiled).value() != index + 1) {
+            return {status_code::artifact_corrupt};
+        }
+    }
+
+    for (std::size_t index = 0; index < compiled.link_slot_count(); ++index) {
+        compiled_image_link_record link;
+        if (!compiled.link_raw(
+                link_handle{static_cast<std::uint32_t>(index + 1)},
+                link).ok() ||
+            !link.target.object || !link.target.member ||
+            find_link_target(link.target, compiled).value() != index + 1) {
+            return {status_code::artifact_corrupt};
+        }
+    }
+
     return {};
 }
 
@@ -1817,37 +2075,41 @@ status encode_build_cache_image(
             }
         }
 
-        const auto* interface_value = frontend.interface(source_value);
-        if (interface_value == nullptr)
+        source_frontend_persistence_record interface_record;
+        auto result = frontend.persistence_record(
+            source_value,
+            interface_record);
+        if (!result.ok())
+            return result;
+        if (!interface_record.present)
             continue;
 
         ++frontend_count;
-        const auto data = interface_value->data_view();
 
         std::uint32_t ignored = 0;
         if (!add_u32_count(
                 local_type_count,
-                data.local_types.size(),
+                interface_record.local_types,
                 ignored) ||
             !add_u32_count(
                 type_slot_count,
-                data.type_slots.size(),
+                interface_record.type_slots,
                 ignored) ||
             !add_u32_count(
                 object_slot_count,
-                data.object_slots.size(),
+                interface_record.object_slots,
                 ignored) ||
             !add_u32_count(
                 member_slot_count,
-                data.member_slots.size(),
+                interface_record.member_slots,
                 ignored)) {
             return {status_code::not_available};
         }
 
-        local_type_count += data.local_types.size();
-        type_slot_count += data.type_slots.size();
-        object_slot_count += data.object_slots.size();
-        member_slot_count += data.member_slots.size();
+        local_type_count += interface_record.local_types;
+        type_slot_count += interface_record.type_slots;
+        object_slot_count += interface_record.object_slots;
+        member_slot_count += interface_record.member_slots;
     }
 
     const auto fits_u32 = [](std::size_t value) noexcept {
@@ -1869,7 +2131,10 @@ status encode_build_cache_image(
         !fits_u32(graph.derived_index.size()) ||
         !fits_u32(graph.dependency_versions.size()) ||
         !fits_u32(graph.reverse_dependency_heads.size()) ||
-        !fits_u32(graph.dependency_edges.size())) {
+        !fits_u32(graph.dependency_edges.size()) ||
+        !fits_u32(graph.type_identity_index.size()) ||
+        !fits_u32(graph.object_identity_index.size()) ||
+        !fits_u32(graph.link_target_index.size())) {
         return {status_code::not_available};
     }
 
@@ -1914,6 +2179,12 @@ status encode_build_cache_image(
             u32_record_size, graph.reverse_dependency_heads.size()},
         {build_cache_image_section::graph_dependency_edges,
             dependency_edge_record_size, graph.dependency_edges.size()},
+        {build_cache_image_section::graph_type_identity_index,
+            historical_index_record_size, graph.type_identity_index.size()},
+        {build_cache_image_section::graph_object_identity_index,
+            historical_index_record_size, graph.object_identity_index.size()},
+        {build_cache_image_section::graph_link_target_index,
+            historical_index_record_size, graph.link_target_index.size()},
     }};
 
     std::uint64_t cursor = first_section_offset;
@@ -1999,37 +2270,60 @@ status encode_build_cache_image(
             text_cursor += text.size();
         }
 
-        const auto* interface_value = frontend.interface(source_value);
-        if (interface_value != nullptr) {
+        source_frontend_persistence_record interface_record;
+        auto result = frontend.persistence_record(
+            source_value,
+            interface_record);
+        if (!result.ok())
+            return result;
+
+        if (interface_record.present) {
             flags |= source_flag_frontend;
-            const auto data = interface_value->data_view();
 
             const build_cache_range local_type_range{
                 local_type_cursor,
-                static_cast<std::uint32_t>(data.local_types.size())};
+                static_cast<std::uint32_t>(interface_record.local_types)};
             const build_cache_range type_slot_range{
                 type_slot_cursor,
-                static_cast<std::uint32_t>(data.type_slots.size())};
+                static_cast<std::uint32_t>(interface_record.type_slots)};
             const build_cache_range object_slot_range{
                 object_slot_cursor,
-                static_cast<std::uint32_t>(data.object_slots.size())};
+                static_cast<std::uint32_t>(interface_record.object_slots)};
             const build_cache_range member_slot_range{
                 member_slot_cursor,
-                static_cast<std::uint32_t>(data.member_slots.size())};
+                static_cast<std::uint32_t>(interface_record.member_slots)};
 
             write_cache_range(directory_record + 24, local_type_range);
             write_cache_range(directory_record + 32, type_slot_range);
             write_cache_range(directory_record + 40, object_slot_range);
             write_cache_range(directory_record + 48, member_slot_range);
 
-            for (const auto identity : data.local_types) {
+            for (std::size_t item = 0;
+                 item < interface_record.local_types;
+                 ++item) {
+                identity_ref identity;
+                result = frontend.persistence_local_type(
+                    source_value,
+                    item,
+                    identity);
+                if (!result.ok() || !identity)
+                    return {status_code::initialization_failed};
                 write_u32(
                     local_types +
                         static_cast<std::size_t>(local_type_cursor++) * 4,
                     identity.value());
             }
 
-            for (const auto& slot : data.type_slots) {
+            for (std::size_t item = 0;
+                 item < interface_record.type_slots;
+                 ++item) {
+                source_interface_type_slot slot;
+                result = frontend.persistence_type_slot(
+                    source_value,
+                    item,
+                    slot);
+                if (!result.ok())
+                    return result;
                 auto* target =
                     type_slots +
                     static_cast<std::size_t>(type_slot_cursor++) *
@@ -2039,7 +2333,16 @@ status encode_build_cache_image(
                 write_u32(target + 8, slot.identity.value());
             }
 
-            for (const auto& slot : data.object_slots) {
+            for (std::size_t item = 0;
+                 item < interface_record.object_slots;
+                 ++item) {
+                source_interface_object_slot slot;
+                result = frontend.persistence_object_slot(
+                    source_value,
+                    item,
+                    slot);
+                if (!result.ok())
+                    return result;
                 auto* target =
                     object_slots +
                     static_cast<std::size_t>(object_slot_cursor++) *
@@ -2050,7 +2353,16 @@ status encode_build_cache_image(
                 write_u32(target + 12, slot.named_type.value());
             }
 
-            for (const auto& slot : data.member_slots) {
+            for (std::size_t item = 0;
+                 item < interface_record.member_slots;
+                 ++item) {
+                source_interface_member_slot slot;
+                result = frontend.persistence_member_slot(
+                    source_value,
+                    item,
+                    slot);
+                if (!result.ok())
+                    return result;
                 auto* target =
                     member_slots +
                     static_cast<std::size_t>(member_slot_cursor++) *
@@ -2280,6 +2592,24 @@ status encode_build_cache_image(
         write_u32(target + 4, value.next_for_target);
         write_u32(target + 8, value.owner_version);
     }
+
+    const auto write_historical_index = [&](build_cache_image_section kind, const auto& values) noexcept {
+        auto* data = section_data(kind);
+        for (std::size_t index = 0; index < values.size(); ++index) {
+            write_u32(data + index * historical_index_record_size, values[index].fingerprint);
+            write_u32(data + index * historical_index_record_size + 4, values[index].handle);
+        }
+    };
+
+    write_historical_index(
+        build_cache_image_section::graph_type_identity_index,
+        graph.type_identity_index);
+    write_historical_index(
+        build_cache_image_section::graph_object_identity_index,
+        graph.object_identity_index);
+    write_historical_index(
+        build_cache_image_section::graph_link_target_index,
+        graph.link_target_index);
 
     for (auto& value : layout) {
         std::uint64_t byte_count = 0;

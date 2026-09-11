@@ -1,5 +1,7 @@
 #include "source_environment.hpp"
 
+#include "../persistence/build_cache_image.hpp"
+
 #include <limits>
 #include <new>
 #include <stdexcept>
@@ -180,6 +182,71 @@ status source_interface::initialize(
                     position = (position + 1) & member_mask;
                 }
             }
+        }
+
+        for (const auto* imported : imports) {
+            if (imported == nullptr)
+                return {status_code::invalid_argument};
+            new_imports.push_back(imported);
+        }
+
+        local_type_values.swap(new_types);
+        type_slots.swap(new_type_slots);
+        object_slots.swap(new_object_slots);
+        member_slots.swap(new_member_slots);
+        imported_interfaces.swap(new_imports);
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+}
+
+status source_interface::initialize_persisted(
+    const build_cache_image_view& cache,
+    source_id source,
+    std::span<const source_interface* const> imports) noexcept {
+
+    if (!source)
+        return {status_code::invalid_argument};
+
+    build_cache_source_record persisted;
+    auto result = cache.source(source, persisted);
+    if (!result.ok())
+        return result;
+    if (!persisted.frontend_present)
+        return {status_code::not_found};
+
+    try {
+        std::vector<identity_ref> new_types(persisted.local_types.count);
+        std::vector<type_slot> new_type_slots(persisted.type_slots.count);
+        std::vector<object_slot> new_object_slots(persisted.object_slots.count);
+        std::vector<member_slot> new_member_slots(persisted.member_slots.count);
+        std::vector<const source_interface*> new_imports;
+        new_imports.reserve(imports.size());
+
+        for (std::size_t index = 0; index < new_types.size(); ++index) {
+            result = cache.frontend_local_type(source, index, new_types[index]);
+            if (!result.ok())
+                return result;
+        }
+        for (std::size_t index = 0; index < new_type_slots.size(); ++index) {
+            result = cache.frontend_type_slot(source, index, new_type_slots[index]);
+            if (!result.ok())
+                return result;
+        }
+        for (std::size_t index = 0; index < new_object_slots.size(); ++index) {
+            result = cache.frontend_object_slot(source, index, new_object_slots[index]);
+            if (!result.ok())
+                return result;
+        }
+        for (std::size_t index = 0; index < new_member_slots.size(); ++index) {
+            result = cache.frontend_member_slot(source, index, new_member_slots[index]);
+            if (!result.ok())
+                return result;
         }
 
         for (const auto* imported : imports) {

@@ -500,6 +500,19 @@ std::size_t compiled_image_view::string_slot_count() const noexcept {
         section(compiled_image_section::string_core).count);
 }
 
+string_id compiled_image_view::string_at_slot(
+    std::size_t index) const noexcept {
+
+    if (index >= string_slot_count() ||
+        index >= (std::numeric_limits<std::uint32_t>::max)()) {
+        return {};
+    }
+
+    const string_id id{static_cast<std::uint32_t>(index + 1)};
+    return string(id).empty() ? string_id{} : id;
+}
+
+
 std::string_view compiled_image_view::string(string_id id) const noexcept {
     if (!valid() || !id)
         return {};
@@ -567,6 +580,19 @@ std::size_t compiled_image_view::identity_slot_count() const noexcept {
     return static_cast<std::size_t>(
         section(compiled_image_section::identity_core).count);
 }
+
+identity_ref compiled_image_view::identity_at_slot(
+    std::size_t index) const noexcept {
+
+    const auto& values =
+        section(compiled_image_section::identity_core);
+    if (index >= values.count)
+        return {};
+
+    return identity_from_raw(read_u32(
+        values.data + index * identity_core_size));
+}
+
 
 identity_ref compiled_image_view::identity_from_raw(
     std::uint32_t value) const noexcept {
@@ -774,6 +800,29 @@ status compiled_image_view::type(
     return {};
 }
 
+status compiled_image_view::type_raw(
+    type_handle handle,
+    compiled_image_type_record& output) const noexcept {
+
+    if (!handle || !read_type_raw(handle.value(), output)) {
+        output = {};
+        return {status_code::not_found};
+    }
+    return {};
+}
+
+identity_ref compiled_image_view::type_identity_at_slot(
+    std::size_t index) const noexcept {
+
+    const auto& values =
+        section(compiled_image_section::type_identities);
+    if (index >= values.count)
+        return {};
+
+    return identity_from_raw(read_u32(values.data + index * 4));
+}
+
+
 identity_ref compiled_image_view::identity(
     type_handle handle) const noexcept {
 
@@ -907,6 +956,36 @@ member_index compiled_image_view::find_member(
     return {};
 }
 
+std::size_t compiled_image_view::member_slot_count() const noexcept {
+    return static_cast<std::size_t>(
+        section(compiled_image_section::members).count);
+}
+
+status compiled_image_view::member_at_slot(
+    std::size_t index,
+    compiled_image_member_record& output) const noexcept {
+
+    output = {};
+    const auto& values = section(compiled_image_section::members);
+    if (index >= values.count)
+        return {status_code::not_found};
+
+    const auto* record = values.data + index * member_record_size;
+    const auto access = static_cast<std::uint8_t>(record[8]);
+    if (!valid_member_access(access) || !zero_bytes(record + 9, 3))
+        return {status_code::artifact_corrupt};
+
+    const auto raw_name = read_u32(record);
+    const auto raw_type = read_u32(record + 4);
+    if (raw_name == 0 || raw_type == 0)
+        return {status_code::artifact_corrupt};
+
+    output.name = string_id{raw_name};
+    output.type = type_ref_from_raw(raw_type);
+    output.access = static_cast<source_member_access>(access);
+    return {};
+}
+
 std::size_t compiled_image_view::enum_value_count(
     type_handle handle) const noexcept {
 
@@ -954,6 +1033,35 @@ status compiled_image_view::enum_value(
         !zero_bytes(record + 13, 3)) {
         return {status_code::artifact_corrupt};
     }
+
+    const auto raw_name = read_u32(record + 8);
+    if (raw_name == 0)
+        return {status_code::artifact_corrupt};
+
+    output.bits = read_u64(record);
+    output.name = string_id{raw_name};
+    output.intrinsic = static_cast<intrinsic_type>(intrinsic);
+    return {};
+}
+
+std::size_t compiled_image_view::enum_value_slot_count() const noexcept {
+    return static_cast<std::size_t>(
+        section(compiled_image_section::enum_values).count);
+}
+
+status compiled_image_view::enum_value_at_slot(
+    std::size_t index,
+    compiled_image_enum_value_record& output) const noexcept {
+
+    output = {};
+    const auto& values = section(compiled_image_section::enum_values);
+    if (index >= values.count)
+        return {status_code::not_found};
+
+    const auto* record = values.data + index * enum_value_record_size;
+    const auto intrinsic = static_cast<std::uint8_t>(record[12]);
+    if (!valid_intrinsic(intrinsic) || !zero_bytes(record + 13, 3))
+        return {status_code::artifact_corrupt};
 
     const auto raw_name = read_u32(record + 8);
     if (raw_name == 0)
@@ -1018,6 +1126,29 @@ status compiled_image_view::object(
 
     return {};
 }
+
+status compiled_image_view::object_raw(
+    object_handle handle,
+    compiled_image_object_record& output) const noexcept {
+
+    if (!handle || !read_object_raw(handle.value(), output)) {
+        output = {};
+        return {status_code::not_found};
+    }
+    return {};
+}
+
+identity_ref compiled_image_view::object_identity_at_slot(
+    std::size_t index) const noexcept {
+
+    const auto& values =
+        section(compiled_image_section::object_identities);
+    if (index >= values.count)
+        return {};
+
+    return identity_from_raw(read_u32(values.data + index * 4));
+}
+
 
 identity_ref compiled_image_view::identity(
     object_handle handle) const noexcept {
@@ -1111,6 +1242,18 @@ status compiled_image_view::link(
     return {};
 }
 
+status compiled_image_view::link_raw(
+    link_handle handle,
+    compiled_image_link_record& output) const noexcept {
+
+    if (!handle || !read_link_raw(handle.value(), output)) {
+        output = {};
+        return {status_code::not_found};
+    }
+    return {};
+}
+
+
 link_handle compiled_image_view::find_link(
     object_endpoint target) const noexcept {
 
@@ -1177,6 +1320,31 @@ status compiled_image_view::canonical_type(
     output.detail = static_cast<std::uint8_t>(record[13]);
     return {};
 }
+
+status compiled_image_view::canonical_type_at_slot(
+    std::size_t index,
+    compiled_image_canonical_type_record& output) const noexcept {
+
+    output = {};
+    const auto& values = section(compiled_image_section::canonical_types);
+    if (index >= values.count ||
+        index >= (std::numeric_limits<std::uint32_t>::max)()) {
+        return {status_code::not_found};
+    }
+
+    const auto* record =
+        values.data + index * canonical_type_record_size;
+    const auto kind = static_cast<std::uint8_t>(record[12]);
+    if (!valid_canonical_kind(kind) || read_u16(record + 14) != 0)
+        return {status_code::artifact_corrupt};
+
+    output.payload = read_u64(record);
+    output.child_or_handle = read_u32(record + 8);
+    output.kind = static_cast<canonical_type_kind>(kind);
+    output.detail = static_cast<std::uint8_t>(record[13]);
+    return {};
+}
+
 
 bool compiled_image_view::intrinsic(
     TypeRef type,

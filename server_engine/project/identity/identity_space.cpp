@@ -1,5 +1,7 @@
 #include "identity_space.hpp"
 
+#include "../persistence/compiled_image.hpp"
+
 #include <array>
 #include <limits>
 #include <new>
@@ -58,6 +60,35 @@ identity_space::identity_space() noexcept
     if (buckets == nullptr)
         return;
 
+    for (std::size_t index = 0; index < semantic_bucket_count; ++index)
+        buckets[index].store(0, std::memory_order_relaxed);
+}
+
+identity_space::identity_space(
+    const compiled_image_view& baseline_value) noexcept
+    : baseline(&baseline_value),
+      baseline_slot_count(baseline_value.identity_slot_count()),
+      baseline_identity_count(baseline_value.identity_count()),
+      buckets(new (std::nothrow) std::atomic<std::uint32_t>[semantic_bucket_count]) {
+
+    root_record.identity = identity_node{
+        identity_node::construction_token{}, identity_ref{}, string_id{}};
+    root_record.fingerprint = 1;
+
+    for (auto& directory : directories)
+        directory.store(nullptr, std::memory_order_relaxed);
+
+    if (baseline_slot_count < identity_ref::maximum_slot) {
+        next_slot.store(
+            static_cast<std::uint32_t>(baseline_slot_count + 1),
+            std::memory_order_relaxed);
+    } else {
+        next_slot.store(0, std::memory_order_relaxed);
+    }
+    identity_count.store(0, std::memory_order_relaxed);
+
+    if (buckets == nullptr)
+        return;
     for (std::size_t index = 0; index < semantic_bucket_count; ++index)
         buckets[index].store(0, std::memory_order_relaxed);
 }
@@ -222,20 +253,31 @@ const identity_space::record* identity_space::published_record(
 }
 
 bool identity_space::valid(identity_ref identity) const noexcept {
+    if (!identity)
+        return false;
+    if (baseline != nullptr && identity.slot() <= baseline_slot_count)
+        return baseline->identity_valid(identity);
     return published_record(identity) != nullptr;
 }
 
 identity_ref identity_space::parent(identity_ref identity) const noexcept {
+    if (baseline != nullptr && identity && identity.slot() <= baseline_slot_count)
+        return baseline->identity_parent(identity);
     const auto* record = published_record(identity);
     return record == nullptr ? identity_ref{} : record->identity.parent();
 }
 
 string_id identity_space::name(identity_ref identity) const noexcept {
+    if (baseline != nullptr && identity && identity.slot() <= baseline_slot_count)
+        return baseline->identity_name(identity);
     const auto* record = published_record(identity);
     return record == nullptr ? string_id{} : record->identity.name();
 }
 
 identity_ref identity_space::at_slot(std::size_t index) const noexcept {
+    if (baseline != nullptr && index < baseline_slot_count)
+        return baseline->identity_at_slot(index);
+
     if (index >= slot_count() ||
         index >= identity_ref::maximum_slot) {
         return {};
@@ -351,7 +393,7 @@ status identity_space::resolve_declaration(
     output = {};
 
     if (!parent || !local_name || kind == identity_kind::root ||
-        published_record(parent) == nullptr) {
+        !valid(parent)) {
         return {status_code::invalid_argument};
     }
 
@@ -372,6 +414,23 @@ status identity_space::resolve_declaration(
 
         output = existing;
         return {};
+    }
+
+    if (baseline != nullptr) {
+        identity_ref existing;
+        if (baseline->find_identity(parent, local_name, kind, existing).ok()) {
+            output = existing;
+            return {};
+        }
+        for (const auto other_kind : {
+                 identity_kind::namespace_scope,
+                 identity_kind::type,
+                 identity_kind::object}) {
+            if (other_kind == kind)
+                continue;
+            if (baseline->find_identity(parent, local_name, other_kind, existing).ok())
+                return {status_code::semantic_conflict};
+        }
     }
 
     identity_ref candidate_ref;
@@ -439,15 +498,22 @@ identity_ref identity_space::find(
     identity_kind kind) const noexcept {
 
     if (!parent || !local_name || kind == identity_kind::root ||
-        published_record(parent) == nullptr) {
+        !valid(parent)) {
         return {};
     }
 
     const auto hash = semantic_hash_value(parent, local_name);
     const auto fingerprint = semantic_fingerprint(hash);
     const auto found = find_record(parent, local_name, hash, fingerprint);
+    if (found)
+        return found.kind() == kind ? found : identity_ref{};
 
-    return found && found.kind() == kind ? found : identity_ref{};
+    if (baseline != nullptr) {
+        identity_ref existing;
+        if (baseline->find_identity(parent, local_name, kind, existing).ok())
+            return existing;
+    }
+    return {};
 }
 
 identity_index_statistics identity_space::index_statistics() const noexcept {

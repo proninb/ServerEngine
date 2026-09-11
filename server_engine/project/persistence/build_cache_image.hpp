@@ -18,9 +18,9 @@ class compiled_image_view;
 class project_context;
 class source_manager_image_view;
 
-inline constexpr std::uint32_t build_cache_image_format_version = 1;
+inline constexpr std::uint32_t build_cache_image_format_version = 2;
 inline constexpr std::size_t build_cache_image_header_size = 256;
-inline constexpr std::size_t build_cache_image_directory_count = 20;
+inline constexpr std::size_t build_cache_image_directory_count = 23;
 inline constexpr std::size_t build_cache_image_directory_entry_size = 32;
 
 enum class build_cache_image_section : std::uint32_t {
@@ -44,6 +44,9 @@ enum class build_cache_image_section : std::uint32_t {
     graph_dependency_versions = 18,
     graph_reverse_dependency_heads = 19,
     graph_dependency_edges = 20,
+    graph_type_identity_index = 21,
+    graph_object_identity_index = 22,
+    graph_link_target_index = 23,
 };
 
 struct build_cache_range final {
@@ -173,6 +176,10 @@ public:
         type_handle handle,
         source_construction_state& output) const noexcept;
 
+    [[nodiscard]] status construction_at_slot(
+        std::size_t index,
+        source_construction_state& output) const noexcept;
+
     [[nodiscard]] TypeRef intrinsic_ref(intrinsic_type type) const noexcept;
     [[nodiscard]] TypeRef named_ref(type_handle handle) const noexcept;
 
@@ -192,6 +199,37 @@ public:
     [[nodiscard]] status dependency_edge(
         std::size_t index,
         graph_dependency_edge& output) const noexcept;
+
+    // BUILD-only historical indexes include tombstones; collision candidates
+    // are verified against compiled.bin before a handle is accepted.
+    [[nodiscard]] type_handle find_type_identity(
+        identity_ref identity,
+        const compiled_image_view& compiled) const noexcept;
+
+    [[nodiscard]] object_handle find_object_identity(
+        identity_ref identity,
+        const compiled_image_view& compiled) const noexcept;
+
+    [[nodiscard]] link_handle find_link_target(
+        object_endpoint target,
+        const compiled_image_view& compiled) const noexcept;
+
+    [[nodiscard]] std::size_t type_identity_index_slot_count() const noexcept;
+    [[nodiscard]] status type_identity_index_slot(
+        std::size_t index,
+        graph_identity_index_slot& output) const noexcept;
+
+    [[nodiscard]] std::size_t object_identity_index_slot_count() const noexcept;
+    [[nodiscard]] status object_identity_index_slot(
+        std::size_t index,
+        graph_object_identity_index_slot& output) const noexcept;
+
+    [[nodiscard]] std::size_t link_target_index_slot_count() const noexcept;
+    [[nodiscard]] status link_target_index_slot(
+        std::size_t index,
+        graph_link_index_slot& output) const noexcept;
+
+    [[nodiscard]] std::size_t named_ref_count() const noexcept;
 
     // Cold full-image audit. This validates section CRCs and all internal ranges,
     // sentinels, hash-table occupancy, dependency chains, and live statistics.
@@ -233,7 +271,7 @@ private:
     bool contributions_complete_value = false;
 };
 
-// Deterministic field-wise little-endian staging encoder for build_cache.bin v1.
+// Deterministic field-wise little-endian staging encoder for build_cache.bin v2.
 // It walks dense source_id and existing append-arena order only; no sort or
 // runtime hash-table traversal is used.
 [[nodiscard]] status encode_build_cache_image(

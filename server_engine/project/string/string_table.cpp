@@ -1,5 +1,7 @@
 #include "string_table.hpp"
 
+#include "../persistence/compiled_image.hpp"
+
 #include <cstring>
 #include <limits>
 #include <new>
@@ -17,9 +19,30 @@ namespace {
 
 } // namespace
 
-string_table::string_table() noexcept
-    : buckets(new (std::nothrow) std::atomic<record*>[bucket_count]),
-      pages(new (std::nothrow) std::atomic<record_page*>[page_count]) {
+string_table::string_table() noexcept {
+    initialize_indexes();
+}
+
+string_table::string_table(
+    const compiled_image_view& baseline_value) noexcept
+    : baseline(&baseline_value),
+      baseline_slot_count(baseline_value.string_slot_count()),
+      baseline_live_count(baseline_value.string_count()) {
+
+    if (baseline_slot_count < (std::numeric_limits<std::uint32_t>::max)()) {
+        next_id.store(
+            static_cast<std::uint32_t>(baseline_slot_count + 1),
+            std::memory_order_relaxed);
+    } else {
+        next_id.store(0, std::memory_order_relaxed);
+    }
+
+    initialize_indexes();
+}
+
+void string_table::initialize_indexes() noexcept {
+    buckets.reset(new (std::nothrow) std::atomic<record*>[bucket_count]);
+    pages.reset(new (std::nothrow) std::atomic<record_page*>[page_count]);
 
     if (buckets != nullptr) {
         for (std::size_t index = 0; index < bucket_count; ++index)
@@ -117,12 +140,12 @@ status string_table::intern(std::string_view value, string_id& output) noexcept 
     if (sizeof(record) > (std::numeric_limits<std::size_t>::max)() - value.size())
         return {status_code::not_available};
 
-    const auto hash = hash_text(value);
-    if (const auto* existing = find_record(value, hash); existing != nullptr) {
-        output = string_id{existing->id};
+    if (const auto existing = find(value); existing) {
+        output = existing;
         return {};
     }
 
+    const auto hash = hash_text(value);
     void* memory = nullptr;
     auto result = storage.allocate(sizeof(record) + value.size(), alignof(record), memory);
     if (!result.ok())
@@ -172,13 +195,26 @@ status string_table::intern(std::string_view value, string_id& output) noexcept 
 string_id string_table::find(std::string_view value) const noexcept {
     if (value.empty())
         return {};
-    const auto* found = find_record(value, hash_text(value));
-    return found == nullptr ? string_id{} : string_id{found->id};
+
+    if (const auto* found = find_record(value, hash_text(value)); found != nullptr)
+        return string_id{found->id};
+
+    if (baseline != nullptr) {
+        string_id output;
+        if (baseline->find_string(value, output).ok())
+            return output;
+    }
+
+    return {};
 }
 
 std::string_view string_table::get(string_id id) const noexcept {
     if (!id)
         return {};
+
+    if (baseline != nullptr && id.value() <= baseline_slot_count)
+        return baseline->string(id);
+
     auto* direct_page = page(id.value());
     if (direct_page == nullptr)
         return {};
@@ -192,6 +228,9 @@ std::string_view string_table::get(string_id id) const noexcept {
 string_id string_table::at_slot(std::size_t index) const noexcept {
     if (index >= maximum_id)
         return {};
+
+    if (baseline != nullptr && index < baseline_slot_count)
+        return baseline->string_at_slot(index);
 
     const auto raw_id = static_cast<std::uint32_t>(index + 1);
     auto* direct_page = page(raw_id);

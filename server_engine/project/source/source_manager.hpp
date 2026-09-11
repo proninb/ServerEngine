@@ -4,6 +4,7 @@
 #include "../../diagnostics/diagnostic_buffer.hpp"
 #include "../../operation.hpp"
 #include "../../status.hpp"
+#include "../storage/mapped_vector.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -17,9 +18,9 @@
 
 namespace cw::server {
 
-// Converts an external filesystem path into the canonical Source Manager spelling.
-// Callers that repeatedly resolve the same path should normalize once and use the
-// normalized lookup boundary instead of repeating filesystem/path construction.
+class build_cache_image_view;
+class source_manager_image_view;
+
 [[nodiscard]] status normalize_source_path(
     const std::filesystem::path& input,
     std::string& output) noexcept;
@@ -37,22 +38,17 @@ enum class source_acquire_result_kind : std::uint8_t {
     present,
 };
 
-// Immutable Source-local filesystem job. Worker threads may execute it without
-// accessing Source Manager or transaction-owned mutable state.
 struct source_acquire_job final {
     source_id source{};
     std::filesystem::path path;
     std::optional<file_snapshot_observation> baseline;
 };
 
-// Worker-produced acquisition result. Bytes remain detached until the coordinator
-// applies the result to one source_manager_update candidate.
 struct source_acquire_result final {
     source_id source{};
     source_acquire_result_kind kind = source_acquire_result_kind::unchanged;
     file_snapshot snapshot{};
 };
-
 
 struct source_manager_update_telemetry final {
     std::uint64_t path_index_full_rebuilds = 0;
@@ -63,12 +59,14 @@ struct source_manager_update_telemetry final {
 
 class source_manager_update;
 
-// Owns stable normalized-path -> source_id identity and committed immutable Source
-// revisions/dependencies. Path identity uses a compact open-addressed hot index and
-// contiguous path arena; filesystem normalization is outside the hot lookup path.
+// Owns stable Source identity. Persisted Sources remain in source_manager.bin /
+// build_cache.bin and are decoded only when an affected BUILD path touches them.
 class source_manager final {
 public:
     source_manager() = default;
+    source_manager(
+        const source_manager_image_view& baseline_sources_value,
+        const build_cache_image_view& baseline_cache_value) noexcept;
 
     source_manager(const source_manager&) = delete;
     source_manager& operator=(const source_manager&) = delete;
@@ -80,17 +78,19 @@ public:
     [[nodiscard]] std::span<const source_id> includes(source_id source) const noexcept;
     [[nodiscard]] std::span<const source_id> dependents(source_id source) const noexcept;
 
-    // Collects the transitive reverse dependency closure from committed edges.
-    // Work is proportional to affected Sources, not to the Project Source count.
+    // Allocation-free persistence access. Untouched baseline edges are read
+    // directly from source_manager.bin; sparse patches override them locally.
+    [[nodiscard]] std::size_t include_count(source_id source) const noexcept;
+    [[nodiscard]] source_id include_at(source_id source, std::size_t index) const noexcept;
+    [[nodiscard]] std::size_t dependent_count(source_id source) const noexcept;
+    [[nodiscard]] source_id dependent_at(source_id source, std::size_t index) const noexcept;
+
     [[nodiscard]] status collect_dependents(
         source_id source,
         std::vector<source_id>& output) const noexcept;
 
-    // Returned view remains valid until the next Source Manager publication.
     [[nodiscard]] std::string_view path(source_id source) const noexcept;
 
-    // Hot lookup boundary. normalized_path must already be produced by
-    // normalize_source_path() or come directly from Source Manager storage.
     [[nodiscard]] status find(
         std::string_view normalized_path,
         source_id& output) const noexcept;
@@ -103,7 +103,10 @@ public:
         return path_storage.size();
     }
 
-    // Compatibility/test convenience: one transactional in-memory publication.
+    [[nodiscard]] bool baseline_backed() const noexcept {
+        return baseline_sources != nullptr;
+    }
+
     [[nodiscard]] status publish_memory(
         std::string_view normalized_path,
         std::string_view text,
@@ -117,8 +120,6 @@ private:
         std::vector<source_id> dependents;
     };
 
-    // fingerprint is a folded XXH64 value. Full path comparison resolves the rare
-    // fingerprint collision; source==0 is the only empty bucket state.
     struct path_slot final {
         std::uint32_t fingerprint = 0;
         source_id source{};
@@ -137,15 +138,26 @@ private:
         std::span<const path_slot> index,
         source_id& output) const noexcept;
 
-    std::vector<source_record> records;
+    [[nodiscard]] static status read_baseline_record(
+        const void* context,
+        std::size_t index,
+        source_record& output) noexcept;
+
+    [[nodiscard]] static status read_baseline_state(
+        const void* context,
+        std::size_t index,
+        committed_source& output) noexcept;
+
+    const source_manager_image_view* baseline_sources = nullptr;
+    const build_cache_image_view* baseline_cache = nullptr;
+    std::size_t baseline_source_count = 0;
+
+    mapped_vector<source_record> records;
     std::vector<char> path_storage;
-    std::vector<committed_source> states;
+    mapped_vector<committed_source> states;
     std::vector<path_slot> path_index;
 };
 
-// Isolated candidate Source Manager mutation. It discovers stable Source identities,
-// owns changed snapshots/include edges, validates the candidate DAG, then publishes
-// only after all allocation-sensitive preparation has succeeded.
 class source_manager_update final {
 public:
     source_manager_update() noexcept = default;
@@ -156,13 +168,10 @@ public:
     source_manager_update(source_manager_update&&) noexcept = default;
     source_manager_update& operator=(source_manager_update&&) noexcept = default;
 
-    // Cold external boundary: normalizes path then delegates to resolve_normalized().
     [[nodiscard]] status resolve(
         const std::filesystem::path& path,
         source_id& output) noexcept;
 
-    // Hot path identity boundary. No filesystem operations, normalization, sorting,
-    // or allocation occur for an already-known Source.
     [[nodiscard]] status resolve_normalized(
         std::string_view normalized_path,
         source_id& output) noexcept;
@@ -172,7 +181,9 @@ public:
         std::string_view relative_path,
         source_id& output) noexcept;
 
-    [[nodiscard]] status prepare_acquire(source_id source, source_acquire_job& output) const noexcept;
+    [[nodiscard]] status prepare_acquire(
+        source_id source,
+        source_acquire_job& output) const noexcept;
 
     [[nodiscard]] static status execute_acquire(
         const source_acquire_job& job,
@@ -189,14 +200,10 @@ public:
     [[nodiscard]] std::span<const source_id> dependents(source_id source) const noexcept;
     [[nodiscard]] std::span<const source_id> changed_sources() const noexcept { return semantic_changes; }
 
-    // Collects the transitive reverse dependency closure from committed edges.
-    // Work is proportional to affected Sources, not to the Project Source count.
     [[nodiscard]] status collect_dependents(
         source_id source,
         std::vector<source_id>& output) const noexcept;
 
-    // Full validation is used by full build. Sparse validation checks only paths
-    // reachable from Sources whose include edges changed.
     [[nodiscard]] status validate_changed_source_graph(
         std::span<const source_id> changed,
         operation_id operation,

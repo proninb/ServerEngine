@@ -9,15 +9,30 @@
 
 namespace cw::server {
 
+class build_cache_image_view;
+class compiled_image_view;
+class source_manager_image_view;
 class project_build_orchestrator;
 class project_context;
 class project_semantic_services;
 
 // Owns every ID-bearing compiled Project structure that is replaced together by
-// successful REBUILD and destroyed together by LOAD replacement or UNLOAD.
+// successful REBUILD. A BUILD baseline binds these structures to mmap and keeps
+// only sparse post-baseline materialization locally.
 class compiled_project_state final {
 public:
     compiled_project_state() noexcept = default;
+
+    compiled_project_state(
+        const compiled_image_view& compiled,
+        const source_manager_image_view& sources_value,
+        const build_cache_image_view& build_cache) noexcept
+        : strings(compiled),
+          identities(compiled),
+          sources(sources_value, build_cache),
+          frontend_cache(build_cache, sources_value),
+          contributions(build_cache),
+          graph_value(compiled, build_cache) {}
 
     compiled_project_state(const compiled_project_state&) = delete;
     compiled_project_state& operator=(const compiled_project_state&) = delete;

@@ -1,6 +1,7 @@
 #include "source_contribution.hpp"
 
 #include "../frontend/source_facts_validation.hpp"
+#include "../persistence/build_cache_image.hpp"
 #include "../../diagnostics/diagnostic_buffer.hpp"
 
 #include <bit>
@@ -15,22 +16,22 @@ namespace {
 
 template<class T>
 [[nodiscard]] std::span<const T> checked_span(
-    const std::vector<T>& values,
-    source_fact_range range) noexcept {
+    const mapped_vector<T>& values,
+    source_fact_range range) {
 
     const auto begin = static_cast<std::size_t>(range.begin);
     const auto count = static_cast<std::size_t>(range.count);
     if (begin > values.size() || count > values.size() - begin || count == 0)
         return {};
-    return {values.data() + begin, count};
+    return values.span(begin, count);
 }
 
 template<class T>
 [[nodiscard]] std::span<const T> combined_span(
-    const std::vector<T>& committed,
-    const std::vector<T>& appended,
+    const mapped_vector<T>& committed,
+    const mapped_vector<T>& appended,
     std::size_t base,
-    source_fact_range range) noexcept {
+    source_fact_range range) {
 
     const auto begin = static_cast<std::size_t>(range.begin);
     const auto count = static_cast<std::size_t>(range.count);
@@ -39,12 +40,12 @@ template<class T>
     if (begin < base) {
         if (begin > committed.size() || count > committed.size() - begin || begin + count > base)
             return {};
-        return {committed.data() + begin, count};
+        return committed.span(begin, count);
     }
     const auto local = begin - base;
     if (local > appended.size() || count > appended.size() - local)
         return {};
-    return {appended.data() + local, count};
+    return appended.span(local, count);
 }
 
 [[nodiscard]] bool add_u32(
@@ -90,8 +91,8 @@ template<class T>
 }
 
 template<class T>
-void append_prepared(std::vector<T>& target, const std::vector<T>& source) noexcept {
-    for (const auto& value : source)
+void append_prepared(mapped_vector<T>& target, const mapped_vector<T>& source) noexcept {
+    for (const auto& value : source.local_values())
         target.push_back(value);
 }
 
@@ -127,7 +128,91 @@ template<class T>
     }
 }
 
+
+template<class T>
+[[nodiscard]] status reserve_with_headroom(mapped_vector<T>& values, std::size_t size) noexcept {
+    std::size_t capacity = 0;
+    if (!reserve_headroom_size(size, capacity))
+        return {status_code::not_available};
+    try {
+        values.reserve(capacity);
+        return {};
+    } catch (const std::bad_alloc&) {
+        return {status_code::initialization_failed};
+    } catch (const std::length_error&) {
+        return {status_code::not_available};
+    } catch (...) {
+        return {status_code::initialization_failed};
+    }
+}
+
 } // namespace
+
+source_contribution_cache::source_contribution_cache(
+    const build_cache_image_view& baseline_cache_value) noexcept
+    : baseline_cache(&baseline_cache_value),
+      statistics_value(baseline_cache_value.contribution_statistics()),
+      provenance_complete(baseline_cache_value.contributions_complete()) {
+
+    const auto source_slots = baseline_cache_value.source_count() + 1;
+    committed.sources.bind_baseline(
+        &baseline_cache_value,
+        source_slots,
+        [](const void* context, std::size_t index, source_contribution_state& output) noexcept {
+            output = {};
+            if (index == 0)
+                return status{};
+            if (index > (std::numeric_limits<std::uint32_t>::max)())
+                return status{status_code::artifact_corrupt};
+            return static_cast<const build_cache_image_view*>(context)->contribution_state(
+                source_id{static_cast<std::uint32_t>(index)}, output);
+        });
+
+    committed.types.bind_baseline(
+        &baseline_cache_value,
+        baseline_cache_value.contribution_type_count(),
+        [](const void* context, std::size_t index, source_contribution_type& output) noexcept {
+            return static_cast<const build_cache_image_view*>(context)->contribution_type(index, output);
+        });
+    committed.members.bind_baseline(
+        &baseline_cache_value,
+        baseline_cache_value.contribution_member_count(),
+        [](const void* context, std::size_t index, source_contribution_member& output) noexcept {
+            return static_cast<const build_cache_image_view*>(context)->contribution_member(index, output);
+        });
+    committed.modifiers.bind_baseline(
+        &baseline_cache_value,
+        baseline_cache_value.contribution_modifier_count(),
+        [](const void* context, std::size_t index, source_type_modifier& output) noexcept {
+            return static_cast<const build_cache_image_view*>(context)->contribution_modifier(index, output);
+        });
+    committed.enum_values.bind_baseline(
+        &baseline_cache_value,
+        baseline_cache_value.contribution_enum_value_count(),
+        [](const void* context, std::size_t index, source_contribution_enum_value& output) noexcept {
+            return static_cast<const build_cache_image_view*>(context)->contribution_enum_value(index, output);
+        });
+    committed.objects.bind_baseline(
+        &baseline_cache_value,
+        baseline_cache_value.contribution_object_count(),
+        [](const void* context, std::size_t index, source_contribution_object& output) noexcept {
+            return static_cast<const build_cache_image_view*>(context)->contribution_object(index, output);
+        });
+    committed.links.bind_baseline(
+        &baseline_cache_value,
+        baseline_cache_value.contribution_link_count(),
+        [](const void* context, std::size_t index, source_contribution_link& output) noexcept {
+            return static_cast<const build_cache_image_view*>(context)->contribution_link(index, output);
+        });
+    committed.construction.bind_baseline(
+        &baseline_cache_value,
+        baseline_cache_value.construction_slot_count() + 1,
+        [](const void* context, std::size_t index, source_construction_state& output) noexcept {
+            return static_cast<const build_cache_image_view*>(context)->construction_at_slot(
+                index,
+                output);
+        });
+}
 
 void source_contribution_cache::storage::swap(storage& other) noexcept {
     sources.swap(other.sources);
@@ -146,8 +231,10 @@ source_contribution_storage_usage source_contribution_cache::storage_usage() con
 
     const auto add_vector = [&](const auto& values) noexcept {
         using value_type = typename std::remove_reference_t<decltype(values)>::value_type;
-        output.retained_bytes += values.capacity() * sizeof(value_type);
-        output.reserve_bytes += (values.capacity() - values.size()) * sizeof(value_type);
+        const auto heap_records = values.heap_record_capacity();
+        output.retained_bytes += heap_records * sizeof(value_type);
+        if (values.local_capacity() > values.local_size())
+            output.reserve_bytes += (values.local_capacity() - values.local_size()) * sizeof(value_type);
     };
 
     add_vector(committed.sources);
@@ -1244,6 +1331,35 @@ status source_contribution_sparse_update::prepare_publish() noexcept {
 
         prepared_source_size = max_source + 1;
         prepared_construction_size = max_handle + 1;
+
+        if (owner->baseline_backed()) {
+            owner->committed.sources.reserve(prepared_source_size);
+            owner->committed.construction.reserve(prepared_construction_size);
+            owner->committed.types.reserve(type_base + candidate.types.size());
+            owner->committed.members.reserve(member_base + candidate.members.size());
+            owner->committed.modifiers.reserve(modifier_base + candidate.modifiers.size());
+            owner->committed.enum_values.reserve(enum_value_base + candidate.enum_values.size());
+            owner->committed.objects.reserve(object_base + candidate.objects.size());
+            owner->committed.links.reserve(link_base + candidate.links.size());
+
+            // Publication writes through mutable operator[]. Materialize every
+            // touched persisted slot now so publish_prepared() remains allocation-
+            // free/no-fail after the transaction's publication barrier.
+            for (const auto& patch : source_patches) {
+                if (patch.source.value() < owner->committed.sources.baseline_size())
+                    (void)owner->committed.sources[patch.source.value()];
+            }
+            for (const auto& patch : construction_patches) {
+                if (patch.handle.value() < owner->committed.construction.baseline_size())
+                    (void)owner->committed.construction[patch.handle.value()];
+            }
+
+            if (!owner->committed.sources.read_status().ok())
+                return owner->committed.sources.read_status();
+            if (!owner->committed.construction.read_status().ok())
+                return owner->committed.construction.read_status();
+        }
+
         if (prepared_source_size > owner->committed.sources.capacity() ||
             prepared_construction_size > owner->committed.construction.capacity() ||
             type_base + candidate.types.size() > owner->committed.types.capacity() ||

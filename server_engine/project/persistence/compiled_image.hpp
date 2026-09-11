@@ -128,6 +128,7 @@ public:
     }
 
     [[nodiscard]] std::size_t string_slot_count() const noexcept;
+    [[nodiscard]] string_id string_at_slot(std::size_t index) const noexcept;
     [[nodiscard]] std::string_view string(string_id id) const noexcept;
     [[nodiscard]] status find_string(
         std::string_view value,
@@ -138,6 +139,7 @@ public:
     }
 
     [[nodiscard]] std::size_t identity_slot_count() const noexcept;
+    [[nodiscard]] identity_ref identity_at_slot(std::size_t index) const noexcept;
     [[nodiscard]] identity_ref identity_root() const noexcept;
     [[nodiscard]] bool identity_valid(identity_ref identity) const noexcept;
     [[nodiscard]] identity_ref identity_parent(identity_ref identity) const noexcept;
@@ -157,7 +159,11 @@ public:
     [[nodiscard]] status type(
         type_handle handle,
         compiled_image_type_record& output) const noexcept;
+    [[nodiscard]] status type_raw(
+        type_handle handle,
+        compiled_image_type_record& output) const noexcept;
     [[nodiscard]] identity_ref identity(type_handle handle) const noexcept;
+    [[nodiscard]] identity_ref type_identity_at_slot(std::size_t index) const noexcept;
     [[nodiscard]] type_handle find_type(identity_ref identity) const noexcept;
 
     [[nodiscard]] std::size_t member_count(type_handle handle) const noexcept;
@@ -168,10 +174,18 @@ public:
     [[nodiscard]] member_index find_member(
         type_handle handle,
         string_id name) const noexcept;
+    [[nodiscard]] std::size_t member_slot_count() const noexcept;
+    [[nodiscard]] status member_at_slot(
+        std::size_t index,
+        compiled_image_member_record& output) const noexcept;
 
     [[nodiscard]] std::size_t enum_value_count(type_handle handle) const noexcept;
     [[nodiscard]] status enum_value(
         type_handle handle,
+        std::size_t index,
+        compiled_image_enum_value_record& output) const noexcept;
+    [[nodiscard]] std::size_t enum_value_slot_count() const noexcept;
+    [[nodiscard]] status enum_value_at_slot(
         std::size_t index,
         compiled_image_enum_value_record& output) const noexcept;
 
@@ -184,7 +198,11 @@ public:
     [[nodiscard]] status object(
         object_handle handle,
         compiled_image_object_record& output) const noexcept;
+    [[nodiscard]] status object_raw(
+        object_handle handle,
+        compiled_image_object_record& output) const noexcept;
     [[nodiscard]] identity_ref identity(object_handle handle) const noexcept;
+    [[nodiscard]] identity_ref object_identity_at_slot(std::size_t index) const noexcept;
     [[nodiscard]] object_handle find_object(identity_ref identity) const noexcept;
 
     [[nodiscard]] std::size_t link_count() const noexcept {
@@ -195,11 +213,17 @@ public:
     [[nodiscard]] status link(
         link_handle handle,
         compiled_image_link_record& output) const noexcept;
+    [[nodiscard]] status link_raw(
+        link_handle handle,
+        compiled_image_link_record& output) const noexcept;
     [[nodiscard]] link_handle find_link(object_endpoint target) const noexcept;
 
     [[nodiscard]] std::size_t canonical_type_slot_count() const noexcept;
     [[nodiscard]] status canonical_type(
         TypeRef type,
+        compiled_image_canonical_type_record& output) const noexcept;
+    [[nodiscard]] status canonical_type_at_slot(
+        std::size_t index,
         compiled_image_canonical_type_record& output) const noexcept;
     [[nodiscard]] bool intrinsic(
         TypeRef type,

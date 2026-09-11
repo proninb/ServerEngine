@@ -98,6 +98,7 @@
     <ClInclude Include="server_engine\project\identity\name_ref.hpp" />
     <ClInclude Include="server_engine\project\identity\identity_node.hpp" />
     <ClInclude Include="server_engine\project\storage\byte_arena.hpp" />
+    <ClInclude Include="server_engine\project\storage\mapped_vector.hpp" />
     <ClInclude Include="server_engine\project\identity\identity_space.hpp" />
     <ClInclude Include="server_engine\project\string\string_table.hpp" />
     <ClInclude Include="server_engine\project\frontend\source_facts.hpp" />
@@ -138,6 +139,7 @@
     <None Include="docs\SE_V3_10D1_COMPILED_IMAGE_V1.md" />
     <None Include="docs\SE_V3_10D2_BUILD_CACHE_IMAGE_V1.md" />
     <None Include="docs\SE_V3_10D3A_PERSISTENT_LIFECYCLE.md" />
+    <None Include="docs\SE_V3_10D3B_SPARSE_MAPPED_BUILD.md" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

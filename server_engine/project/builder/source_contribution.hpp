@@ -5,6 +5,7 @@
 #include "../../status.hpp"
 #include "../frontend/source_facts.hpp"
 #include "../graph/type_handle.hpp"
+#include "../storage/mapped_vector.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -13,6 +14,7 @@
 
 namespace cw::server {
 
+class build_cache_image_view;
 class diagnostic_buffer;
 class generation_builder;
 
@@ -111,14 +113,14 @@ struct source_contribution_storage_usage final {
 // Read-only persistence boundary over the physical append arenas. Stale slices
 // remain present so normal SAVE preserves all SourceContribution range indices.
 struct source_contribution_data_view final {
-    std::span<const source_contribution_state> sources;
-    std::span<const source_contribution_type> types;
-    std::span<const source_contribution_member> members;
-    std::span<const source_type_modifier> modifiers;
-    std::span<const source_contribution_enum_value> enum_values;
-    std::span<const source_contribution_object> objects;
-    std::span<const source_contribution_link> links;
-    std::span<const source_construction_state> construction;
+    mapped_vector_view<source_contribution_state> sources;
+    mapped_vector_view<source_contribution_type> types;
+    mapped_vector_view<source_contribution_member> members;
+    mapped_vector_view<source_type_modifier> modifiers;
+    mapped_vector_view<source_contribution_enum_value> enum_values;
+    mapped_vector_view<source_contribution_object> objects;
+    mapped_vector_view<source_contribution_link> links;
+    mapped_vector_view<source_construction_state> construction;
     source_contribution_statistics statistics{};
     bool complete = false;
 };
@@ -133,6 +135,8 @@ class source_contribution_sparse_update;
 class source_contribution_cache final {
 public:
     source_contribution_cache() = default;
+    explicit source_contribution_cache(
+        const build_cache_image_view& baseline_cache) noexcept;
 
     [[nodiscard]] source_contribution_cache_update begin_rebuild() noexcept;
     [[nodiscard]] source_contribution_sparse_update begin_incremental() noexcept;
@@ -150,14 +154,14 @@ public:
 
     [[nodiscard]] source_contribution_data_view data_view() const noexcept {
         return {
-            committed.sources,
-            committed.types,
-            committed.members,
-            committed.modifiers,
-            committed.enum_values,
-            committed.objects,
-            committed.links,
-            committed.construction,
+            mapped_vector_view<source_contribution_state>{committed.sources},
+            mapped_vector_view<source_contribution_type>{committed.types},
+            mapped_vector_view<source_contribution_member>{committed.members},
+            mapped_vector_view<source_type_modifier>{committed.modifiers},
+            mapped_vector_view<source_contribution_enum_value>{committed.enum_values},
+            mapped_vector_view<source_contribution_object>{committed.objects},
+            mapped_vector_view<source_contribution_link>{committed.links},
+            mapped_vector_view<source_construction_state>{committed.construction},
             statistics_value,
             provenance_complete,
         };
@@ -169,25 +173,27 @@ public:
     [[nodiscard]] bool equivalent(const source_facts& facts) const noexcept;
 
     [[nodiscard]] bool complete() const noexcept { return provenance_complete; }
+    [[nodiscard]] bool baseline_backed() const noexcept { return baseline_cache != nullptr; }
 
     void invalidate() noexcept { provenance_complete = false; }
 
 private:
     struct storage final {
-        std::vector<source_contribution_state> sources;
-        std::vector<source_contribution_type> types;
-        std::vector<source_contribution_member> members;
-        std::vector<source_type_modifier> modifiers;
-        std::vector<source_contribution_enum_value> enum_values;
-        std::vector<source_contribution_object> objects;
-        std::vector<source_contribution_link> links;
+        mapped_vector<source_contribution_state> sources;
+        mapped_vector<source_contribution_type> types;
+        mapped_vector<source_contribution_member> members;
+        mapped_vector<source_type_modifier> modifiers;
+        mapped_vector<source_contribution_enum_value> enum_values;
+        mapped_vector<source_contribution_object> objects;
+        mapped_vector<source_contribution_link> links;
         // One-based by type_handle; slot zero is the sentinel.
-        std::vector<source_construction_state> construction;
+        mapped_vector<source_construction_state> construction;
         source_contribution_statistics statistics{};
 
         void swap(storage& other) noexcept;
     };
 
+    const build_cache_image_view* baseline_cache = nullptr;
     storage committed;
     source_contribution_statistics statistics_value{};
     bool provenance_complete = true;

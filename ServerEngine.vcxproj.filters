@@ -66,6 +66,7 @@
     <ClInclude Include="server_engine\project\identity\name_ref.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\identity\identity_node.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\storage\byte_arena.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\storage\mapped_vector.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\identity\identity_space.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\string\string_table.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\frontend\source_facts.hpp"><Filter>Header Files</Filter></ClInclude>
