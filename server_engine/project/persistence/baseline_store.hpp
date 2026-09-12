@@ -12,6 +12,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace cw::server {
 
@@ -130,6 +131,11 @@ private:
     read_only_file_mapping compiled;
     read_only_file_mapping source_manager;
     read_only_file_mapping change_state;
+
+    // CURRENT v3 may own the compact BUILD decision gate directly. Canonical
+    // change_state.bin remains available for transaction compatibility.
+    std::vector<std::byte> embedded_change_state;
+
     read_only_file_mapping build_cache;
 
     friend class baseline_store;

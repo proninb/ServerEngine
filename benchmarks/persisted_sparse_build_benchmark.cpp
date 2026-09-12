@@ -491,7 +491,9 @@ void print_result(
 [[nodiscard]] int run_fast_gate() {
 #ifdef _WIN32
     constexpr std::size_t source_count = 100'000;
-    constexpr double dirty_limit_ms = 100.0;
+    constexpr double dirty_limit_ms = 10.0;
+    constexpr double manager_limit_ms = 5.0;
+    constexpr double baseline_open_limit_ms = 2.0;
 
     temporary_tree tree;
     std::filesystem::path configuration_path;
@@ -567,16 +569,33 @@ void print_result(
         build.telemetry.configuration_ns == 0 &&
         build.telemetry.fingerprint_ns == 0 &&
         build.telemetry.baseline_open_ns != 0 &&
-        build.telemetry.baseline_change_state_map_ns != 0 &&
+        build.telemetry.baseline_current_read_ns != 0 &&
+        build.telemetry.baseline_embedded_manifest_parse_ns != 0 &&
+        build.telemetry.baseline_change_state_map_ns == 0 &&
         build.telemetry.baseline_source_manager_map_ns == 0 &&
         build.telemetry.baseline_build_cache_map_ns == 0 &&
-        dirty_ms <= dirty_limit_ms;
+        dirty_ms <= dirty_limit_ms &&
+        static_cast<double>(
+            build.telemetry.manager_total_ns) / 1'000'000.0 <=
+                manager_limit_ms &&
+        static_cast<double>(
+            build.telemetry.baseline_open_ns) / 1'000'000.0 <=
+                baseline_open_limit_ms;
 
     std::cout
         << "D3D_FAST_DIRTY_GATE,"
         << (pass ? "PASS" : "FAIL")
         << ",dirty_ms=" << dirty_ms
-        << ",limit_ms=" << dirty_limit_ms
+        << ",dirty_limit_ms=" << dirty_limit_ms
+        << ",manager_ms="
+        << static_cast<double>(
+            build.telemetry.manager_total_ns) / 1'000'000.0
+        << ",manager_limit_ms=" << manager_limit_ms
+        << ",baseline_open_ms="
+        << static_cast<double>(
+            build.telemetry.baseline_open_ns) / 1'000'000.0
+        << ",baseline_open_limit_ms=" << baseline_open_limit_ms
+        << ",embedded_gate=1"
         << ",journal_records="
         << build.telemetry.journal_records
         << ",baseline_sources=" << source_count

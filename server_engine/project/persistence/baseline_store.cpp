@@ -44,15 +44,31 @@ constexpr std::string_view change_state_name = "change_state.bin";
 constexpr std::string_view build_cache_name = "build_cache.bin";
 constexpr std::string_view manifest_name = "manifest.bin";
 constexpr std::string_view current_name = "CURRENT";
-constexpr std::array<std::byte, 8> current_selector_magic{
+constexpr std::array<std::byte, 8> current_selector_magic_v2{
     std::byte{'S'}, std::byte{'E'}, std::byte{'C'}, std::byte{'U'},
     std::byte{'R'}, std::byte{'R'}, std::byte{'2'}, std::byte{0}};
-constexpr std::uint32_t current_selector_version = 2;
+constexpr std::uint32_t current_selector_version_v2 = 2;
 constexpr std::size_t current_selector_transaction_capacity = 64;
-constexpr std::size_t current_selector_header_size =
+constexpr std::size_t current_selector_header_size_v2 =
     8 + 4 + 4 + current_selector_transaction_capacity;
-constexpr std::size_t current_selector_size =
-    current_selector_header_size + manifest_size;
+constexpr std::size_t current_selector_size_v2 =
+    current_selector_header_size_v2 + manifest_size;
+
+constexpr std::array<std::byte, 8> current_selector_magic_v3{
+    std::byte{'S'}, std::byte{'E'}, std::byte{'C'}, std::byte{'U'},
+    std::byte{'R'}, std::byte{'R'}, std::byte{'3'}, std::byte{0}};
+constexpr std::uint32_t current_selector_version_v3 = 3;
+constexpr std::size_t current_selector_header_size_v3 =
+    8 + 4 + 4 + 8 + 8 + current_selector_transaction_capacity;
+constexpr std::size_t current_selector_manifest_offset_v3 =
+    current_selector_header_size_v3;
+constexpr std::size_t current_selector_change_state_offset_v3 =
+    current_selector_manifest_offset_v3 + manifest_size;
+constexpr std::size_t current_selector_change_state_limit =
+    64u * 1024u * 1024u;
+constexpr std::size_t current_selector_maximum_size =
+    current_selector_change_state_offset_v3 +
+    current_selector_change_state_limit;
 
 std::atomic<std::uint64_t> transaction_counter{0};
 
@@ -568,114 +584,20 @@ struct parsed_manifest final {
 [[nodiscard]] status create_current_selector(
     std::string_view transaction,
     std::span<const std::byte, manifest_size> manifest,
-    std::array<std::byte, current_selector_size>& output) noexcept {
+    std::span<const std::byte> change_state,
+    std::vector<std::byte>& output) noexcept {
+
+    output.clear();
 
     if (!valid_transaction_name(transaction) ||
-        transaction.size() > current_selector_transaction_capacity) {
+        transaction.size() > current_selector_transaction_capacity ||
+        change_state.size() > current_selector_change_state_limit) {
         return {status_code::invalid_argument};
     }
 
-    output.fill(std::byte{0});
-    std::copy(
-        current_selector_magic.begin(),
-        current_selector_magic.end(),
-        output.begin());
-
-    const auto write_selector_u32 =
-        [&output](std::size_t offset, std::uint32_t value) noexcept {
-            output[offset + 0] =
-                static_cast<std::byte>(value & 0xffu);
-            output[offset + 1] =
-                static_cast<std::byte>((value >> 8u) & 0xffu);
-            output[offset + 2] =
-                static_cast<std::byte>((value >> 16u) & 0xffu);
-            output[offset + 3] =
-                static_cast<std::byte>((value >> 24u) & 0xffu);
-        };
-
-    write_selector_u32(
-        8,
-        current_selector_version);
-    write_selector_u32(
-        12,
-        static_cast<std::uint32_t>(transaction.size()));
-
-    for (std::size_t index = 0;
-         index < transaction.size();
-         ++index) {
-        output[16 + index] =
-            static_cast<std::byte>(transaction[index]);
-    }
-
-    std::copy(
-        manifest.begin(),
-        manifest.end(),
-        output.begin() + current_selector_header_size);
-
-    const auto embedded =
-        std::span<const std::byte>{output}.subspan(
-            current_selector_header_size,
-            manifest_size);
-
-    if (!std::equal(
-            manifest.begin(),
-            manifest.end(),
-            embedded.begin(),
-            embedded.end())) {
-        return {status_code::artifact_corrupt};
-    }
-
-    parsed_manifest validated_manifest;
-    const auto validation =
-        parse_manifest(
-            embedded,
-            validated_manifest);
-    if (!validation.ok() ||
-        validated_manifest.transaction != transaction) {
-        return {status_code::artifact_corrupt};
-    }
-
-    return {};
-}
-
-[[nodiscard]] status read_current_selector(
-    const std::filesystem::path& root,
-    std::string& transaction,
-    std::array<std::byte, manifest_size>* manifest,
-    bool* embedded_manifest_available = nullptr) noexcept {
-
-    transaction.clear();
-    if (manifest != nullptr)
-        manifest->fill(std::byte{0});
-    if (embedded_manifest_available != nullptr)
-        *embedded_manifest_available = false;
-
-    std::vector<std::byte> bytes;
-    const auto result = read_small_file(
-        root / current_name,
-        current_selector_size,
-        bytes);
-    if (!result.ok())
-        return result;
-
-    if (bytes.size() == current_selector_size &&
-        std::equal(
-            current_selector_magic.begin(),
-            current_selector_magic.end(),
-            bytes.begin())) {
-
-        if (read_u32(bytes, 8) != current_selector_version)
-            return {status_code::artifact_corrupt};
-
-        const auto transaction_size = read_u32(bytes, 12);
-        if (transaction_size == 0 ||
-            transaction_size >
-                current_selector_transaction_capacity) {
-            return {status_code::artifact_corrupt};
-        }
-
+    if (change_state.empty()) {
         try {
-            transaction.resize(transaction_size);
+            output.assign(current_selector_size_v2, std::byte{0});
         }
         catch (const std::bad_alloc&) {
             return {status_code::not_available};
@@ -684,33 +606,276 @@ struct parsed_manifest final {
             return {status_code::not_available};
         }
 
-        for (std::size_t index = 0;
-             index < transaction_size;
-             ++index) {
-            transaction[index] =
-                static_cast<char>(
-                    std::to_integer<unsigned char>(
-                        bytes[16 + index]));
+        std::copy(
+            current_selector_magic_v2.begin(),
+            current_selector_magic_v2.end(),
+            output.begin());
+
+        auto write_selector_u32 =
+            [&output](std::size_t offset, std::uint32_t value) noexcept {
+                output[offset + 0] = static_cast<std::byte>(value & 0xffu);
+                output[offset + 1] = static_cast<std::byte>((value >> 8u) & 0xffu);
+                output[offset + 2] = static_cast<std::byte>((value >> 16u) & 0xffu);
+                output[offset + 3] = static_cast<std::byte>((value >> 24u) & 0xffu);
+            };
+
+        write_selector_u32(8, current_selector_version_v2);
+        write_selector_u32(
+            12,
+            static_cast<std::uint32_t>(transaction.size()));
+
+        for (std::size_t index = 0; index < transaction.size(); ++index) {
+            output[16 + index] =
+                static_cast<std::byte>(transaction[index]);
         }
 
-        if (!valid_transaction_name(transaction))
+        std::copy(
+            manifest.begin(),
+            manifest.end(),
+            output.begin() + current_selector_header_size_v2);
+        return {};
+    }
+
+    const auto total_size =
+        current_selector_change_state_offset_v3 + change_state.size();
+
+    try {
+        output.assign(total_size, std::byte{0});
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+
+    std::copy(
+        current_selector_magic_v3.begin(),
+        current_selector_magic_v3.end(),
+        output.begin());
+
+    auto write_selector_u32 =
+        [&output](std::size_t offset, std::uint32_t value) noexcept {
+            output[offset + 0] = static_cast<std::byte>(value & 0xffu);
+            output[offset + 1] = static_cast<std::byte>((value >> 8u) & 0xffu);
+            output[offset + 2] = static_cast<std::byte>((value >> 16u) & 0xffu);
+            output[offset + 3] = static_cast<std::byte>((value >> 24u) & 0xffu);
+        };
+
+    auto write_selector_u64 =
+        [&output](std::size_t offset, std::uint64_t value) noexcept {
+            for (std::size_t byte = 0; byte < 8; ++byte) {
+                output[offset + byte] =
+                    static_cast<std::byte>(
+                        (value >> (byte * 8)) & 0xffu);
+            }
+        };
+
+    write_selector_u32(8, current_selector_version_v3);
+    write_selector_u32(
+        12,
+        static_cast<std::uint32_t>(transaction.size()));
+    write_selector_u64(
+        16,
+        static_cast<std::uint64_t>(change_state.size()));
+    write_selector_u64(24, 0);
+
+    for (std::size_t index = 0; index < transaction.size(); ++index) {
+        output[32 + index] =
+            static_cast<std::byte>(transaction[index]);
+    }
+
+    std::copy(
+        manifest.begin(),
+        manifest.end(),
+        output.begin() + current_selector_manifest_offset_v3);
+
+    std::copy(
+        change_state.begin(),
+        change_state.end(),
+        output.begin() + current_selector_change_state_offset_v3);
+
+    const auto embedded =
+        std::span<const std::byte>{output}.subspan(
+            current_selector_manifest_offset_v3,
+            manifest_size);
+
+    parsed_manifest validated_manifest;
+    const auto validation =
+        parse_manifest(embedded, validated_manifest);
+
+    if (!validation.ok() ||
+        validated_manifest.transaction != transaction) {
+        output.clear();
+        return {status_code::artifact_corrupt};
+    }
+
+    return {};
+}
+
+
+[[nodiscard]] status read_current_selector(
+    const std::filesystem::path& root,
+    std::string& transaction,
+    std::array<std::byte, manifest_size>* manifest,
+    bool* embedded_manifest_available = nullptr,
+    std::vector<std::byte>* change_state = nullptr,
+    bool* embedded_change_state_available = nullptr) noexcept {
+
+    transaction.clear();
+
+    if (manifest != nullptr)
+        manifest->fill(std::byte{0});
+    if (embedded_manifest_available != nullptr)
+        *embedded_manifest_available = false;
+    if (change_state != nullptr)
+        change_state->clear();
+    if (embedded_change_state_available != nullptr)
+        *embedded_change_state_available = false;
+
+    std::vector<std::byte> bytes;
+    const auto result = read_small_file(
+        root / current_name,
+        current_selector_maximum_size,
+        bytes);
+    if (!result.ok())
+        return result;
+
+    const auto read_transaction =
+        [&](std::size_t offset,
+            std::size_t transaction_size) -> status {
+
+            if (transaction_size == 0 ||
+                transaction_size > current_selector_transaction_capacity ||
+                offset + transaction_size > bytes.size()) {
+                return {status_code::artifact_corrupt};
+            }
+
+            try {
+                transaction.resize(transaction_size);
+            }
+            catch (const std::bad_alloc&) {
+                return {status_code::not_available};
+            }
+            catch (const std::length_error&) {
+                return {status_code::not_available};
+            }
+
+            for (std::size_t index = 0; index < transaction_size; ++index) {
+                transaction[index] =
+                    static_cast<char>(
+                        std::to_integer<unsigned char>(
+                            bytes[offset + index]));
+            }
+
+            return valid_transaction_name(transaction)
+                ? status{}
+                : status{status_code::artifact_corrupt};
+        };
+
+    if (bytes.size() >= current_selector_change_state_offset_v3 &&
+        std::equal(
+            current_selector_magic_v3.begin(),
+            current_selector_magic_v3.end(),
+            bytes.begin())) {
+
+        if (read_u32(bytes, 8) != current_selector_version_v3 ||
+            read_u64(bytes, 24) != 0) {
             return {status_code::artifact_corrupt};
+        }
+
+        const auto transaction_size = read_u32(bytes, 12);
+        const auto change_state_size = read_u64(bytes, 16);
+
+        if (change_state_size == 0 ||
+            change_state_size > current_selector_change_state_limit ||
+            change_state_size >
+                (std::numeric_limits<std::size_t>::max)()) {
+            return {status_code::artifact_corrupt};
+        }
+
+        const auto expected_size =
+            current_selector_change_state_offset_v3 +
+            static_cast<std::size_t>(change_state_size);
+
+        if (bytes.size() != expected_size)
+            return {status_code::artifact_corrupt};
+
+        auto transaction_result =
+            read_transaction(32, transaction_size);
+        if (!transaction_result.ok())
+            return transaction_result;
 
         const auto embedded =
             std::span<const std::byte>{bytes}.subspan(
-                current_selector_header_size,
+                current_selector_manifest_offset_v3,
                 manifest_size);
 
         parsed_manifest validated_manifest;
         const auto manifest_result =
-            parse_manifest(
-                embedded,
-                validated_manifest);
-        if (!manifest_result.ok())
+            parse_manifest(embedded, validated_manifest);
+        if (!manifest_result.ok() ||
+            validated_manifest.transaction != transaction) {
+            return {status_code::artifact_corrupt};
+        }
+
+        if (manifest != nullptr) {
+            std::copy(
+                embedded.begin(),
+                embedded.end(),
+                manifest->begin());
+        }
+
+        if (embedded_manifest_available != nullptr)
+            *embedded_manifest_available = true;
+
+        if (change_state != nullptr) {
+            try {
+                change_state->assign(
+                    bytes.begin() + current_selector_change_state_offset_v3,
+                    bytes.end());
+            }
+            catch (const std::bad_alloc&) {
+                return {status_code::not_available};
+            }
+            catch (const std::length_error&) {
+                return {status_code::not_available};
+            }
+        }
+
+        if (embedded_change_state_available != nullptr)
+            *embedded_change_state_available = true;
+
+        return {};
+    }
+
+    if (bytes.size() == current_selector_size_v2 &&
+        std::equal(
+            current_selector_magic_v2.begin(),
+            current_selector_magic_v2.end(),
+            bytes.begin())) {
+
+        if (read_u32(bytes, 8) != current_selector_version_v2)
             return {status_code::artifact_corrupt};
 
-        if (validated_manifest.transaction != transaction)
+        const auto transaction_size = read_u32(bytes, 12);
+        auto transaction_result =
+            read_transaction(16, transaction_size);
+        if (!transaction_result.ok())
+            return transaction_result;
+
+        const auto embedded =
+            std::span<const std::byte>{bytes}.subspan(
+                current_selector_header_size_v2,
+                manifest_size);
+
+        parsed_manifest validated_manifest;
+        const auto manifest_result =
+            parse_manifest(embedded, validated_manifest);
+        if (!manifest_result.ok() ||
+            validated_manifest.transaction != transaction) {
             return {status_code::artifact_corrupt};
+        }
 
         if (manifest != nullptr) {
             std::copy(
@@ -728,8 +893,7 @@ struct parsed_manifest final {
     while (!bytes.empty()) {
         const auto value =
             static_cast<char>(
-                std::to_integer<unsigned char>(
-                    bytes.back()));
+                std::to_integer<unsigned char>(bytes.back()));
         if (value != '\n' && value != '\r')
             break;
         bytes.pop_back();
@@ -748,13 +912,10 @@ struct parsed_manifest final {
         return {status_code::not_available};
     }
 
-    for (std::size_t index = 0;
-         index < bytes.size();
-         ++index) {
+    for (std::size_t index = 0; index < bytes.size(); ++index) {
         transaction[index] =
             static_cast<char>(
-                std::to_integer<unsigned char>(
-                    bytes[index]));
+                std::to_integer<unsigned char>(bytes[index]));
     }
 
     return valid_transaction_name(transaction)
@@ -880,7 +1041,12 @@ std::span<const std::byte> baseline_snapshot::artifact(baseline_artifact_kind ki
     switch (kind) {
         case baseline_artifact_kind::compiled: return compiled.bytes();
         case baseline_artifact_kind::source_manager: return source_manager.bytes();
-        case baseline_artifact_kind::change_state: return change_state.bytes();
+        case baseline_artifact_kind::change_state:
+            return !embedded_change_state.empty()
+                ? std::span<const std::byte>{
+                    embedded_change_state.data(),
+                    embedded_change_state.size()}
+                : change_state.bytes();
         case baseline_artifact_kind::build_cache: return build_cache.bytes();
     }
     return {};
@@ -895,7 +1061,8 @@ bool baseline_snapshot::mapped(
     case baseline_artifact_kind::source_manager:
         return source_manager.open();
     case baseline_artifact_kind::change_state:
-        return change_state.open();
+        return !embedded_change_state.empty() ||
+            change_state.open();
     case baseline_artifact_kind::build_cache:
         return build_cache.open();
     }
@@ -925,6 +1092,8 @@ status baseline_store::open_current_decision(
         std::array<std::byte, manifest_size>
             embedded_manifest{};
         bool embedded_manifest_available = false;
+        std::vector<std::byte> embedded_change_state;
+        bool embedded_change_state_available = false;
 
         const auto current_read_begin =
             std::chrono::steady_clock::now();
@@ -933,7 +1102,9 @@ status baseline_store::open_current_decision(
             root,
             transaction,
             &embedded_manifest,
-            &embedded_manifest_available);
+            &embedded_manifest_available,
+            &embedded_change_state,
+            &embedded_change_state_available);
 
         if (telemetry != nullptr) {
             telemetry->current_read_ns =
@@ -1022,23 +1193,32 @@ status baseline_store::open_current_decision(
                 : result;
         }
 
-        const auto change_state_map_begin =
-            std::chrono::steady_clock::now();
+        if (embedded_change_state_available) {
+            candidate.embedded_change_state =
+                std::move(embedded_change_state);
 
-        result = candidate.change_state.map(
-            directory / change_state_name);
-
-        if (telemetry != nullptr) {
-            telemetry->change_state_map_ns =
-                elapsed_ns(
-                    change_state_map_begin,
-                    std::chrono::steady_clock::now());
+            if (telemetry != nullptr)
+                telemetry->change_state_map_ns = 0;
         }
+        else {
+            const auto change_state_map_begin =
+                std::chrono::steady_clock::now();
 
-        if (!result.ok()) {
-            return result.code == status_code::not_found
-                ? status{status_code::rebuild_required}
-                : result;
+            result = candidate.change_state.map(
+                directory / change_state_name);
+
+            if (telemetry != nullptr) {
+                telemetry->change_state_map_ns =
+                    elapsed_ns(
+                        change_state_map_begin,
+                        std::chrono::steady_clock::now());
+            }
+
+            if (!result.ok()) {
+                return result.code == status_code::not_found
+                    ? status{status_code::rebuild_required}
+                    : result;
+            }
         }
 
         const auto size_validation_begin =
@@ -1840,17 +2020,20 @@ status baseline_store::commit(
             return {status_code::persistence_failed};
         }
 
-        std::array<std::byte, current_selector_size> selector_bytes{};
+        std::vector<std::byte> selector_bytes;
         result = create_current_selector(
             transaction,
             manifest,
+            change_state,
             selector_bytes);
         if (!result.ok()) {
             cleanup_failed_transaction();
             return result;
         }
         const auto selector =
-            std::span<const std::byte>{selector_bytes};
+            std::span<const std::byte>{
+                selector_bytes.data(),
+                selector_bytes.size()};
         const auto selector_temp = root / ("CURRENT.tmp-" + std::to_string(process_id()) + "-" +
             std::to_string(transaction_counter.fetch_add(1, std::memory_order_relaxed)));
         result = durable_write_file(selector_temp, selector);
@@ -1874,7 +2057,9 @@ status baseline_store::commit(
             static_cast<std::uint64_t>(compiled.size()) +
             static_cast<std::uint64_t>(source_manager.size()) +
             static_cast<std::uint64_t>(change_state.size()) +
-            static_cast<std::uint64_t>(build_cache.size()) + manifest_size + current_selector_size;
+            static_cast<std::uint64_t>(build_cache.size()) +
+            manifest_size +
+            static_cast<std::uint64_t>(selector_bytes.size());
         return {};
     }
     catch (const std::bad_alloc&) {
