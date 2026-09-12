@@ -16,12 +16,17 @@ struct project_build_telemetry final {
     // project_manager BUILD boundary. These fields are populated for persisted
     // baseline BUILDs; orchestrator-only tests leave them zero.
     std::uint64_t configuration_identity_ns = 0;
+    std::uint64_t configuration_probe_ns = 0;
+    std::uint64_t configuration_gate_ns = 0;
     std::uint64_t configuration_ns = 0;
     std::uint64_t fingerprint_ns = 0;
     std::uint64_t baseline_open_ns = 0;
+    std::uint64_t baseline_current_read_ns = 0;
+    std::uint64_t baseline_embedded_manifest_parse_ns = 0;
     std::uint64_t baseline_manifest_validation_ns = 0;
     std::uint64_t baseline_compiled_map_ns = 0;
     std::uint64_t baseline_source_manager_map_ns = 0;
+    std::uint64_t baseline_change_state_map_ns = 0;
     std::uint64_t baseline_build_cache_map_ns = 0;
     std::uint64_t baseline_size_validation_ns = 0;
     std::uint64_t dirty_detection_ns = 0;

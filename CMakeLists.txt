@@ -36,6 +36,7 @@ add_library(server_engine_core STATIC
     server_engine/project/project_manager.cpp
     server_engine/project/persistence/baseline_store.cpp
     server_engine/project/persistence/source_manager_image.cpp
+    server_engine/project/persistence/change_state_image.cpp
     server_engine/project/persistence/compiled_image.cpp
     server_engine/project/persistence/build_cache_image.cpp
 )
