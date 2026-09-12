@@ -4,6 +4,7 @@
 #include "source/file_snapshot.hpp"
 #include "source/source_hash.hpp"
 #include "source/source_manager.hpp"
+#include "source/source_change_tracker.hpp"
 
 #include <array>
 #include <limits>
@@ -17,7 +18,7 @@ namespace {
 
 constexpr std::string_view fingerprint_tag =
     "SE-V3-PROJECT-BASELINE-COMPATIBILITY-V1";
-constexpr std::uint32_t build_contract_version = 2;
+constexpr std::uint32_t build_contract_version = 3;
 
 void append_u32(std::string& output, std::uint32_t value) {
     output.push_back(static_cast<char>(value & 0xffu));
@@ -119,7 +120,15 @@ status encode_project_baseline(
     if (!project.construction_backed())
         return {status_code::invalid_state};
 
+    source_change_capture change_capture;
     auto result =
+        prepare_source_change_capture(
+            project.sources(),
+            change_capture);
+    if (!result.ok())
+        return result;
+
+    result =
         encode_compiled_image(project, output.compiled);
     if (!result.ok())
         return result;
@@ -162,6 +171,7 @@ status encode_project_baseline(
 
     result = encode_build_cache_image(
         project,
+        change_capture,
         output.build_cache);
     if (!result.ok())
         return result;
@@ -273,6 +283,49 @@ status project_baseline_dirty_sources(
         dirty_sources.clear();
         return {status_code::not_available};
     }
+}
+
+status project_baseline_dirty_sources(
+    const source_manager_image_view& sources,
+    const build_cache_image_view& build_cache,
+    std::vector<source_id>& dirty_sources,
+    project_dirty_source_telemetry& telemetry) noexcept {
+
+    dirty_sources.clear();
+    telemetry = {};
+
+    source_change_detection_telemetry detector;
+    const auto fast_result =
+        detect_source_changes(
+            sources,
+            build_cache,
+            dirty_sources,
+            detector);
+
+    telemetry.journal_records =
+        detector.journal_records;
+    telemetry.journal_matched_sources =
+        detector.matched_sources;
+    telemetry.backend =
+        static_cast<std::uint32_t>(
+            detector.backend);
+    telemetry.fast_path =
+        detector.fast_path;
+    telemetry.fallback =
+        detector.fallback;
+
+    if (fast_result.ok())
+        return {};
+
+    if (fast_result.code != status_code::not_found) {
+        dirty_sources.clear();
+        return fast_result;
+    }
+
+    telemetry.fallback = true;
+    return project_baseline_dirty_sources(
+        sources,
+        dirty_sources);
 }
 
 status project_baseline_sources_changed(

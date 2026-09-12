@@ -213,10 +213,22 @@ status project_manager::build(
         return result;
     }
 
+    build_cache_image_view build_cache;
+    result = build_cache.bind(
+        snapshot.artifact(
+            baseline_artifact_kind::build_cache));
+    if (!result.ok()) {
+        abandon_construction();
+        return result;
+    }
+
     std::vector<source_id> dirty_sources;
+    project_dirty_source_telemetry dirty_telemetry;
     result = project_baseline_dirty_sources(
         sources,
-        dirty_sources);
+        build_cache,
+        dirty_sources,
+        dirty_telemetry);
     if (!result.ok()) {
         abandon_construction();
         return result;
@@ -237,6 +249,16 @@ status project_manager::build(
         value.telemetry.dirty_detection_ns = dirty_detection_ns;
         value.telemetry.baseline_sources = baseline_source_count;
         value.telemetry.dirty_sources = dirty_source_count;
+        value.telemetry.journal_records =
+            dirty_telemetry.journal_records;
+        value.telemetry.journal_matched_sources =
+            dirty_telemetry.journal_matched_sources;
+        value.telemetry.dirty_detection_backend =
+            dirty_telemetry.backend;
+        value.telemetry.dirty_detection_fast =
+            dirty_telemetry.fast_path;
+        value.telemetry.dirty_detection_fallback =
+            dirty_telemetry.fallback;
         value.telemetry.manager_total_ns = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - manager_begin).count());

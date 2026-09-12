@@ -20,6 +20,11 @@ struct project_build_telemetry final {
     std::uint64_t manager_total_ns = 0;
     std::uint64_t baseline_sources = 0;
     std::uint64_t dirty_sources = 0;
+    std::uint64_t journal_records = 0;
+    std::uint64_t journal_matched_sources = 0;
+    std::uint32_t dirty_detection_backend = 0;
+    bool dirty_detection_fast = false;
+    bool dirty_detection_fallback = false;
 
     std::uint64_t frontend_ns = 0;
     std::uint64_t builder_prepare_ns = 0;

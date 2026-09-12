@@ -25,6 +25,7 @@ add_library(server_engine_core STATIC
     server_engine/project/graph/graph.cpp
     server_engine/project/source/source_hash.cpp
     server_engine/project/source/file_snapshot.cpp
+    server_engine/project/source/source_change_tracker.cpp
     server_engine/project/source/source_manager.cpp
     server_engine/project/parser/lexer.cpp
     server_engine/project/parser/source_environment.cpp

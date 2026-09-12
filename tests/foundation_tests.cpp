@@ -3838,20 +3838,91 @@ struct build_cache_fixture final {
 }
 
 bool test_build_cache_image_roundtrip() {
-    static_assert(build_cache_image_directory_count == 23);
+    static_assert(build_cache_image_directory_count == 25);
     static_assert(
         static_cast<std::uint32_t>(
             build_cache_image_section::graph_dependency_edges) == 20);
     static_assert(
         static_cast<std::uint32_t>(
             build_cache_image_section::graph_link_target_index) == 23);
+    static_assert(
+        static_cast<std::uint32_t>(
+            build_cache_image_section::source_file_identity_index) == 24);
+    static_assert(
+        static_cast<std::uint32_t>(
+            build_cache_image_section::tracked_directory_identity_index) == 25);
 
     build_cache_fixture fixture;
     if (!prepare_build_cache_fixture(fixture))
         return false;
 
+    source_change_capture change_capture;
+    change_capture.checkpoint.backend =
+        source_change_backend::windows_usn;
+    change_capture.checkpoint.volume_serial = 0x1234u;
+    change_capture.checkpoint.journal_id = 0x5678u;
+    change_capture.checkpoint.next_usn = 42;
+
+    change_capture.file_index.assign(
+        16,
+        source_change_file_index_slot{});
+
+    const auto test_mix64 = [](std::uint64_t value) noexcept {
+        value ^= value >> 30;
+        value *= 0xbf58476d1ce4e5b9ULL;
+        value ^= value >> 27;
+        value *= 0x94d049bb133111ebULL;
+        return value ^ (value >> 31);
+    };
+
+    constexpr std::uint64_t root_file_reference = 101;
+    constexpr std::uint64_t dependency_file_reference = 202;
+    const auto file_mask =
+        change_capture.file_index.size() - 1;
+
+    auto insert_file = [&](std::uint64_t file_reference, source_id source) {
+        auto position =
+            static_cast<std::size_t>(
+                test_mix64(file_reference)) &
+            file_mask;
+
+        while (change_capture.file_index[position].file_reference != 0)
+            position = (position + 1) & file_mask;
+
+        change_capture.file_index[position] = {
+            file_reference,
+            source,
+            0,
+        };
+    };
+
+    insert_file(
+        root_file_reference,
+        fixture.root_source);
+    insert_file(
+        dependency_file_reference,
+        fixture.dependency_source);
+
+    change_capture.directory_index.assign(
+        16,
+        source_change_directory_index_slot{});
+
+    constexpr std::uint64_t directory_reference = 303;
+    const auto directory_position =
+        static_cast<std::size_t>(
+            test_mix64(directory_reference)) &
+        (change_capture.directory_index.size() - 1);
+    change_capture.directory_index[directory_position].file_reference =
+        directory_reference;
+    change_capture.directory_index[directory_position].flags =
+        source_change_directory_watch_topology |
+        source_change_directory_watch_arrival;
+
     std::vector<std::byte> image;
-    if (!encode_build_cache_image(*fixture.context, image).ok() ||
+    if (!encode_build_cache_image(
+            *fixture.context,
+            change_capture,
+            image).ok() ||
         image.empty()) {
         std::error_code error;
         std::filesystem::remove_all(fixture.directory, error);
@@ -3927,8 +3998,19 @@ bool test_build_cache_image_roundtrip() {
         fixture.context->compiled_graph().find(a_object);
     const auto named_io = view.named_ref(io_type);
 
+    const auto checkpoint = view.change_checkpoint();
     type_handle decoded_io;
     const bool pass =
+        checkpoint.backend == source_change_backend::windows_usn &&
+        checkpoint.volume_serial == 0x1234u &&
+        checkpoint.journal_id == 0x5678u &&
+        checkpoint.next_usn == 42 &&
+        view.find_source_file(root_file_reference) == fixture.root_source &&
+        view.find_source_file(dependency_file_reference) ==
+            fixture.dependency_source &&
+        view.directory_watch_flags(directory_reference) ==
+            (source_change_directory_watch_topology |
+             source_change_directory_watch_arrival) &&
         found_io &&
         view.contribution_state(
             fixture.root_source,

@@ -175,6 +175,8 @@ void print_header() {
     std::cout
         << "baseline_sources,scenario,"
            "manager_ms,baseline_open_ms,dirty_detection_ms,"
+           "dirty_backend,dirty_fast,dirty_fallback,"
+           "journal_records,journal_matched,"
            "orchestrator_ms,frontend_ms,builder_ms,"
            "source_prepare_ms,interface_prepare_ms,publish_us,"
            "dirty_sources,frontend_dirty,frontend_changed,affected,"
@@ -203,6 +205,11 @@ void print_result(
             telemetry.baseline_open_ns) / 1'000'000.0 << ','
         << static_cast<double>(
             telemetry.dirty_detection_ns) / 1'000'000.0 << ','
+        << telemetry.dirty_detection_backend << ','
+        << (telemetry.dirty_detection_fast ? 1 : 0) << ','
+        << (telemetry.dirty_detection_fallback ? 1 : 0) << ','
+        << telemetry.journal_records << ','
+        << telemetry.journal_matched_sources << ','
         << static_cast<double>(
             telemetry.total_ns) / 1'000'000.0 << ','
         << static_cast<double>(
@@ -447,6 +454,102 @@ void print_result(
     return pass;
 }
 
+[[nodiscard]] int run_fast_gate() {
+#ifdef _WIN32
+    constexpr std::size_t source_count = 100'000;
+    constexpr double dirty_limit_ms = 100.0;
+
+    temporary_tree tree;
+    std::filesystem::path configuration_path;
+    std::vector<std::filesystem::path> source_paths;
+
+    if (!prepare_project(
+            source_count,
+            tree,
+            configuration_path,
+            source_paths)) {
+        return 1;
+    }
+
+    baseline_commit_result baseline;
+    if (!create_baseline(
+            configuration_path,
+            baseline)) {
+        return 1;
+    }
+
+    project_manager manager;
+    diagnostic_buffer diagnostics;
+    project_build_result build;
+
+    const auto build_status = manager.build(
+        configuration_path,
+        operation_id{3110},
+        diagnostics,
+        build,
+        1);
+
+    const auto dirty_ms =
+        static_cast<double>(
+            build.telemetry.dirty_detection_ns) /
+        1'000'000.0;
+
+    const bool correctness =
+        build_status.ok() &&
+        !diagnostics.has_errors() &&
+        manager.state() ==
+            project_lifecycle_state::ready &&
+        validate_no_change(
+            source_count,
+            build);
+
+    print_result(
+        source_count,
+        "d3d_fast_no_change",
+        build,
+        correctness);
+
+    if (manager.ready())
+        (void)manager.unload();
+
+    if (!correctness)
+        return 1;
+
+    if (!build.telemetry.dirty_detection_fast) {
+        std::cout
+            << "D3D_FAST_DIRTY_GATE,UNAVAILABLE,"
+            << "backend="
+            << build.telemetry.dirty_detection_backend
+            << ",fallback="
+            << (build.telemetry.dirty_detection_fallback ? 1 : 0)
+            << ",run elevated on NTFS to require USN fast path\n";
+        return 3;
+    }
+
+    const bool pass =
+        !build.telemetry.dirty_detection_fallback &&
+        build.telemetry.dirty_sources == 0 &&
+        dirty_ms <= dirty_limit_ms;
+
+    std::cout
+        << "D3D_FAST_DIRTY_GATE,"
+        << (pass ? "PASS" : "FAIL")
+        << ",dirty_ms=" << dirty_ms
+        << ",limit_ms=" << dirty_limit_ms
+        << ",journal_records="
+        << build.telemetry.journal_records
+        << ",baseline_sources=" << source_count
+        << '\n';
+
+    return pass ? 0 : 1;
+#else
+    std::cout
+        << "D3D_FAST_DIRTY_GATE,UNAVAILABLE,"
+        << "backend=0,platform=non_windows\n";
+    return 3;
+#endif
+}
+
 [[nodiscard]] bool run_matrix() {
     constexpr std::size_t matrix[]{
         1'000,
@@ -479,6 +582,11 @@ int main(int argc, char** argv) {
     if (argc == 2 &&
         std::string_view{argv[1]} == "--gate") {
         return run_gate() ? 0 : 1;
+    }
+
+    if (argc == 2 &&
+        std::string_view{argv[1]} == "--fast-gate") {
+        return run_fast_gate();
     }
 
     if (argc == 2 &&

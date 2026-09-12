@@ -33,7 +33,11 @@ constexpr std::size_t header_frontend_count_offset = 56;
 constexpr std::size_t header_source_bytes_offset = 64;
 constexpr std::size_t header_derived_entries_offset = 72;
 constexpr std::size_t header_statistics_offset = 80;
-constexpr std::size_t header_reserved_begin = 136;
+constexpr std::size_t header_change_backend_offset = 136;
+constexpr std::size_t header_change_volume_offset = 144;
+constexpr std::size_t header_change_journal_offset = 152;
+constexpr std::size_t header_change_usn_offset = 160;
+constexpr std::size_t header_reserved_begin = 168;
 constexpr std::size_t header_directory_crc_offset = 240;
 constexpr std::size_t header_crc_offset = 248;
 
@@ -65,6 +69,8 @@ constexpr std::uint32_t derived_index_record_size = 8;
 constexpr std::uint32_t u32_record_size = 4;
 constexpr std::uint32_t dependency_edge_record_size = 12;
 constexpr std::uint32_t historical_index_record_size = 8;
+constexpr std::uint32_t source_file_identity_index_record_size = 16;
+constexpr std::uint32_t tracked_directory_identity_index_record_size = 16;
 
 struct layout_section final {
     build_cache_image_section kind{};
@@ -236,6 +242,10 @@ constexpr std::uint64_t crc64_polynomial = 0x42f0e1eba9ea3693ULL;
     case build_cache_image_section::graph_object_identity_index:
     case build_cache_image_section::graph_link_target_index:
         return historical_index_record_size;
+    case build_cache_image_section::source_file_identity_index:
+        return source_file_identity_index_record_size;
+    case build_cache_image_section::tracked_directory_identity_index:
+        return tracked_directory_identity_index_record_size;
     }
     return 0;
 }
@@ -345,6 +355,7 @@ void build_cache_image_view::reset() noexcept {
     source_count_value = 0;
     frontend_count_value = 0;
     derived_index_entries_value = 0;
+    change_checkpoint_value = {};
     frontend_complete_value = false;
     contributions_complete_value = false;
 }
@@ -376,6 +387,40 @@ status build_cache_image_view::bind(
 
     if ((flags & known_flags) != known_flags)
         return {status_code::artifact_corrupt};
+
+    const auto raw_change_backend =
+        read_u32(image.data() + header_change_backend_offset);
+    if (read_u32(image.data() + header_change_backend_offset + 4) != 0 ||
+        raw_change_backend >
+            static_cast<std::uint32_t>(
+                source_change_backend::windows_usn)) {
+        return {status_code::artifact_corrupt};
+    }
+
+    source_change_checkpoint change_checkpoint;
+    change_checkpoint.backend =
+        static_cast<source_change_backend>(raw_change_backend);
+    change_checkpoint.volume_serial =
+        read_u64(image.data() + header_change_volume_offset);
+    change_checkpoint.journal_id =
+        read_u64(image.data() + header_change_journal_offset);
+    change_checkpoint.next_usn =
+        static_cast<std::int64_t>(
+            read_u64(image.data() + header_change_usn_offset));
+
+    if (!change_checkpoint &&
+        (change_checkpoint.volume_serial != 0 ||
+         change_checkpoint.journal_id != 0 ||
+         change_checkpoint.next_usn != 0)) {
+        return {status_code::artifact_corrupt};
+    }
+
+    if (change_checkpoint &&
+        (change_checkpoint.volume_serial == 0 ||
+         change_checkpoint.journal_id == 0 ||
+         change_checkpoint.next_usn < 0)) {
+        return {status_code::artifact_corrupt};
+    }
 
     if (!zero_bytes(
             image.data() + header_reserved_begin,
@@ -485,9 +530,16 @@ status build_cache_image_view::bind(
         candidate[section_index(build_cache_image_section::graph_object_identity_index)];
     const auto& link_target_index =
         candidate[section_index(build_cache_image_section::graph_link_target_index)];
+    const auto& source_file_identity_index =
+        candidate[section_index(build_cache_image_section::source_file_identity_index)];
+    const auto& tracked_directory_identity_index =
+        candidate[section_index(build_cache_image_section::tracked_directory_identity_index)];
 
     const auto valid_historical_index = [](std::uint64_t count) noexcept {
         return count != 0 && (count & (count - 1)) == 0;
+    };
+    const auto valid_optional_index = [](std::uint64_t count) noexcept {
+        return count == 0 || (count & (count - 1)) == 0;
     };
 
     if (source_count > (std::numeric_limits<std::uint32_t>::max)() ||
@@ -501,6 +553,14 @@ status build_cache_image_view::bind(
         !valid_historical_index(type_identity_index.count) ||
         !valid_historical_index(object_identity_index.count) ||
         !valid_historical_index(link_target_index.count) ||
+        !valid_optional_index(source_file_identity_index.count) ||
+        !valid_optional_index(tracked_directory_identity_index.count) ||
+        (!change_checkpoint &&
+         (source_file_identity_index.count != 0 ||
+          tracked_directory_identity_index.count != 0)) ||
+        (change_checkpoint &&
+         source_count != 0 &&
+         source_file_identity_index.count == 0) ||
         derived_entries > derived_index.count ||
         source_count > (std::numeric_limits<std::size_t>::max)() ||
         frontend_count > (std::numeric_limits<std::size_t>::max)() ||
@@ -549,6 +609,7 @@ status build_cache_image_view::bind(
     source_count_value = static_cast<std::size_t>(source_count);
     frontend_count_value = static_cast<std::size_t>(frontend_count);
     derived_index_entries_value = static_cast<std::size_t>(derived_entries);
+    change_checkpoint_value = change_checkpoint;
     frontend_complete_value = true;
     contributions_complete_value = true;
 
@@ -621,6 +682,99 @@ status build_cache_image_view::source(
     output.object_slots = read_cache_range(record + 40);
     output.member_slots = read_cache_range(record + 48);
     return {};
+}
+
+source_id build_cache_image_view::find_source_file(
+    std::uint64_t file_reference) const noexcept {
+
+    if (file_reference == 0)
+        return {};
+
+    const auto& values =
+        section(build_cache_image_section::source_file_identity_index);
+    if (values.count == 0 ||
+        (values.count & (values.count - 1)) != 0) {
+        return {};
+    }
+
+    const auto mask =
+        static_cast<std::size_t>(values.count - 1);
+    auto position =
+        static_cast<std::size_t>(mix64(file_reference)) & mask;
+
+    for (std::size_t probe = 0; probe < values.count; ++probe) {
+        const auto* slot =
+            values.data +
+            position * source_file_identity_index_record_size;
+        const auto candidate = read_u64(slot);
+
+        if (candidate == 0)
+            return {};
+
+        if (candidate == file_reference) {
+            const source_id source{read_u32(slot + 8)};
+            if (source &&
+                static_cast<std::size_t>(source.value()) <=
+                    source_count_value &&
+                read_u32(slot + 12) == 0) {
+                return source;
+            }
+            return {};
+        }
+
+        position = (position + 1) & mask;
+    }
+
+    return {};
+}
+
+std::uint32_t build_cache_image_view::directory_watch_flags(
+    std::uint64_t file_reference) const noexcept {
+
+    if (file_reference == 0)
+        return 0;
+
+    const auto& values =
+        section(build_cache_image_section::tracked_directory_identity_index);
+    if (values.count == 0 ||
+        (values.count & (values.count - 1)) != 0) {
+        return 0;
+    }
+
+    const auto mask =
+        static_cast<std::size_t>(values.count - 1);
+    auto position =
+        static_cast<std::size_t>(mix64(file_reference)) & mask;
+
+    for (std::size_t probe = 0; probe < values.count; ++probe) {
+        const auto* slot =
+            values.data +
+            position *
+                tracked_directory_identity_index_record_size;
+
+        const auto candidate =
+            read_u64(slot);
+
+        if (candidate == 0)
+            return 0;
+
+        if (candidate == file_reference) {
+            const auto flags = read_u32(slot + 8);
+            const auto reserved = read_u32(slot + 12);
+
+            if (reserved != 0 ||
+                flags == 0 ||
+                (flags & ~source_change_directory_watch_known) != 0) {
+                return 0;
+            }
+
+            return flags;
+        }
+
+        position = (position + 1) & mask;
+    }
+
+    return 0;
 }
 
 std::string_view build_cache_image_view::source_text(
@@ -1519,6 +1673,67 @@ status build_cache_image_view::verify_contents() const noexcept {
         return {status_code::artifact_corrupt};
     }
 
+    const auto& source_file_index =
+        section(build_cache_image_section::source_file_identity_index);
+    for (std::size_t index = 0;
+         index < source_file_index.count;
+         ++index) {
+
+        const auto* slot =
+            source_file_index.data +
+            index * source_file_identity_index_record_size;
+        const auto file_reference = read_u64(slot);
+        const auto raw_source = read_u32(slot + 8);
+        const auto reserved = read_u32(slot + 12);
+
+        if (reserved != 0)
+            return {status_code::artifact_corrupt};
+
+        if (file_reference == 0) {
+            if (raw_source != 0)
+                return {status_code::artifact_corrupt};
+            continue;
+        }
+
+        const auto indexed_source =
+            find_source_file(file_reference);
+        if (raw_source == 0 ||
+            raw_source > source_count_value ||
+            !indexed_source ||
+            indexed_source.value() != raw_source) {
+            return {status_code::artifact_corrupt};
+        }
+    }
+
+    const auto& directory_index =
+        section(build_cache_image_section::tracked_directory_identity_index);
+    for (std::size_t index = 0;
+         index < directory_index.count;
+         ++index) {
+
+        const auto* slot =
+            directory_index.data +
+            index *
+                tracked_directory_identity_index_record_size;
+
+        const auto file_reference = read_u64(slot);
+        const auto flags = read_u32(slot + 8);
+        const auto reserved = read_u32(slot + 12);
+
+        if (file_reference == 0) {
+            if (flags != 0 || reserved != 0)
+                return {status_code::artifact_corrupt};
+            continue;
+        }
+
+        if (reserved != 0 ||
+            flags == 0 ||
+            (flags & ~source_change_directory_watch_known) != 0 ||
+            directory_watch_flags(file_reference) != flags) {
+            return {status_code::artifact_corrupt};
+        }
+    }
+
     const auto& states =
         section(build_cache_image_section::contribution_states);
     const auto& types =
@@ -2025,6 +2240,18 @@ status encode_build_cache_image(
     const project_context& project,
     std::vector<std::byte>& output) noexcept {
 
+    source_change_capture empty_capture;
+    return encode_build_cache_image(
+        project,
+        empty_capture,
+        output);
+}
+
+status encode_build_cache_image(
+    const project_context& project,
+    const source_change_capture& change_capture,
+    std::vector<std::byte>& output) noexcept {
+
     output.clear();
 
     const auto& frontend = project.frontend_cache();
@@ -2185,6 +2412,12 @@ status encode_build_cache_image(
             historical_index_record_size, graph.object_identity_index.size()},
         {build_cache_image_section::graph_link_target_index,
             historical_index_record_size, graph.link_target_index.size()},
+        {build_cache_image_section::source_file_identity_index,
+            source_file_identity_index_record_size,
+            change_capture.file_index.size()},
+        {build_cache_image_section::tracked_directory_identity_index,
+            tracked_directory_identity_index_record_size,
+            change_capture.directory_index.size()},
     }};
 
     std::uint64_t cursor = first_section_offset;
@@ -2611,6 +2844,43 @@ status encode_build_cache_image(
         build_cache_image_section::graph_link_target_index,
         graph.link_target_index);
 
+    auto* source_file_index =
+        section_data(
+            build_cache_image_section::source_file_identity_index);
+    for (std::size_t index = 0;
+         index < change_capture.file_index.size();
+         ++index) {
+        const auto& value =
+            change_capture.file_index[index];
+        auto* target =
+            source_file_index +
+            index *
+                source_file_identity_index_record_size;
+        write_u64(target, value.file_reference);
+        write_u32(target + 8, value.source.value());
+        write_u32(target + 12, 0);
+    }
+
+    auto* tracked_directory_index =
+        section_data(
+            build_cache_image_section::tracked_directory_identity_index);
+    for (std::size_t index = 0;
+         index < change_capture.directory_index.size();
+         ++index) {
+
+        const auto& value =
+            change_capture.directory_index[index];
+
+        auto* target =
+            tracked_directory_index +
+            index *
+                tracked_directory_identity_index_record_size;
+
+        write_u64(target, value.file_reference);
+        write_u32(target + 8, value.flags);
+        write_u32(target + 12, 0);
+    }
+
     for (auto& value : layout) {
         std::uint64_t byte_count = 0;
         if (!multiply_u64(
@@ -2667,6 +2937,24 @@ status encode_build_cache_image(
     write_u64(
         base + header_statistics_offset + 48,
         contribution.statistics.links);
+
+    write_u32(
+        base + header_change_backend_offset,
+        static_cast<std::uint32_t>(
+            change_capture.checkpoint.backend));
+    write_u32(
+        base + header_change_backend_offset + 4,
+        0);
+    write_u64(
+        base + header_change_volume_offset,
+        change_capture.checkpoint.volume_serial);
+    write_u64(
+        base + header_change_journal_offset,
+        change_capture.checkpoint.journal_id);
+    write_u64(
+        base + header_change_usn_offset,
+        static_cast<std::uint64_t>(
+            change_capture.checkpoint.next_usn));
 
     for (std::size_t index = 0; index < layout.size(); ++index) {
         const auto& value = layout[index];

@@ -63,6 +63,7 @@
     <ClCompile Include="server_engine\project\graph\graph.cpp" />
     <ClCompile Include="server_engine\project\source\source_hash.cpp" />
     <ClCompile Include="server_engine\project\source\file_snapshot.cpp" />
+    <ClCompile Include="server_engine\project\source\source_change_tracker.cpp" />
     <ClCompile Include="server_engine\project\source\source_manager.cpp" />
     <ClCompile Include="server_engine\project\parser\lexer.cpp" />
     <ClCompile Include="server_engine\project\parser\source_environment.cpp" />
@@ -117,6 +118,7 @@
     <ClInclude Include="server_engine\project\source\source_hash.hpp" />
     <ClInclude Include="server_engine\project\source\file_snapshot.hpp" />
     <ClInclude Include="server_engine\project\source\source_snapshot.hpp" />
+    <ClInclude Include="server_engine\project\source\source_change_tracker.hpp" />
     <ClInclude Include="server_engine\project\source\source_manager.hpp" />
     <ClInclude Include="server_engine\project\parser\token.hpp" />
     <ClInclude Include="server_engine\project\parser\lexer.hpp" />
@@ -140,6 +142,7 @@
     <None Include="docs\SE_V3_10D2_BUILD_CACHE_IMAGE_V1.md" />
     <None Include="docs\SE_V3_10D3A_PERSISTENT_LIFECYCLE.md" />
     <None Include="docs\SE_V3_10D3B_SPARSE_MAPPED_BUILD.md" />
+    <None Include="docs\SE_V3_10D3D_FAST_DIRTY_DETECTION.md" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

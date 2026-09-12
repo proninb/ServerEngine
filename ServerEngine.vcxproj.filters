@@ -31,6 +31,7 @@
     <ClCompile Include="server_engine\project\graph\graph.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="server_engine\project\source\source_hash.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="server_engine\project\source\file_snapshot.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="server_engine\project\source\source_change_tracker.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="server_engine\project\source\source_manager.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="server_engine\project\parser\lexer.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="server_engine\project\parser\source_environment.cpp"><Filter>Source Files</Filter></ClCompile>
@@ -85,6 +86,7 @@
     <ClInclude Include="server_engine\project\source\source_hash.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\source\file_snapshot.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\source\source_snapshot.hpp"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="server_engine\project\source\source_change_tracker.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\source\source_manager.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\parser\token.hpp"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="server_engine\project\parser\lexer.hpp"><Filter>Header Files</Filter></ClInclude>

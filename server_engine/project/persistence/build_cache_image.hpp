@@ -5,6 +5,7 @@
 #include "../builder/source_contribution.hpp"
 #include "../graph/graph.hpp"
 #include "../parser/source_environment.hpp"
+#include "../source/source_change_tracker.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -18,9 +19,9 @@ class compiled_image_view;
 class project_context;
 class source_manager_image_view;
 
-inline constexpr std::uint32_t build_cache_image_format_version = 2;
+inline constexpr std::uint32_t build_cache_image_format_version = 3;
 inline constexpr std::size_t build_cache_image_header_size = 256;
-inline constexpr std::size_t build_cache_image_directory_count = 23;
+inline constexpr std::size_t build_cache_image_directory_count = 25;
 inline constexpr std::size_t build_cache_image_directory_entry_size = 32;
 
 enum class build_cache_image_section : std::uint32_t {
@@ -47,6 +48,8 @@ enum class build_cache_image_section : std::uint32_t {
     graph_type_identity_index = 21,
     graph_object_identity_index = 22,
     graph_link_target_index = 23,
+    source_file_identity_index = 24,
+    tracked_directory_identity_index = 25,
 };
 
 struct build_cache_range final {
@@ -115,6 +118,16 @@ public:
         build_cache_source_record& output) const noexcept;
 
     [[nodiscard]] std::string_view source_text(source_id id) const noexcept;
+
+    [[nodiscard]] source_change_checkpoint change_checkpoint() const noexcept {
+        return change_checkpoint_value;
+    }
+
+    [[nodiscard]] source_id find_source_file(
+        std::uint64_t file_reference) const noexcept;
+
+    [[nodiscard]] std::uint32_t directory_watch_flags(
+        std::uint64_t file_reference) const noexcept;
 
     [[nodiscard]] status frontend_local_type(
         source_id source,
@@ -267,6 +280,7 @@ private:
     std::size_t source_count_value = 0;
     std::size_t frontend_count_value = 0;
     std::size_t derived_index_entries_value = 0;
+    source_change_checkpoint change_checkpoint_value{};
     bool frontend_complete_value = false;
     bool contributions_complete_value = false;
 };
@@ -276,6 +290,11 @@ private:
 // runtime hash-table traversal is used.
 [[nodiscard]] status encode_build_cache_image(
     const project_context& project,
+    std::vector<std::byte>& output) noexcept;
+
+[[nodiscard]] status encode_build_cache_image(
+    const project_context& project,
+    const source_change_capture& change_capture,
     std::vector<std::byte>& output) noexcept;
 
 } // namespace cw::server

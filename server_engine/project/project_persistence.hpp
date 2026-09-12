@@ -6,6 +6,7 @@
 #include "persistence/build_cache_image.hpp"
 #include "project_configuration.hpp"
 
+#include <cstdint>
 #include <vector>
 
 namespace cw::server {
@@ -32,9 +33,23 @@ struct project_baseline_images final {
 
 // Compares filesystem Sources with one persisted Source Manager image. Metadata is
 // only a fast path; content hash decides semantic equality after a metadata miss.
+struct project_dirty_source_telemetry final {
+    std::uint64_t journal_records = 0;
+    std::uint64_t journal_matched_sources = 0;
+    std::uint32_t backend = 0;
+    bool fast_path = false;
+    bool fallback = false;
+};
+
 [[nodiscard]] status project_baseline_dirty_sources(
     const source_manager_image_view& sources,
     std::vector<source_id>& dirty_sources) noexcept;
+
+[[nodiscard]] status project_baseline_dirty_sources(
+    const source_manager_image_view& sources,
+    const build_cache_image_view& build_cache,
+    std::vector<source_id>& dirty_sources,
+    project_dirty_source_telemetry& telemetry) noexcept;
 
 [[nodiscard]] status project_baseline_sources_changed(
     const source_manager_image_view& sources,
