@@ -153,11 +153,16 @@ status project_manager::build(
         return {status_code::invalid_state};
 
     project_configuration configuration;
+    const auto configuration_begin = std::chrono::steady_clock::now();
     auto result = load_project_configuration_file(
         configuration_path,
         operation,
         diagnostics,
         configuration);
+    const auto configuration_end = std::chrono::steady_clock::now();
+    const auto configuration_ns = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            configuration_end - configuration_begin).count());
 
     if (!result.ok()) {
         abandon_construction();
@@ -165,9 +170,14 @@ status project_manager::build(
     }
 
     baseline_fingerprint fingerprint;
+    const auto fingerprint_begin = std::chrono::steady_clock::now();
     result = make_project_baseline_fingerprint(
         configuration,
         fingerprint);
+    const auto fingerprint_end = std::chrono::steady_clock::now();
+    const auto fingerprint_ns = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            fingerprint_end - fingerprint_begin).count());
     if (!result.ok()) {
         abandon_construction();
         return result;
@@ -244,9 +254,16 @@ status project_manager::build(
     const auto dirty_source_count =
         static_cast<std::uint64_t>(dirty_sources.size());
 
+    std::uint64_t baseline_activation_ns = 0;
+    std::uint64_t build_activation_ns = 0;
+
     const auto publish_manager_telemetry = [&](project_build_result& value) noexcept {
+        value.telemetry.configuration_ns = configuration_ns;
+        value.telemetry.fingerprint_ns = fingerprint_ns;
         value.telemetry.baseline_open_ns = baseline_open_ns;
         value.telemetry.dirty_detection_ns = dirty_detection_ns;
+        value.telemetry.baseline_activation_ns = baseline_activation_ns;
+        value.telemetry.build_activation_ns = build_activation_ns;
         value.telemetry.baseline_sources = baseline_source_count;
         value.telemetry.dirty_sources = dirty_source_count;
         value.telemetry.journal_records =
@@ -265,16 +282,28 @@ status project_manager::build(
     };
 
     if (dirty_sources.empty()) {
+        const auto baseline_activation_begin =
+            std::chrono::steady_clock::now();
         const auto activate_result = activate_baseline_reserved(
             std::move(configuration),
             configuration_path,
             std::move(snapshot),
             nullptr);
+        const auto baseline_activation_end =
+            std::chrono::steady_clock::now();
+        baseline_activation_ns = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                baseline_activation_end -
+                baseline_activation_begin).count());
+
         publish_manager_telemetry(output);
         return activate_result;
     }
 
     try {
+        const auto build_activation_begin =
+            std::chrono::steady_clock::now();
+
         auto candidate = std::unique_ptr<project_context>{
             new project_context(
                 std::move(configuration),
@@ -283,6 +312,14 @@ status project_manager::build(
 
         result = candidate->activate_build_baseline(
             std::move(snapshot));
+
+        const auto build_activation_end =
+            std::chrono::steady_clock::now();
+        build_activation_ns = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                build_activation_end -
+                build_activation_begin).count());
+
         if (!result.ok()) {
             publish_manager_telemetry(output);
             abandon_construction();

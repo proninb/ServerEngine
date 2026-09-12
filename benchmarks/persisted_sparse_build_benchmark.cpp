@@ -174,7 +174,9 @@ struct sparse_case_result final {
 void print_header() {
     std::cout
         << "baseline_sources,scenario,"
-           "manager_ms,baseline_open_ms,dirty_detection_ms,"
+           "manager_ms,configuration_ms,fingerprint_ms,"
+           "baseline_open_ms,dirty_detection_ms,"
+           "baseline_activation_ms,build_activation_ms,"
            "dirty_backend,dirty_fast,dirty_fallback,"
            "journal_records,journal_matched,"
            "orchestrator_ms,frontend_ms,builder_ms,"
@@ -202,9 +204,17 @@ void print_result(
         << static_cast<double>(
             telemetry.manager_total_ns) / 1'000'000.0 << ','
         << static_cast<double>(
+            telemetry.configuration_ns) / 1'000'000.0 << ','
+        << static_cast<double>(
+            telemetry.fingerprint_ns) / 1'000'000.0 << ','
+        << static_cast<double>(
             telemetry.baseline_open_ns) / 1'000'000.0 << ','
         << static_cast<double>(
             telemetry.dirty_detection_ns) / 1'000'000.0 << ','
+        << static_cast<double>(
+            telemetry.baseline_activation_ns) / 1'000'000.0 << ','
+        << static_cast<double>(
+            telemetry.build_activation_ns) / 1'000'000.0 << ','
         << telemetry.dirty_detection_backend << ','
         << (telemetry.dirty_detection_fast ? 1 : 0) << ','
         << (telemetry.dirty_detection_fallback ? 1 : 0) << ','
@@ -550,6 +560,159 @@ void print_result(
 #endif
 }
 
+[[nodiscard]] int run_fast_modify_gate() {
+#ifdef _WIN32
+    constexpr std::size_t source_count = 100'000;
+    constexpr double dirty_limit_ms = 100.0;
+
+    temporary_tree tree;
+    std::filesystem::path configuration_path;
+    std::vector<std::filesystem::path> source_paths;
+
+    if (!prepare_project(
+            source_count,
+            tree,
+            configuration_path,
+            source_paths)) {
+        return 1;
+    }
+
+    baseline_commit_result baseline;
+    if (!create_baseline(
+            configuration_path,
+            baseline)) {
+        return 1;
+    }
+
+    const auto target = source_count / 2;
+    const auto changed_text =
+        "struct " + type_name(target) +
+        " { int value; };\n";
+
+    if (!write_text(
+            source_paths[target],
+            changed_text)) {
+        return 1;
+    }
+
+    project_manager manager;
+    diagnostic_buffer diagnostics;
+    project_build_result build;
+
+    const auto build_status = manager.build(
+        configuration_path,
+        operation_id{3111},
+        diagnostics,
+        build,
+        1);
+
+    const auto dirty_ms =
+        static_cast<double>(
+            build.telemetry.dirty_detection_ns) /
+        1'000'000.0;
+
+    const bool sparse_correctness =
+        build_status.ok() &&
+        !diagnostics.has_errors() &&
+        manager.state() ==
+            project_lifecycle_state::ready &&
+        validate_sparse_modify(
+            source_count,
+            build) &&
+        build.telemetry.journal_matched_sources == 1 &&
+        build.telemetry.sources.source_graph_visited <= 1 &&
+        build.telemetry.sources.reverse_edge_patches == 0 &&
+        build.telemetry.builder.validation_visited_types == 1 &&
+        build.telemetry.builder.validation_dependency_edges == 0;
+
+    const bool timing_correctness =
+        build.telemetry.configuration_ns != 0 &&
+        build.telemetry.fingerprint_ns != 0 &&
+        build.telemetry.baseline_open_ns != 0 &&
+        build.telemetry.dirty_detection_ns != 0 &&
+        build.telemetry.baseline_activation_ns == 0 &&
+        build.telemetry.build_activation_ns != 0 &&
+        build.telemetry.manager_total_ns != 0;
+
+    const bool correctness =
+        sparse_correctness &&
+        timing_correctness;
+
+    print_result(
+        source_count,
+        "d3d_fast_modify_one",
+        build,
+        correctness);
+
+    if (manager.ready())
+        (void)manager.unload();
+
+    if (!correctness)
+        return 1;
+
+    if (!build.telemetry.dirty_detection_fast) {
+        std::cout
+            << "D3D_FAST_MODIFY_GATE,UNAVAILABLE,"
+            << "backend="
+            << build.telemetry.dirty_detection_backend
+            << ",fallback="
+            << (build.telemetry.dirty_detection_fallback ? 1 : 0)
+            << ",run elevated on NTFS to require USN fast path\n";
+        return 3;
+    }
+
+    const bool pass =
+        build.telemetry.dirty_detection_backend == 1 &&
+        !build.telemetry.dirty_detection_fallback &&
+        build.telemetry.dirty_sources == 1 &&
+        build.telemetry.journal_matched_sources == 1 &&
+        dirty_ms <= dirty_limit_ms;
+
+    const auto accounted_ns =
+        build.telemetry.configuration_ns +
+        build.telemetry.fingerprint_ns +
+        build.telemetry.baseline_open_ns +
+        build.telemetry.dirty_detection_ns +
+        build.telemetry.build_activation_ns +
+        build.telemetry.total_ns;
+
+    const auto unaccounted_ns =
+        build.telemetry.manager_total_ns > accounted_ns
+            ? build.telemetry.manager_total_ns - accounted_ns
+            : 0;
+
+    std::cout
+        << "D3D_FAST_MODIFY_GATE,"
+        << (pass ? "PASS" : "FAIL")
+        << ",dirty_ms=" << dirty_ms
+        << ",limit_ms=" << dirty_limit_ms
+        << ",journal_records="
+        << build.telemetry.journal_records
+        << ",journal_matched="
+        << build.telemetry.journal_matched_sources
+        << ",dirty_sources="
+        << build.telemetry.dirty_sources
+        << ",source_graph_visited="
+        << build.telemetry.sources.source_graph_visited
+        << ",validation_visited_types="
+        << build.telemetry.builder.validation_visited_types
+        << ",manager_ms="
+        << static_cast<double>(
+            build.telemetry.manager_total_ns) / 1'000'000.0
+        << ",unaccounted_ms="
+        << static_cast<double>(unaccounted_ns) / 1'000'000.0
+        << ",baseline_sources=" << source_count
+        << '\n';
+
+    return pass ? 0 : 1;
+#else
+    std::cout
+        << "D3D_FAST_MODIFY_GATE,UNAVAILABLE,"
+        << "backend=0,platform=non_windows\n";
+    return 3;
+#endif
+}
+
 [[nodiscard]] bool run_matrix() {
     constexpr std::size_t matrix[]{
         1'000,
@@ -587,6 +750,11 @@ int main(int argc, char** argv) {
     if (argc == 2 &&
         std::string_view{argv[1]} == "--fast-gate") {
         return run_fast_gate();
+    }
+
+    if (argc == 2 &&
+        std::string_view{argv[1]} == "--fast-modify-gate") {
+        return run_fast_modify_gate();
     }
 
     if (argc == 2 &&
