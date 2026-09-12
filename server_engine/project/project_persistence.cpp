@@ -228,6 +228,15 @@ status encode_project_baseline(
             output.source_manager);
         if (!result.ok())
             return result;
+
+        result = encode_change_state_image(
+            project.sources().source_count(),
+            change_capture.journal_anchor_path,
+            change_capture,
+            output.change_state);
+        if (!result.ok())
+            return result;
+
     }
     catch (const std::bad_alloc&) {
         return {status_code::not_available};
@@ -245,12 +254,16 @@ status encode_project_baseline(
 
     compiled_image_view compiled;
     source_manager_image_view sources;
+    change_state_image_view change_state;
     build_cache_image_view build_cache;
 
     result = compiled.bind(output.compiled);
     if (!result.ok())
         return result;
     result = sources.bind(output.source_manager);
+    if (!result.ok())
+        return result;
+    result = change_state.bind(output.change_state);
     if (!result.ok())
         return result;
     result = build_cache.bind(output.build_cache);
@@ -261,6 +274,9 @@ status encode_project_baseline(
     if (!result.ok())
         return result;
     result = sources.verify_contents();
+    if (!result.ok())
+        return result;
+    result = change_state.verify_contents();
     if (!result.ok())
         return result;
     result = build_cache.verify_contents();
@@ -318,17 +334,17 @@ status project_baseline_dirty_sources(
             }
 
             file_snapshot acquired;
+            // Fallback is a correctness boundary, not a stat-cache hint.
+            // Equal size+mtime must never suppress content verification.
             const auto acquisition = acquire_file_snapshot(
                 std::filesystem::path{path_text},
-                baseline,
+                std::nullopt,
                 acquired);
 
             bool dirty = false;
             switch (acquisition) {
             case file_snapshot_result::unchanged:
-                if (!physical.present)
-                    return {status_code::artifact_corrupt};
-                break;
+                return {status_code::artifact_corrupt};
 
             case file_snapshot_result::missing:
                 dirty = physical.present;
@@ -402,6 +418,166 @@ status project_baseline_dirty_sources(
         sources,
         dirty_sources);
 }
+
+
+status project_baseline_dirty_sources(
+    const source_manager_image_view& sources,
+    const file_change_token& configuration,
+    std::vector<source_id>& dirty_sources,
+    bool& configuration_proven,
+    bool& configuration_changed,
+    project_dirty_source_telemetry& telemetry) noexcept {
+
+    dirty_sources.clear();
+    telemetry = {};
+    configuration_proven = false;
+    configuration_changed = false;
+
+    source_change_detection_telemetry detector;
+    const auto fast_result =
+        detect_source_changes(
+            sources,
+            configuration,
+            dirty_sources,
+            configuration_proven,
+            configuration_changed,
+            detector);
+
+    telemetry.journal_records =
+        detector.journal_records;
+    telemetry.journal_matched_sources =
+        detector.matched_sources;
+    telemetry.backend =
+        static_cast<std::uint32_t>(
+            detector.backend);
+    telemetry.fast_path =
+        detector.fast_path;
+    telemetry.fallback =
+        detector.fallback;
+
+    if (fast_result.ok())
+        return {};
+
+    configuration_proven = false;
+
+    if (fast_result.code != status_code::not_found) {
+        dirty_sources.clear();
+        return fast_result;
+    }
+
+    telemetry.fallback = true;
+    return project_baseline_dirty_sources(
+        sources,
+        dirty_sources);
+}
+
+
+status project_baseline_dirty_sources(
+    const change_state_image_view& sources,
+    std::vector<source_change_journal_candidate>& candidates,
+    project_dirty_source_telemetry& telemetry) noexcept {
+    candidates.clear(); telemetry = {};
+    source_change_detection_telemetry detector;
+    const auto result = detect_source_changes(sources, candidates, detector);
+    telemetry.journal_records = detector.journal_records;
+    telemetry.journal_matched_sources = detector.matched_sources;
+    telemetry.backend = static_cast<std::uint32_t>(detector.backend);
+    telemetry.fast_path = detector.fast_path;
+    telemetry.fallback = detector.fallback;
+    return result;
+}
+
+status project_baseline_dirty_sources(
+    const change_state_image_view& sources,
+    const file_change_token& configuration,
+    std::vector<source_change_journal_candidate>& candidates,
+    bool& configuration_proven,
+    bool& configuration_changed,
+    project_dirty_source_telemetry& telemetry) noexcept {
+    candidates.clear(); telemetry = {}; configuration_proven = false; configuration_changed = false;
+    source_change_detection_telemetry detector;
+    const auto result = detect_source_changes(sources, configuration, candidates,
+        configuration_proven, configuration_changed, detector);
+    telemetry.journal_records = detector.journal_records;
+    telemetry.journal_matched_sources = detector.matched_sources;
+    telemetry.backend = static_cast<std::uint32_t>(detector.backend);
+    telemetry.fast_path = detector.fast_path;
+    telemetry.fallback = detector.fallback;
+    return result;
+}
+
+status project_baseline_resolve_candidates(
+    const source_manager_image_view& sources,
+    std::span<const source_change_journal_candidate> candidates,
+    std::vector<source_id>& dirty_sources,
+    project_dirty_source_telemetry& telemetry) noexcept {
+    source_change_detection_telemetry detector;
+    const auto result = resolve_source_change_candidates(sources, candidates, dirty_sources, detector);
+    telemetry.journal_matched_sources = detector.matched_sources;
+    if (detector.backend != source_change_backend::none)
+        telemetry.backend = static_cast<std::uint32_t>(detector.backend);
+    telemetry.fast_path = telemetry.fast_path || detector.fast_path;
+    return result;
+}
+
+
+status project_baseline_dirty_sources(
+    const change_state_image_view& sources,
+    std::vector<source_id>& dirty_sources,
+    project_dirty_source_telemetry& telemetry) noexcept {
+
+    dirty_sources.clear();
+    telemetry = {};
+
+    source_change_detection_telemetry detector;
+    const auto result =
+        detect_source_changes(
+            sources,
+            dirty_sources,
+            detector);
+
+    telemetry.journal_records = detector.journal_records;
+    telemetry.journal_matched_sources = detector.matched_sources;
+    telemetry.backend =
+        static_cast<std::uint32_t>(detector.backend);
+    telemetry.fast_path = detector.fast_path;
+    telemetry.fallback = detector.fallback;
+    return result;
+}
+
+
+status project_baseline_dirty_sources(
+    const change_state_image_view& sources,
+    const file_change_token& configuration,
+    std::vector<source_id>& dirty_sources,
+    bool& configuration_proven,
+    bool& configuration_changed,
+    project_dirty_source_telemetry& telemetry) noexcept {
+
+    dirty_sources.clear();
+    telemetry = {};
+    configuration_proven = false;
+    configuration_changed = false;
+
+    source_change_detection_telemetry detector;
+    const auto result =
+        detect_source_changes(
+            sources,
+            configuration,
+            dirty_sources,
+            configuration_proven,
+            configuration_changed,
+            detector);
+
+    telemetry.journal_records = detector.journal_records;
+    telemetry.journal_matched_sources = detector.matched_sources;
+    telemetry.backend =
+        static_cast<std::uint32_t>(detector.backend);
+    telemetry.fast_path = detector.fast_path;
+    telemetry.fallback = detector.fallback;
+    return result;
+}
+
 
 status project_baseline_sources_changed(
     const source_manager_image_view& sources,

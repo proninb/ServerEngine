@@ -7,9 +7,11 @@
 #include "persistence/source_manager_image.hpp"
 #include "project_configuration.hpp"
 
+#include <atomic>
 #include <cstddef>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <string_view>
 
 namespace cw::server {
@@ -118,6 +120,14 @@ public:
     [[nodiscard]] const baseline_fingerprint* baseline_fingerprint_value() const noexcept {
         return baseline != nullptr
             ? &baseline->fingerprint()
+            : nullptr;
+    }
+
+    // Semantic configuration identity used to construct the active Project.
+    // SAVE must never publish this Graph under a different configuration.
+    [[nodiscard]] const baseline_fingerprint* build_fingerprint() const noexcept {
+        return build_fingerprint_available
+            ? &build_fingerprint_value
             : nullptr;
     }
 
@@ -300,24 +310,57 @@ public:
     }
 
     // Storage-neutral READY read boundaries.
+    [[nodiscard]] status source_count(std::size_t& output) const noexcept {
+        output = 0;
+        if (compiled != nullptr) {
+            output = compiled->sources.source_count();
+            return {};
+        }
+        const auto ready = ensure_sources_mapped();
+        if (!ready.ok())
+            return ready;
+        output = mapped_sources.source_count();
+        return {};
+    }
+
+    [[nodiscard]] status source_path(
+        source_id source,
+        std::string_view& output) const noexcept {
+        output = {};
+        if (compiled != nullptr) {
+            output = compiled->sources.path(source);
+            return output.empty() ? status{status_code::not_found} : status{};
+        }
+        const auto ready = ensure_sources_mapped();
+        if (!ready.ok())
+            return ready;
+        output = mapped_sources.path(source);
+        return output.empty() ? status{status_code::not_found} : status{};
+    }
+
     [[nodiscard]] std::size_t source_count() const noexcept {
-        return compiled != nullptr
-            ? compiled->sources.source_count()
-            : mapped_sources.source_count();
+        std::size_t output = 0;
+        (void)source_count(output);
+        return output;
     }
 
     [[nodiscard]] std::string_view source_path(source_id source) const noexcept {
-        return compiled != nullptr
-            ? compiled->sources.path(source)
-            : mapped_sources.path(source);
+        std::string_view output;
+        (void)source_path(source, output);
+        return output;
     }
 
     [[nodiscard]] status find_source(
         std::string_view normalized_path,
         source_id& output) const noexcept {
-        return compiled != nullptr
-            ? compiled->sources.find(normalized_path, output)
-            : mapped_sources.find(normalized_path, output);
+        if (compiled != nullptr)
+            return compiled->sources.find(normalized_path, output);
+        const auto ready = ensure_sources_mapped();
+        if (!ready.ok()) {
+            output = {};
+            return ready;
+        }
+        return mapped_sources.find(normalized_path, output);
     }
 
     [[nodiscard]] std::size_t type_count() const noexcept {
@@ -378,19 +421,32 @@ private:
         compiled.swap(replacement);
     }
 
+    void set_build_fingerprint(
+        const baseline_fingerprint& fingerprint) noexcept {
+        build_fingerprint_value = fingerprint;
+        build_fingerprint_available = true;
+    }
+
     [[nodiscard]] status activate_ready_baseline(
         baseline_snapshot&& snapshot) noexcept;
 
     [[nodiscard]] status activate_build_baseline(
         baseline_snapshot&& snapshot) noexcept;
 
+    [[nodiscard]] status ensure_sources_mapped() const noexcept;
+
     project_configuration project_configuration_value;
     std::filesystem::path project_configuration_path;
     std::unique_ptr<compiled_project_state> compiled;
     std::unique_ptr<baseline_snapshot> baseline;
     compiled_image_view mapped_compiled;
-    source_manager_image_view mapped_sources;
+    mutable source_manager_image_view mapped_sources;
+    mutable std::mutex source_mapping_mutex;
+    mutable status source_mapping_status{};
+    mutable bool source_mapping_attempted = false;
     build_cache_image_view mapped_build_cache;
+    baseline_fingerprint build_fingerprint_value{};
+    bool build_fingerprint_available = false;
 
     friend class project_build_orchestrator;
     friend class project_manager;

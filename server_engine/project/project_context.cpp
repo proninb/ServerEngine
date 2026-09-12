@@ -24,22 +24,27 @@ status project_context::activate_ready_baseline(
     baseline_snapshot&& snapshot) noexcept {
 
     if (!snapshot.valid() ||
-        snapshot.artifact(baseline_artifact_kind::compiled).empty() ||
-        snapshot.artifact(baseline_artifact_kind::source_manager).empty()) {
+        snapshot.artifact(
+            baseline_artifact_kind::compiled).empty()) {
         return {status_code::artifact_corrupt};
     }
 
     compiled_image_view compiled_view;
     auto result = compiled_view.bind(
-        snapshot.artifact(baseline_artifact_kind::compiled));
+        snapshot.artifact(
+            baseline_artifact_kind::compiled));
     if (!result.ok())
         return result;
 
     source_manager_image_view source_view;
-    result = source_view.bind(
-        snapshot.artifact(baseline_artifact_kind::source_manager));
-    if (!result.ok())
-        return result;
+    if (snapshot.mapped(
+            baseline_artifact_kind::source_manager)) {
+        result = source_view.bind(
+            snapshot.artifact(
+                baseline_artifact_kind::source_manager));
+        if (!result.ok())
+            return result;
+    }
 
     try {
         auto owner =
@@ -47,6 +52,7 @@ status project_context::activate_ready_baseline(
 
         mapped_compiled = compiled_view;
         mapped_sources = source_view;
+        set_build_fingerprint(owner->fingerprint());
         baseline = std::move(owner);
         compiled.reset();
         return {};
@@ -91,6 +97,7 @@ status project_context::activate_build_baseline(
         mapped_compiled = compiled_view;
         mapped_sources = source_view;
         mapped_build_cache = build_view;
+        set_build_fingerprint(owner->fingerprint());
         baseline = std::move(owner);
         compiled = std::make_unique<compiled_project_state>(
             mapped_compiled,
@@ -103,6 +110,43 @@ status project_context::activate_build_baseline(
     }
 }
 
+
+
+status project_context::ensure_sources_mapped() const noexcept {
+    std::lock_guard<std::mutex> lock{source_mapping_mutex};
+
+    if (mapped_sources.valid())
+        return {};
+
+    if (source_mapping_attempted)
+        return source_mapping_status;
+
+    source_mapping_attempted = true;
+
+    if (baseline == nullptr ||
+        !baseline->valid() ||
+        !build_fingerprint_available) {
+        source_mapping_status = {status_code::invalid_state};
+        return source_mapping_status;
+    }
+
+    if (!baseline->mapped(baseline_artifact_kind::source_manager)) {
+        baseline_store store{project_configuration_path};
+        auto result = store.map_source_manager(
+            build_fingerprint_value,
+            baseline->transaction(),
+            *baseline);
+        if (!result.ok()) {
+            source_mapping_status = result;
+            return result;
+        }
+    }
+
+    auto result = mapped_sources.bind(
+        baseline->artifact(baseline_artifact_kind::source_manager));
+    source_mapping_status = result;
+    return result;
+}
 
 project_storage_pressure project_context::storage_pressure() const noexcept {
     if (compiled == nullptr)

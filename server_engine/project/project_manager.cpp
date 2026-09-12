@@ -318,10 +318,10 @@ status project_manager::build(
     // would fault the complete baseline before a sparse update can begin.
     const auto dirty_detection_begin = std::chrono::steady_clock::now();
 
-    source_manager_image_view changes;
+    change_state_image_view changes;
     result = changes.bind(
         snapshot.artifact(
-            baseline_artifact_kind::source_manager));
+            baseline_artifact_kind::change_state));
     if (!result.ok()) {
         abandon_construction();
         return result;
@@ -329,23 +329,108 @@ status project_manager::build(
 
     std::vector<source_id> dirty_sources;
     project_dirty_source_telemetry dirty_telemetry;
+    std::vector<source_change_journal_candidate> journal_candidates;
     bool configuration_proven = !fast_configuration;
     bool configuration_changed = false;
 
+    source_manager_image_view full_sources;
+    const auto full_source_fallback = [&]() noexcept -> status {
+        if (!snapshot.mapped(baseline_artifact_kind::source_manager)) {
+            baseline_open_telemetry deferred_sources;
+            const auto source_map_begin = std::chrono::steady_clock::now();
+            auto map_result = store.map_source_manager_cached(
+                probe.fingerprint,
+                probe.transaction,
+                probe.source_manager_size,
+                snapshot,
+                &deferred_sources);
+            const auto source_map_end = std::chrono::steady_clock::now();
+            baseline_open_ns += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    source_map_end - source_map_begin).count());
+            baseline_open_detail.source_manager_map_ns += deferred_sources.source_manager_map_ns;
+            baseline_open_detail.size_validation_ns += deferred_sources.size_validation_ns;
+            if (!map_result.ok())
+                return map_result;
+        }
+        if (!full_sources.valid()) {
+            auto bind_result = full_sources.bind(
+                snapshot.artifact(baseline_artifact_kind::source_manager));
+            if (!bind_result.ok())
+                return bind_result;
+        }
+        if (!journal_candidates.empty()) {
+            auto candidate_result =
+                project_baseline_resolve_candidates(
+                    full_sources,
+                    journal_candidates,
+                    dirty_sources,
+                    dirty_telemetry);
+
+            if (candidate_result.ok())
+                return {};
+
+            if (candidate_result.code !=
+                status_code::not_found) {
+                return candidate_result;
+            }
+        }
+
+        dirty_telemetry.fallback = true;
+        return project_baseline_dirty_sources(
+            full_sources,
+            dirty_sources);
+    };
+
     if (fast_configuration) {
-        result = project_baseline_dirty_sources(
-            changes,
-            probe.configuration.change_token,
-            dirty_sources,
-            configuration_proven,
-            configuration_changed,
-            dirty_telemetry);
+        bool configuration_path_identity_same = false;
+        const auto identity_result =
+            same_file_identity(
+                configuration_path,
+                probe.configuration.change_token,
+                configuration_path_identity_same);
+
+        if (identity_result.ok() &&
+            configuration_path_identity_same) {
+            result = project_baseline_dirty_sources(
+                changes,
+                probe.configuration.change_token,
+                journal_candidates,
+                configuration_proven,
+                configuration_changed,
+                dirty_telemetry);
+        }
+        else if (identity_result.code ==
+                 status_code::not_found ||
+                 (identity_result.ok() &&
+                  !configuration_path_identity_same)) {
+            // The saved file reference alone is insufficient after a parent
+            // directory rename/replacement. Force content validation by path.
+            configuration_proven = false;
+            configuration_changed = false;
+            result = project_baseline_dirty_sources(
+                changes,
+                journal_candidates,
+                dirty_telemetry);
+        }
+        else {
+            result = identity_result;
+        }
     }
     else {
         result = project_baseline_dirty_sources(
             changes,
             dirty_sources,
             dirty_telemetry);
+    }
+
+    if (result.ok() &&
+        !journal_candidates.empty()) {
+        result = full_source_fallback();
+    }
+    else if (result.code == status_code::not_found) {
+        journal_candidates.clear();
+        result = full_source_fallback();
     }
 
     if (!result.ok()) {
@@ -456,7 +541,8 @@ status project_manager::build(
             baseline_open_detail.compiled_map_ns;
         value.telemetry.baseline_source_manager_map_ns =
             baseline_open_detail.source_manager_map_ns;
-        value.telemetry.baseline_change_state_map_ns = 0;
+        value.telemetry.baseline_change_state_map_ns =
+            baseline_open_detail.change_state_map_ns;
         value.telemetry.baseline_build_cache_map_ns =
             baseline_open_detail.build_cache_map_ns;
         value.telemetry.baseline_size_validation_ns =
@@ -509,9 +595,10 @@ status project_manager::build(
         const auto source_map_begin =
             std::chrono::steady_clock::now();
 
-        result = store.map_source_manager(
+        result = store.map_source_manager_cached(
             probe.fingerprint,
             probe.transaction,
+            probe.source_manager_size,
             snapshot,
             &deferred_sources);
 
@@ -882,6 +969,7 @@ status project_manager::save(
             configuration_state,
             images.compiled,
             images.source_manager,
+            images.change_state,
             images.build_cache,
             output);
     }
@@ -934,6 +1022,7 @@ status project_manager::save(
         configuration_state,
         active.artifact(baseline_artifact_kind::compiled),
         active.artifact(baseline_artifact_kind::source_manager),
+        active.artifact(baseline_artifact_kind::change_state),
         active.artifact(baseline_artifact_kind::build_cache),
         output);
 }

@@ -2,6 +2,7 @@
 
 #include "../persistence/build_cache_image.hpp"
 #include "../persistence/source_manager_image.hpp"
+#include "../persistence/change_state_image.hpp"
 #include "source_manager.hpp"
 
 #include <algorithm>
@@ -35,16 +36,29 @@ namespace {
 }
 
 [[nodiscard]] std::size_t next_capacity(std::size_t count) noexcept {
-    if (count > ((std::numeric_limits<std::size_t>::max)() - 1) / 2)
-        return 0;
+    const auto quarter =
+        count / 4 + (count % 4 != 0 ? 1u : 0u);
 
-    const auto required = count * 2 + 1;
+    if (count >
+        (std::numeric_limits<std::size_t>::max)() -
+            quarter - 1) {
+        return 0;
+    }
+
+    // Keep identity tables below 80% load. For 100k Sources this selects
+    // 131072 slots instead of 262144 without introducing sorting.
+    const auto required =
+        count + quarter + 1;
+
     std::size_t capacity = 16;
     while (capacity < required) {
-        if (capacity > (std::numeric_limits<std::size_t>::max)() / 2)
+        if (capacity >
+            (std::numeric_limits<std::size_t>::max)() / 2) {
             return 0;
+        }
         capacity *= 2;
     }
+
     return capacity;
 }
 
@@ -499,6 +513,127 @@ private:
     }
 }
 
+
+struct observed_file_change_state final {
+    std::uint64_t volume_serial = 0;
+    std::uint64_t file_reference = 0;
+    std::int64_t file_usn = -1;
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return volume_serial != 0 &&
+            file_reference != 0 &&
+            file_usn >= 0;
+    }
+};
+
+[[nodiscard]] status query_file_change_state(
+    const std::filesystem::path& path,
+    observed_file_change_state& output) noexcept {
+
+    output = {};
+
+    try {
+        const auto native = path.wstring();
+        windows_handle file{
+            CreateFileW(
+                native.c_str(),
+                GENERIC_READ,
+                FILE_SHARE_READ |
+                    FILE_SHARE_WRITE |
+                    FILE_SHARE_DELETE,
+                nullptr,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                nullptr)};
+
+        if (!file) {
+            const auto error = GetLastError();
+            return error == ERROR_FILE_NOT_FOUND ||
+                error == ERROR_PATH_NOT_FOUND
+                ? status{status_code::not_found}
+                : status{status_code::io_failed};
+        }
+
+        BY_HANDLE_FILE_INFORMATION information{};
+        if (GetFileInformationByHandle(
+                file.get(),
+                &information) == 0) {
+            return {status_code::io_failed};
+        }
+
+        READ_FILE_USN_DATA request{};
+        request.MinMajorVersion = 2;
+        request.MaxMajorVersion = 2;
+
+        std::array<std::byte, 4096> buffer{};
+        DWORD returned = 0;
+
+        if (DeviceIoControl(
+                file.get(),
+                FSCTL_READ_FILE_USN_DATA,
+                &request,
+                sizeof(request),
+                buffer.data(),
+                static_cast<DWORD>(buffer.size()),
+                &returned,
+                nullptr) == 0) {
+            const auto error = GetLastError();
+            if (error == ERROR_INVALID_FUNCTION ||
+                error == ERROR_NOT_SUPPORTED ||
+                error == ERROR_INVALID_PARAMETER) {
+                return {status_code::not_found};
+            }
+            return {status_code::io_failed};
+        }
+
+        if (returned < sizeof(USN_RECORD_V2))
+            return {status_code::artifact_corrupt};
+
+        USN_RECORD_V2 record{};
+        std::memcpy(
+            &record,
+            buffer.data(),
+            sizeof(record));
+
+        if (record.MajorVersion != 2 ||
+            record.RecordLength < sizeof(USN_RECORD_V2) ||
+            record.RecordLength > returned ||
+            record.Usn < 0) {
+            return {status_code::artifact_corrupt};
+        }
+
+        const auto file_reference =
+            (static_cast<std::uint64_t>(
+                information.nFileIndexHigh) << 32) |
+            information.nFileIndexLow;
+
+        if (file_reference == 0 ||
+            record.FileReferenceNumber != file_reference) {
+            return {status_code::artifact_corrupt};
+        }
+
+        output.volume_serial =
+            information.dwVolumeSerialNumber;
+        output.file_reference =
+            file_reference;
+        output.file_usn =
+            static_cast<std::int64_t>(record.Usn);
+
+        return output
+            ? status{}
+            : status{status_code::not_found};
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+    catch (const std::system_error&) {
+        return {status_code::io_failed};
+    }
+}
+
 [[nodiscard]] bool volume_paths(
     const std::filesystem::path& source,
     std::wstring& root,
@@ -639,13 +774,22 @@ private:
     return true;
 }
 
+template <typename ChangeView>
 [[nodiscard]] status read_usn_changes(
-    const source_manager_image_view& sources,
+    const ChangeView& sources,
     const source_change_checkpoint& checkpoint,
+    const file_change_token* configuration,
     std::vector<source_id>& dirty_sources,
+    bool* configuration_proven,
+    bool* configuration_changed,
     source_change_detection_telemetry& telemetry) noexcept {
 
     dirty_sources.clear();
+
+    if (configuration_proven != nullptr)
+        *configuration_proven = false;
+    if (configuration_changed != nullptr)
+        *configuration_changed = false;
 
     if (sources.source_count() == 0)
         return {};
@@ -684,6 +828,12 @@ private:
         serial != checkpoint.volume_serial) {
         return {status_code::not_found};
     }
+
+    const bool configuration_candidate =
+        configuration != nullptr &&
+        static_cast<bool>(*configuration) &&
+        configuration->volume_serial ==
+            checkpoint.volume_serial;
 
     windows_handle volume{
         CreateFileW(
@@ -818,6 +968,13 @@ private:
                     }
                 }
                 else {
+                    if (configuration_candidate &&
+                        record.FileReferenceNumber ==
+                            configuration->file_reference &&
+                        configuration_changed != nullptr) {
+                        *configuration_changed = true;
+                    }
+
                     constexpr DWORD arrival_reasons =
                         USN_REASON_FILE_CREATE |
                         USN_REASON_RENAME_NEW_NAME;
@@ -880,6 +1037,9 @@ private:
             start = next;
         }
 
+        if (configuration_proven != nullptr)
+            *configuration_proven = configuration_candidate;
+
         telemetry.fast_path = true;
         return {};
     }
@@ -893,9 +1053,271 @@ private:
     }
 }
 
+
+[[nodiscard]] status read_usn_gate(
+    const change_state_image_view& sources,
+    const source_change_checkpoint& checkpoint,
+    const file_change_token* configuration,
+    std::vector<source_change_journal_candidate>& candidates,
+    bool* configuration_proven,
+    bool* configuration_changed,
+    source_change_detection_telemetry& telemetry) noexcept {
+
+    candidates.clear();
+    if (configuration_proven != nullptr) *configuration_proven = false;
+    if (configuration_changed != nullptr) *configuration_changed = false;
+    if (sources.source_count() == 0) return {};
+
+    const auto first_path = sources.path(source_id{1});
+    if (first_path.empty()) return {status_code::not_found};
+
+    std::filesystem::path first_path_value;
+    try { first_path_value = std::filesystem::path{first_path}; }
+    catch (const std::bad_alloc&) { return {status_code::not_available}; }
+    catch (const std::length_error&) { return {status_code::not_available}; }
+    catch (const std::system_error&) { return {status_code::not_available}; }
+
+    std::wstring root;
+    std::wstring device;
+    if (!volume_paths(first_path_value, root, device)) return {status_code::not_found};
+
+    std::uint64_t serial = 0;
+    if (!query_volume_serial(root, serial) || serial != checkpoint.volume_serial)
+        return {status_code::not_found};
+
+    const bool configuration_candidate =
+        configuration != nullptr && static_cast<bool>(*configuration) &&
+        configuration->volume_serial == checkpoint.volume_serial;
+
+    windows_handle volume{CreateFileW(device.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr)};
+    if (!volume) return {status_code::not_found};
+
+    USN_JOURNAL_DATA_V0 journal{};
+    DWORD returned = 0;
+    if (DeviceIoControl(volume.get(), FSCTL_QUERY_USN_JOURNAL, nullptr, 0,
+            &journal, sizeof(journal), &returned, nullptr) == 0 ||
+        returned < sizeof(journal)) return {status_code::not_found};
+
+    if (journal.UsnJournalID != checkpoint.journal_id ||
+        checkpoint.next_usn < journal.FirstUsn || checkpoint.next_usn > journal.NextUsn)
+        return {status_code::not_found};
+
+    telemetry.backend = source_change_backend::windows_usn;
+
+    try {
+        std::vector<std::byte> buffer(1024u * 1024u);
+        auto start = static_cast<USN>(checkpoint.next_usn);
+        const auto target = journal.NextUsn;
+
+        while (start < target) {
+            READ_USN_JOURNAL_DATA_V1 request{};
+            request.StartUsn = start;
+            request.ReasonMask = USN_REASON_DATA_OVERWRITE | USN_REASON_DATA_EXTEND |
+                USN_REASON_DATA_TRUNCATION | USN_REASON_FILE_CREATE | USN_REASON_FILE_DELETE |
+                USN_REASON_RENAME_OLD_NAME | USN_REASON_RENAME_NEW_NAME |
+                USN_REASON_HARD_LINK_CHANGE | USN_REASON_REPARSE_POINT_CHANGE;
+            request.UsnJournalID = checkpoint.journal_id;
+            request.MinMajorVersion = 2;
+            request.MaxMajorVersion = 2;
+
+            returned = 0;
+            if (DeviceIoControl(volume.get(), FSCTL_READ_USN_JOURNAL,
+                    &request, sizeof(request), buffer.data(),
+                    static_cast<DWORD>(buffer.size()), &returned, nullptr) == 0)
+                return {status_code::not_found};
+            if (returned < sizeof(USN)) return {status_code::artifact_corrupt};
+
+            USN next = 0;
+            std::memcpy(&next, buffer.data(), sizeof(next));
+            std::size_t offset = sizeof(USN);
+
+            while (offset < returned) {
+                if (returned - offset < sizeof(USN_RECORD_V2))
+                    return {status_code::artifact_corrupt};
+                USN_RECORD_V2 record{};
+                std::memcpy(&record, buffer.data() + offset, sizeof(record));
+                if (record.RecordLength < sizeof(USN_RECORD_V2) ||
+                    record.RecordLength > returned - offset || record.MajorVersion != 2)
+                    return {status_code::artifact_corrupt};
+
+                ++telemetry.journal_records;
+                bool possible = false;
+
+                if ((record.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                    constexpr DWORD topology = USN_REASON_FILE_CREATE | USN_REASON_FILE_DELETE |
+                        USN_REASON_RENAME_OLD_NAME | USN_REASON_RENAME_NEW_NAME |
+                        USN_REASON_REPARSE_POINT_CHANGE;
+                    possible = (record.Reason & topology) != 0 &&
+                        sources.may_watch_directory_topology(record.FileReferenceNumber);
+                } else {
+                    if (configuration_candidate &&
+                        record.FileReferenceNumber == configuration->file_reference &&
+                        configuration_changed != nullptr) *configuration_changed = true;
+                    constexpr DWORD arrival = USN_REASON_FILE_CREATE | USN_REASON_RENAME_NEW_NAME;
+                    possible = ((record.Reason & arrival) != 0 &&
+                        sources.may_watch_directory_arrival(record.ParentFileReferenceNumber)) ||
+                        sources.may_contain_source_file(record.FileReferenceNumber);
+                }
+
+                if (possible) {
+                    candidates.push_back({record.FileReferenceNumber,
+                        record.ParentFileReferenceNumber, record.Reason, record.FileAttributes});
+                }
+                offset += record.RecordLength;
+            }
+
+            if (next <= start) { candidates.clear(); return {status_code::not_found}; }
+            start = next;
+        }
+
+        if (configuration_proven != nullptr) *configuration_proven = configuration_candidate;
+        telemetry.fast_path = true;
+        return {};
+    }
+    catch (const std::bad_alloc&) { candidates.clear(); return {status_code::not_available}; }
+    catch (const std::length_error&) { candidates.clear(); return {status_code::not_available}; }
+}
+
+[[nodiscard]] status resolve_candidates_exact(
+    const source_manager_image_view& sources,
+    std::span<const source_change_journal_candidate> candidates,
+    std::vector<source_id>& dirty_sources,
+    source_change_detection_telemetry& telemetry) noexcept {
+
+    dirty_sources.clear();
+    try {
+        sparse_source_set seen;
+        for (const auto& candidate : candidates) {
+            if ((candidate.file_attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                constexpr DWORD topology = USN_REASON_FILE_CREATE | USN_REASON_FILE_DELETE |
+                    USN_REASON_RENAME_OLD_NAME | USN_REASON_RENAME_NEW_NAME |
+                    USN_REASON_REPARSE_POINT_CHANGE;
+                const auto flags = sources.directory_watch_flags(candidate.file_reference);
+                if ((candidate.reason & topology) != 0 &&
+                    (flags & source_change_directory_watch_topology) != 0) {
+                    dirty_sources.clear();
+                    return {status_code::not_found};
+                }
+                continue;
+            }
+
+            constexpr DWORD arrival = USN_REASON_FILE_CREATE | USN_REASON_RENAME_NEW_NAME;
+            const auto parent_flags = sources.directory_watch_flags(candidate.parent_file_reference);
+            if ((candidate.reason & arrival) != 0 &&
+                (parent_flags & source_change_directory_watch_arrival) != 0) {
+                dirty_sources.clear();
+                return {status_code::not_found};
+            }
+
+            const auto source = sources.find_source_file(candidate.file_reference);
+            if (!source) continue;
+
+            constexpr DWORD topology = USN_REASON_FILE_CREATE | USN_REASON_FILE_DELETE |
+                USN_REASON_RENAME_OLD_NAME | USN_REASON_RENAME_NEW_NAME |
+                USN_REASON_HARD_LINK_CHANGE | USN_REASON_REPARSE_POINT_CHANGE;
+            if ((candidate.reason & topology) != 0) {
+                dirty_sources.clear();
+                return {status_code::not_found};
+            }
+
+            bool inserted = false;
+            const auto result = seen.insert(source, inserted);
+            if (!result.ok()) { dirty_sources.clear(); return result; }
+            if (inserted) { dirty_sources.push_back(source); ++telemetry.matched_sources; }
+        }
+        telemetry.fast_path = true;
+        return {};
+    }
+    catch (const std::bad_alloc&) { dirty_sources.clear(); return {status_code::not_available}; }
+    catch (const std::length_error&) { dirty_sources.clear(); return {status_code::not_available}; }
+}
+
 #endif
 
 } // namespace
+
+status capture_file_change_token(
+    const std::filesystem::path& path,
+    file_change_token& output) noexcept {
+
+    output = {};
+
+#ifndef _WIN32
+    (void)path;
+    return {status_code::not_found};
+#else
+    observed_file_change_state state;
+    const auto result =
+        query_file_change_state(path, state);
+    if (!result.ok())
+        return result;
+
+    output.volume_serial = state.volume_serial;
+    output.file_reference = state.file_reference;
+    output.file_usn = state.file_usn;
+    return {};
+#endif
+}
+
+status prove_file_unchanged(
+    const std::filesystem::path& path,
+    const file_change_token& token,
+    bool& unchanged,
+    std::uint64_t* journal_records) noexcept {
+
+    unchanged = false;
+    if (journal_records != nullptr)
+        *journal_records = 0;
+
+    if (!token)
+        return {status_code::not_found};
+
+#ifndef _WIN32
+    (void)path;
+    return {status_code::not_found};
+#else
+    observed_file_change_state current;
+    const auto result =
+        query_file_change_state(path, current);
+
+    if (!result.ok())
+        return result;
+
+    unchanged =
+        current.volume_serial == token.volume_serial &&
+        current.file_reference == token.file_reference &&
+        current.file_usn == token.file_usn;
+
+    return {};
+#endif
+}
+
+
+status same_file_identity(
+    const std::filesystem::path& path,
+    const file_change_token& expected,
+    bool& same) noexcept {
+
+    same = false;
+    if (!expected)
+        return {status_code::invalid_argument};
+
+#ifndef _WIN32
+    (void)path;
+    return {status_code::not_found};
+#else
+    observed_file_identity current;
+    if (!query_file_identity(path, current))
+        return {status_code::not_found};
+
+    same =
+        current.volume_serial == expected.volume_serial &&
+        current.file_reference == expected.file_reference;
+    return {};
+#endif
+}
+
 
 status prepare_source_change_capture(
     const source_manager& sources,
@@ -962,6 +1384,9 @@ status prepare_source_change_capture(
             return {};
         }
 
+        output.journal_anchor_path.assign(
+            first.normalized_path());
+
         const auto file_capacity =
             next_capacity(sources.source_count());
         if (file_capacity == 0)
@@ -1002,10 +1427,36 @@ status prepare_source_change_capture(
             }
 
             if (snapshot) {
-                if (missing ||
-                    observation != snapshot.observation()) {
+                if (missing) {
                     output.reset();
-                    return {};
+                    return {status_code::rebuild_required};
+                }
+
+                file_snapshot verified;
+                const auto acquisition =
+                    acquire_file_snapshot(
+                        path,
+                        std::nullopt,
+                        verified);
+
+                if (acquisition ==
+                        file_snapshot_result::allocation_failed) {
+                    output.reset();
+                    return {status_code::not_available};
+                }
+
+                if (acquisition !=
+                        file_snapshot_result::acquired) {
+                    output.reset();
+                    return acquisition ==
+                        file_snapshot_result::missing
+                        ? status{status_code::rebuild_required}
+                        : status{status_code::io_failed};
+                }
+
+                if (verified.hash != snapshot.hash()) {
+                    output.reset();
+                    return {status_code::rebuild_required};
                 }
 
                 observed_file_identity identity;
@@ -1027,10 +1478,8 @@ status prepare_source_change_capture(
                 }
             }
             else if (!missing) {
-                // READY says this stable Source identity is absent. If the path
-                // has already reappeared, do not publish a stale checkpoint.
                 output.reset();
-                return {};
+                return {status_code::rebuild_required};
             }
 
             const bool watch_arrival =
@@ -1125,6 +1574,23 @@ status prepare_source_change_capture(
 #endif
 }
 
+status resolve_source_change_candidates(
+    const source_manager_image_view& sources,
+    std::span<const source_change_journal_candidate> candidates,
+    std::vector<source_id>& dirty_sources,
+    source_change_detection_telemetry& telemetry) noexcept {
+    dirty_sources.clear(); telemetry = {};
+    if (!sources.valid()) return {status_code::invalid_state};
+#ifndef _WIN32
+    (void)candidates;
+    return {status_code::not_found};
+#else
+    telemetry.backend = source_change_backend::windows_usn;
+    return resolve_candidates_exact(sources, candidates, dirty_sources, telemetry);
+#endif
+}
+
+
 status detect_source_changes(
     const source_manager_image_view& sources,
     std::vector<source_id>& dirty_sources,
@@ -1146,7 +1612,10 @@ status detect_source_changes(
         read_usn_changes(
             sources,
             checkpoint,
+            nullptr,
             dirty_sources,
+            nullptr,
+            nullptr,
             telemetry);
 
     if (!result.ok())
@@ -1159,5 +1628,150 @@ status detect_source_changes(
     return {status_code::not_found};
 #endif
 }
+
+
+status detect_source_changes(
+    const source_manager_image_view& sources,
+    const file_change_token& configuration,
+    std::vector<source_id>& dirty_sources,
+    bool& configuration_proven,
+    bool& configuration_changed,
+    source_change_detection_telemetry& telemetry) noexcept {
+
+    dirty_sources.clear();
+    telemetry = {};
+    configuration_proven = false;
+    configuration_changed = false;
+
+    const auto checkpoint =
+        sources.change_checkpoint();
+
+    if (!checkpoint) {
+        telemetry.fallback = true;
+        return {status_code::not_found};
+    }
+
+#ifdef _WIN32
+    const auto result =
+        read_usn_changes(
+            sources,
+            checkpoint,
+            &configuration,
+            dirty_sources,
+            &configuration_proven,
+            &configuration_changed,
+            telemetry);
+
+    if (!result.ok()) {
+        configuration_proven = false;
+        telemetry.fallback = true;
+    }
+
+    return result;
+#else
+    (void)sources;
+    (void)configuration;
+    telemetry.fallback = true;
+    return {status_code::not_found};
+#endif
+}
+
+
+status detect_source_changes(
+    const change_state_image_view& sources,
+    std::vector<source_change_journal_candidate>& candidates,
+    source_change_detection_telemetry& telemetry) noexcept {
+    candidates.clear(); telemetry = {};
+    if (!sources.valid()) return {status_code::invalid_state};
+    const auto checkpoint = sources.change_checkpoint();
+    if (!checkpoint) return {status_code::not_found};
+#ifndef _WIN32
+    return {status_code::not_found};
+#else
+    if (!sources.gate_only()) return {status_code::not_found};
+    const auto result = read_usn_gate(sources, checkpoint, nullptr, candidates,
+        nullptr, nullptr, telemetry);
+    if (!result.ok()) telemetry.fallback = true;
+    return result;
+#endif
+}
+
+status detect_source_changes(
+    const change_state_image_view& sources,
+    std::vector<source_id>& dirty_sources,
+    source_change_detection_telemetry& telemetry) noexcept {
+    dirty_sources.clear();
+    if (!sources.gate_only()) {
+        const auto checkpoint = sources.change_checkpoint();
+        if (!checkpoint) return {status_code::not_found};
+#ifndef _WIN32
+        return {status_code::not_found};
+#else
+        const auto result = read_usn_changes(sources, checkpoint, nullptr, dirty_sources,
+            nullptr, nullptr, telemetry);
+        if (!result.ok()) telemetry.fallback = true;
+        return result;
+#endif
+    }
+    std::vector<source_change_journal_candidate> candidates;
+    const auto result = detect_source_changes(sources, candidates, telemetry);
+    if (!result.ok()) return result;
+    return candidates.empty() ? status{} : status{status_code::not_found};
+}
+
+
+
+status detect_source_changes(
+    const change_state_image_view& sources,
+    const file_change_token& configuration,
+    std::vector<source_change_journal_candidate>& candidates,
+    bool& configuration_proven,
+    bool& configuration_changed,
+    source_change_detection_telemetry& telemetry) noexcept {
+    candidates.clear(); telemetry = {}; configuration_proven = false; configuration_changed = false;
+    if (!sources.valid()) return {status_code::invalid_state};
+    const auto checkpoint = sources.change_checkpoint();
+    if (!checkpoint) return {status_code::not_found};
+#ifndef _WIN32
+    (void)configuration;
+    return {status_code::not_found};
+#else
+    if (!sources.gate_only()) return {status_code::not_found};
+    const auto result = read_usn_gate(sources, checkpoint, &configuration, candidates,
+        &configuration_proven, &configuration_changed, telemetry);
+    if (!result.ok()) { configuration_proven = false; telemetry.fallback = true; }
+    return result;
+#endif
+}
+
+status detect_source_changes(
+    const change_state_image_view& sources,
+    const file_change_token& configuration,
+    std::vector<source_id>& dirty_sources,
+    bool& configuration_proven,
+    bool& configuration_changed,
+    source_change_detection_telemetry& telemetry) noexcept {
+    dirty_sources.clear();
+    if (!sources.gate_only()) {
+        const auto checkpoint = sources.change_checkpoint();
+        if (!checkpoint) return {status_code::not_found};
+#ifndef _WIN32
+        (void)configuration;
+        return {status_code::not_found};
+#else
+        const auto result = read_usn_changes(sources, checkpoint, &configuration, dirty_sources,
+            &configuration_proven, &configuration_changed, telemetry);
+        if (!result.ok()) { configuration_proven = false; telemetry.fallback = true; }
+        return result;
+#endif
+    }
+    std::vector<source_change_journal_candidate> candidates;
+    const auto result = detect_source_changes(sources, configuration, candidates,
+        configuration_proven, configuration_changed, telemetry);
+    if (!result.ok()) return result;
+    return candidates.empty() ? status{} : status{status_code::not_found};
+}
+
+
 
 } // namespace cw::server

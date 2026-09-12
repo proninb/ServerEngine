@@ -1022,22 +1022,22 @@ status baseline_store::open_current_decision(
                 : result;
         }
 
-        const auto source_manager_map_begin =
+        const auto change_state_map_begin =
             std::chrono::steady_clock::now();
 
-        result = candidate.source_manager.map(
-            directory / source_manager_name);
+        result = candidate.change_state.map(
+            directory / change_state_name);
 
         if (telemetry != nullptr) {
-            telemetry->source_manager_map_ns =
+            telemetry->change_state_map_ns =
                 elapsed_ns(
-                    source_manager_map_begin,
+                    change_state_map_begin,
                     std::chrono::steady_clock::now());
         }
 
         if (!result.ok()) {
             return result.code == status_code::not_found
-                ? status{status_code::artifact_corrupt}
+                ? status{status_code::rebuild_required}
                 : result;
         }
 
@@ -1046,9 +1046,7 @@ status baseline_store::open_current_decision(
 
         const bool size_mismatch =
             candidate.compiled.bytes().size() !=
-                manifest.compiled_size ||
-            candidate.source_manager.bytes().size() !=
-                manifest.source_manager_size;
+                manifest.compiled_size;
 
         if (telemetry != nullptr) {
             telemetry->size_validation_ns =
@@ -1063,6 +1061,7 @@ status baseline_store::open_current_decision(
         probe.fingerprint = manifest.fingerprint;
         probe.configuration = manifest.configuration;
         probe.transaction = transaction;
+        probe.source_manager_size = manifest.source_manager_size;
         probe.build_cache_size = manifest.build_cache_size;
         output = std::move(candidate);
         return {};
@@ -1119,6 +1118,7 @@ status baseline_store::probe(
         output.fingerprint = manifest.fingerprint;
         output.configuration = manifest.configuration;
         output.transaction = std::move(transaction);
+        output.source_manager_size = manifest.source_manager_size;
         output.build_cache_size = manifest.build_cache_size;
         return {};
     }
@@ -1220,7 +1220,7 @@ status baseline_store::open_transaction(
         expected,
         transaction,
         true,
-        false,
+        true,
         true,
         output,
         telemetry);
@@ -1350,6 +1350,52 @@ status baseline_store::map_source_manager(
         return {status_code::io_failed};
     }
 }
+
+
+status baseline_store::map_source_manager_cached(
+    const baseline_fingerprint& expected,
+    std::string_view transaction,
+    std::uint64_t expected_source_manager_size,
+    baseline_snapshot& snapshot,
+    baseline_open_telemetry* telemetry) const noexcept {
+
+    if (telemetry != nullptr)
+        *telemetry = {};
+
+    if (!valid_transaction_name(transaction) ||
+        !snapshot.valid() ||
+        snapshot.transaction() != transaction ||
+        !(snapshot.fingerprint() == expected) ||
+        !snapshot.mapped(baseline_artifact_kind::compiled) ||
+        !snapshot.mapped(baseline_artifact_kind::change_state) ||
+        snapshot.mapped(baseline_artifact_kind::source_manager)) {
+        return {status_code::invalid_argument};
+    }
+
+    try {
+        const auto directory = root_path() / std::string{transaction};
+        const auto begin = std::chrono::steady_clock::now();
+        auto result = snapshot.source_manager.map(directory / source_manager_name);
+        if (telemetry != nullptr)
+            telemetry->source_manager_map_ns = elapsed_ns(begin, std::chrono::steady_clock::now());
+        if (!result.ok())
+            return result.code == status_code::not_found ? status{status_code::artifact_corrupt} : result;
+
+        const auto validation_begin = std::chrono::steady_clock::now();
+        const bool mismatch = snapshot.source_manager.bytes().size() != expected_source_manager_size;
+        if (telemetry != nullptr)
+            telemetry->size_validation_ns = elapsed_ns(validation_begin, std::chrono::steady_clock::now());
+        if (mismatch) {
+            snapshot.source_manager = {};
+            return {status_code::artifact_corrupt};
+        }
+        return {};
+    }
+    catch (const std::bad_alloc&) { return {status_code::not_available}; }
+    catch (const std::length_error&) { return {status_code::not_available}; }
+    catch (const std::filesystem::filesystem_error&) { return {status_code::io_failed}; }
+}
+
 
 status baseline_store::map_build_cache(
     const baseline_fingerprint& expected,

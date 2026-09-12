@@ -56,6 +56,7 @@ struct baseline_probe final {
     baseline_fingerprint fingerprint{};
     baseline_configuration_state configuration{};
     std::string transaction;
+    std::uint64_t source_manager_size = 0;
     std::uint64_t build_cache_size = 0;
 };
 
@@ -193,6 +194,13 @@ public:
     [[nodiscard]] status map_source_manager(
         const baseline_fingerprint& expected,
         std::string_view transaction,
+        baseline_snapshot& snapshot,
+        baseline_open_telemetry* telemetry = nullptr) const noexcept;
+
+    [[nodiscard]] status map_source_manager_cached(
+        const baseline_fingerprint& expected,
+        std::string_view transaction,
+        std::uint64_t expected_source_manager_size,
         baseline_snapshot& snapshot,
         baseline_open_telemetry* telemetry = nullptr) const noexcept;
 

@@ -4,10 +4,12 @@
 #include "persistence/compiled_image.hpp"
 #include "persistence/source_manager_image.hpp"
 #include "persistence/build_cache_image.hpp"
+#include "persistence/change_state_image.hpp"
 #include "project_configuration.hpp"
 
 #include <cstdint>
 #include <filesystem>
+#include <span>
 #include <vector>
 
 namespace cw::server {
@@ -17,6 +19,7 @@ class project_context;
 struct project_baseline_images final {
     std::vector<std::byte> compiled;
     std::vector<std::byte> source_manager;
+    std::vector<std::byte> change_state;
     std::vector<std::byte> build_cache;
 };
 
@@ -63,6 +66,48 @@ struct project_dirty_source_telemetry final {
     const source_manager_image_view& sources,
     std::vector<source_id>& dirty_sources,
     project_dirty_source_telemetry& telemetry) noexcept;
+
+[[nodiscard]] status project_baseline_dirty_sources(
+    const change_state_image_view& sources,
+    std::vector<source_id>& dirty_sources,
+    project_dirty_source_telemetry& telemetry) noexcept;
+
+[[nodiscard]] status project_baseline_dirty_sources(
+    const change_state_image_view& sources,
+    std::vector<source_change_journal_candidate>& candidates,
+    project_dirty_source_telemetry& telemetry) noexcept;
+
+
+[[nodiscard]] status project_baseline_dirty_sources(
+    const source_manager_image_view& sources,
+    const file_change_token& configuration,
+    std::vector<source_id>& dirty_sources,
+    bool& configuration_proven,
+    bool& configuration_changed,
+    project_dirty_source_telemetry& telemetry) noexcept;
+
+[[nodiscard]] status project_baseline_dirty_sources(
+    const change_state_image_view& sources,
+    const file_change_token& configuration,
+    std::vector<source_id>& dirty_sources,
+    bool& configuration_proven,
+    bool& configuration_changed,
+    project_dirty_source_telemetry& telemetry) noexcept;
+
+[[nodiscard]] status project_baseline_dirty_sources(
+    const change_state_image_view& sources,
+    const file_change_token& configuration,
+    std::vector<source_change_journal_candidate>& candidates,
+    bool& configuration_proven,
+    bool& configuration_changed,
+    project_dirty_source_telemetry& telemetry) noexcept;
+
+[[nodiscard]] status project_baseline_resolve_candidates(
+    const source_manager_image_view& sources,
+    std::span<const source_change_journal_candidate> candidates,
+    std::vector<source_id>& dirty_sources,
+    project_dirty_source_telemetry& telemetry) noexcept;
+
 
 [[nodiscard]] status project_baseline_sources_changed(
     const source_manager_image_view& sources,

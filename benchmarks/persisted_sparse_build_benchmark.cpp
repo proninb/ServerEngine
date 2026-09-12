@@ -567,6 +567,8 @@ void print_result(
         build.telemetry.configuration_ns == 0 &&
         build.telemetry.fingerprint_ns == 0 &&
         build.telemetry.baseline_open_ns != 0 &&
+        build.telemetry.baseline_change_state_map_ns != 0 &&
+        build.telemetry.baseline_source_manager_map_ns == 0 &&
         build.telemetry.baseline_build_cache_map_ns == 0 &&
         dirty_ms <= dirty_limit_ms;
 
