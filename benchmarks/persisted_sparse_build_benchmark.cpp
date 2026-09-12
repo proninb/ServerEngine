@@ -174,9 +174,10 @@ struct sparse_case_result final {
 void print_header() {
     std::cout
         << "baseline_sources,scenario,"
-           "manager_ms,configuration_identity_ms,configuration_ms,fingerprint_ms,"
-           "baseline_open_ms,manifest_ms,compiled_map_ms,source_manager_map_ms,"
-           "build_cache_map_ms,size_validation_us,dirty_detection_ms,"
+           "manager_ms,configuration_identity_ms,configuration_probe_ms,configuration_gate_ms,"
+           "configuration_ms,fingerprint_ms,"
+           "baseline_open_ms,current_read_ms,embedded_manifest_parse_us,manifest_ms,compiled_map_ms,source_manager_map_ms,"
+           "change_state_map_ms,build_cache_map_ms,size_validation_us,dirty_detection_ms,"
            "baseline_activation_ms,build_activation_ms,"
            "dirty_backend,dirty_fast,dirty_fallback,"
            "journal_records,journal_matched,"
@@ -207,17 +208,27 @@ void print_result(
         << static_cast<double>(
             telemetry.configuration_identity_ns) / 1'000'000.0 << ','
         << static_cast<double>(
+            telemetry.configuration_probe_ns) / 1'000'000.0 << ','
+        << static_cast<double>(
+            telemetry.configuration_gate_ns) / 1'000'000.0 << ','
+        << static_cast<double>(
             telemetry.configuration_ns) / 1'000'000.0 << ','
         << static_cast<double>(
             telemetry.fingerprint_ns) / 1'000'000.0 << ','
         << static_cast<double>(
             telemetry.baseline_open_ns) / 1'000'000.0 << ','
         << static_cast<double>(
+            telemetry.baseline_current_read_ns) / 1'000'000.0 << ','
+        << static_cast<double>(
+            telemetry.baseline_embedded_manifest_parse_ns) / 1'000.0 << ','
+        << static_cast<double>(
             telemetry.baseline_manifest_validation_ns) / 1'000'000.0 << ','
         << static_cast<double>(
             telemetry.baseline_compiled_map_ns) / 1'000'000.0 << ','
         << static_cast<double>(
             telemetry.baseline_source_manager_map_ns) / 1'000'000.0 << ','
+        << static_cast<double>(
+            telemetry.baseline_change_state_map_ns) / 1'000'000.0 << ','
         << static_cast<double>(
             telemetry.baseline_build_cache_map_ns) / 1'000'000.0 << ','
         << static_cast<double>(
@@ -552,9 +563,10 @@ void print_result(
     const bool pass =
         !build.telemetry.dirty_detection_fallback &&
         build.telemetry.dirty_sources == 0 &&
-        build.telemetry.configuration_identity_ns != 0 &&
+        build.telemetry.configuration_probe_ns == 0 &&
         build.telemetry.configuration_ns == 0 &&
         build.telemetry.fingerprint_ns == 0 &&
+        build.telemetry.baseline_open_ns != 0 &&
         build.telemetry.baseline_build_cache_map_ns == 0 &&
         dirty_ms <= dirty_limit_ms;
 
@@ -643,7 +655,7 @@ void print_result(
         build.telemetry.builder.validation_dependency_edges == 0;
 
     const bool timing_correctness =
-        build.telemetry.configuration_identity_ns != 0 &&
+        build.telemetry.configuration_probe_ns == 0 &&
         build.telemetry.configuration_ns == 0 &&
         build.telemetry.fingerprint_ns == 0 &&
         build.telemetry.baseline_open_ns != 0 &&

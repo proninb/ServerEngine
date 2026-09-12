@@ -163,50 +163,62 @@ status project_manager::build(
     baseline_probe probe;
     baseline_open_telemetry baseline_open_detail;
 
+    const auto baseline_open_begin =
+        std::chrono::steady_clock::now();
+
+    auto result = store.open_current_decision(
+        probe,
+        snapshot,
+        &baseline_open_detail);
+
+    const auto baseline_open_end =
+        std::chrono::steady_clock::now();
+    baseline_open_ns =
+        static_cast<std::uint64_t>(
+            std::chrono::duration_cast<
+                std::chrono::nanoseconds>(
+                baseline_open_end -
+                baseline_open_begin).count());
+
+    const std::uint64_t configuration_probe_ns = 0;
+
     const auto configuration_identity_begin =
         std::chrono::steady_clock::now();
 
-    auto result = store.probe(probe);
     bool fast_configuration = false;
 
     if (result.ok() &&
-        probe.configuration.available) {
+        probe.configuration.available &&
+        probe.configuration.change_token_available &&
+        probe.configuration.content_hash_available) {
 
-        file_snapshot_observation observation;
-        result = observe_project_configuration(
-            configuration_path,
-            observation);
-
-        if (result.ok() &&
-            observation ==
-                probe.configuration.observation) {
-
-            if (probe.configuration.project_version !=
-                    current_project_configuration_version ||
-                probe.configuration.abi_target >
-                    static_cast<std::uint32_t>(
-                        abi_target::posix_x64)) {
-                abandon_construction();
-                return {status_code::artifact_corrupt};
-            }
-
-            configuration.version =
-                probe.configuration.project_version;
-            configuration.materialized = false;
-            configuration.abi.target =
-                static_cast<abi_target>(
-                    probe.configuration.abi_target);
-            configuration.abi.pack =
-                probe.configuration.abi_pack;
-
-            if (!is_supported_abi_configuration(
-                    configuration.abi)) {
-                abandon_construction();
-                return {status_code::artifact_corrupt};
-            }
-
-            fast_configuration = true;
+        if (probe.configuration.project_version !=
+                current_project_configuration_version ||
+            probe.configuration.abi_target >
+                static_cast<std::uint32_t>(
+                    abi_target::posix_x64)) {
+            abandon_construction();
+            return {status_code::artifact_corrupt};
         }
+
+        configuration.version =
+            probe.configuration.project_version;
+        configuration.materialized = false;
+        configuration.abi.target =
+            static_cast<abi_target>(
+                probe.configuration.abi_target);
+        configuration.abi.pack =
+            probe.configuration.abi_pack;
+
+        if (!is_supported_abi_configuration(
+                configuration.abi)) {
+            abandon_construction();
+            return {status_code::artifact_corrupt};
+        }
+
+        // Provisional only. The same Source USN pass below must prove that
+        // project.json had no event since the persisted Source checkpoint.
+        fast_configuration = true;
     }
 
     const auto configuration_identity_end =
@@ -218,26 +230,10 @@ status project_manager::build(
                 configuration_identity_end -
                 configuration_identity_begin).count());
 
-    if (fast_configuration) {
-        const auto baseline_open_begin =
-            std::chrono::steady_clock::now();
+    const auto configuration_gate_ns =
+        configuration_identity_ns;
 
-        result = store.open_transaction_ready(
-            probe.fingerprint,
-            probe.transaction,
-            snapshot,
-            &baseline_open_detail);
-
-        const auto baseline_open_end =
-            std::chrono::steady_clock::now();
-        baseline_open_ns =
-            static_cast<std::uint64_t>(
-                std::chrono::duration_cast<
-                    std::chrono::nanoseconds>(
-                    baseline_open_end -
-                    baseline_open_begin).count());
-    }
-    else {
+    if (!fast_configuration) {
         const auto configuration_begin =
             std::chrono::steady_clock::now();
 
@@ -292,7 +288,7 @@ status project_manager::build(
 
         const auto baseline_open_end =
             std::chrono::steady_clock::now();
-        baseline_open_ns =
+        baseline_open_ns +=
             static_cast<std::uint64_t>(
                 std::chrono::duration_cast<
                     std::chrono::nanoseconds>(
@@ -322,9 +318,10 @@ status project_manager::build(
     // would fault the complete baseline before a sparse update can begin.
     const auto dirty_detection_begin = std::chrono::steady_clock::now();
 
-    source_manager_image_view sources;
-    result = sources.bind(
-        snapshot.artifact(baseline_artifact_kind::source_manager));
+    source_manager_image_view changes;
+    result = changes.bind(
+        snapshot.artifact(
+            baseline_artifact_kind::source_manager));
     if (!result.ok()) {
         abandon_construction();
         return result;
@@ -332,13 +329,98 @@ status project_manager::build(
 
     std::vector<source_id> dirty_sources;
     project_dirty_source_telemetry dirty_telemetry;
-    result = project_baseline_dirty_sources(
-        sources,
-        dirty_sources,
-        dirty_telemetry);
+    bool configuration_proven = !fast_configuration;
+    bool configuration_changed = false;
+
+    if (fast_configuration) {
+        result = project_baseline_dirty_sources(
+            changes,
+            probe.configuration.change_token,
+            dirty_sources,
+            configuration_proven,
+            configuration_changed,
+            dirty_telemetry);
+    }
+    else {
+        result = project_baseline_dirty_sources(
+            changes,
+            dirty_sources,
+            dirty_telemetry);
+    }
+
     if (!result.ok()) {
         abandon_construction();
         return result;
+    }
+
+    if (fast_configuration &&
+        (!configuration_proven ||
+         configuration_changed)) {
+
+        file_snapshot configuration_file;
+        const auto acquisition =
+            acquire_file_snapshot(
+                configuration_path,
+                std::nullopt,
+                configuration_file);
+
+        if (acquisition ==
+                file_snapshot_result::allocation_failed) {
+            abandon_construction();
+            return {status_code::not_available};
+        }
+        if (acquisition ==
+                file_snapshot_result::missing) {
+            abandon_construction();
+            return {status_code::not_found};
+        }
+        if (acquisition !=
+                file_snapshot_result::acquired) {
+            abandon_construction();
+            return {status_code::io_failed};
+        }
+
+        if (configuration_file.hash !=
+            probe.configuration.content_hash) {
+
+            diagnostic_buffer configuration_diagnostics;
+            project_configuration current_configuration;
+
+            result = load_project_configuration(
+                configuration_file.bytes,
+                configuration_path,
+                operation,
+                configuration_diagnostics,
+                current_configuration);
+            if (!result.ok()) {
+                abandon_construction();
+                return result;
+            }
+
+            baseline_fingerprint current_fingerprint;
+            result = make_project_baseline_fingerprint(
+                current_configuration,
+                current_fingerprint);
+            if (!result.ok()) {
+                abandon_construction();
+                return result;
+            }
+
+            if (!(current_fingerprint ==
+                  probe.fingerprint)) {
+                return construct_reserved(
+                    std::move(current_configuration),
+                    configuration_path,
+                    operation,
+                    diagnostics,
+                    output,
+                    worker_limit,
+                    false);
+            }
+
+            configuration =
+                std::move(current_configuration);
+        }
     }
 
     const auto dirty_detection_end = std::chrono::steady_clock::now();
@@ -347,7 +429,7 @@ status project_manager::build(
             dirty_detection_end - dirty_detection_begin).count());
 
     const auto baseline_source_count =
-        static_cast<std::uint64_t>(sources.source_count());
+        static_cast<std::uint64_t>(changes.source_count());
     const auto dirty_source_count =
         static_cast<std::uint64_t>(dirty_sources.size());
 
@@ -357,15 +439,24 @@ status project_manager::build(
     const auto publish_manager_telemetry = [&](project_build_result& value) noexcept {
         value.telemetry.configuration_identity_ns =
             configuration_identity_ns;
+        value.telemetry.configuration_probe_ns =
+            configuration_probe_ns;
+        value.telemetry.configuration_gate_ns =
+            configuration_gate_ns;
         value.telemetry.configuration_ns = configuration_ns;
         value.telemetry.fingerprint_ns = fingerprint_ns;
         value.telemetry.baseline_open_ns = baseline_open_ns;
+        value.telemetry.baseline_current_read_ns =
+            baseline_open_detail.current_read_ns;
+        value.telemetry.baseline_embedded_manifest_parse_ns =
+            baseline_open_detail.embedded_manifest_parse_ns;
         value.telemetry.baseline_manifest_validation_ns =
             baseline_open_detail.manifest_validation_ns;
         value.telemetry.baseline_compiled_map_ns =
             baseline_open_detail.compiled_map_ns;
         value.telemetry.baseline_source_manager_map_ns =
             baseline_open_detail.source_manager_map_ns;
+        value.telemetry.baseline_change_state_map_ns = 0;
         value.telemetry.baseline_build_cache_map_ns =
             baseline_open_detail.build_cache_map_ns;
         value.telemetry.baseline_size_validation_ns =
@@ -410,6 +501,39 @@ status project_manager::build(
         return activate_result;
     }
 
+    if (!dirty_sources.empty() &&
+        !snapshot.mapped(
+            baseline_artifact_kind::source_manager)) {
+
+        baseline_open_telemetry deferred_sources;
+        const auto source_map_begin =
+            std::chrono::steady_clock::now();
+
+        result = store.map_source_manager(
+            probe.fingerprint,
+            probe.transaction,
+            snapshot,
+            &deferred_sources);
+
+        const auto source_map_end =
+            std::chrono::steady_clock::now();
+
+        baseline_open_ns +=
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<
+                    std::chrono::nanoseconds>(
+                    source_map_end -
+                    source_map_begin).count());
+
+        baseline_open_detail.source_manager_map_ns +=
+            deferred_sources.source_manager_map_ns;
+
+        if (!result.ok()) {
+            abandon_construction();
+            return result;
+        }
+    }
+
     if (!snapshot.mapped(
             baseline_artifact_kind::build_cache)) {
 
@@ -417,9 +541,10 @@ status project_manager::build(
         const auto deferred_begin =
             std::chrono::steady_clock::now();
 
-        result = store.map_build_cache(
+        result = store.map_build_cache_cached(
             probe.fingerprint,
             probe.transaction,
+            probe.build_cache_size,
             snapshot,
             &deferred_cache);
 
@@ -575,9 +700,20 @@ status project_manager::construct_reserved(
     bool mark_rebuild) noexcept {
 
     try {
+        baseline_fingerprint build_fingerprint;
+        auto fingerprint_result =
+            make_project_baseline_fingerprint(
+                configuration,
+                build_fingerprint);
+        if (!fingerprint_result.ok()) {
+            abandon_construction();
+            return fingerprint_result;
+        }
+
         auto candidate = std::make_unique<project_context>(
             std::move(configuration),
             std::move(configuration_path));
+        candidate->set_build_fingerprint(build_fingerprint);
 
         project_build_orchestrator builder{
             *candidate,
@@ -631,6 +767,17 @@ status project_manager::save(
         return {status_code::invalid_state};
     }
 
+    file_change_token configuration_change_token;
+    const auto token_result =
+        capture_file_change_token(
+            project->configuration_path(),
+            configuration_change_token);
+
+    if (!token_result.ok() &&
+        token_result.code != status_code::not_found) {
+        return token_result;
+    }
+
     file_snapshot configuration_file;
     const auto acquisition =
         acquire_file_snapshot(
@@ -672,18 +819,43 @@ status project_manager::save(
     if (!result.ok())
         return result;
 
-    if (project->baseline_backed()) {
-        const auto* expected =
-            project->baseline_fingerprint_value();
-        if (expected == nullptr ||
-            !(*expected == fingerprint)) {
-            return {status_code::rebuild_required};
-        }
+    const auto* expected =
+        project->build_fingerprint();
+    if (expected == nullptr ||
+        !(*expected == fingerprint)) {
+        return {status_code::rebuild_required};
     }
 
     baseline_configuration_state configuration_state;
     configuration_state.observation =
         configuration_file.observation;
+    configuration_state.content_hash =
+        configuration_file.hash;
+    configuration_state.content_hash_available = true;
+
+    if (token_result.ok()) {
+        bool unchanged = false;
+        const auto proof_result =
+            prove_file_unchanged(
+                project->configuration_path(),
+                configuration_change_token,
+                unchanged);
+
+        if (!proof_result.ok()) {
+            if (proof_result.code !=
+                status_code::not_found) {
+                return proof_result;
+            }
+        }
+        else if (!unchanged) {
+            return {status_code::rebuild_required};
+        }
+        else {
+            configuration_state.change_token =
+                configuration_change_token;
+            configuration_state.change_token_available = true;
+        }
+    }
     configuration_state.project_version =
         configuration.version;
     configuration_state.abi_target =

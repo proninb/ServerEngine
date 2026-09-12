@@ -2,6 +2,7 @@
 
 #include "../../status.hpp"
 #include "../source/file_snapshot.hpp"
+#include "../source/source_change_tracker.hpp"
 
 #include <array>
 #include <cstddef>
@@ -28,6 +29,7 @@ struct baseline_fingerprint final {
 enum class baseline_artifact_kind : std::uint8_t {
     compiled,
     source_manager,
+    change_state,
     build_cache,
 };
 
@@ -40,22 +42,30 @@ struct baseline_commit_result final {
 // change token; semantic compatibility remains the baseline fingerprint.
 struct baseline_configuration_state final {
     file_snapshot_observation observation{};
+    source_content_hash content_hash{};
+    file_change_token change_token{};
     std::uint32_t project_version = 0;
     std::uint32_t abi_target = 0;
     std::uint32_t abi_pack = 0;
     bool available = false;
+    bool content_hash_available = false;
+    bool change_token_available = false;
 };
 
 struct baseline_probe final {
     baseline_fingerprint fingerprint{};
     baseline_configuration_state configuration{};
     std::string transaction;
+    std::uint64_t build_cache_size = 0;
 };
 
 struct baseline_open_telemetry final {
+    std::uint64_t current_read_ns = 0;
+    std::uint64_t embedded_manifest_parse_ns = 0;
     std::uint64_t manifest_validation_ns = 0;
     std::uint64_t compiled_map_ns = 0;
     std::uint64_t source_manager_map_ns = 0;
+    std::uint64_t change_state_map_ns = 0;
     std::uint64_t build_cache_map_ns = 0;
     std::uint64_t size_validation_ns = 0;
 };
@@ -118,6 +128,7 @@ private:
     std::string transaction_value;
     read_only_file_mapping compiled;
     read_only_file_mapping source_manager;
+    read_only_file_mapping change_state;
     read_only_file_mapping build_cache;
 
     friend class baseline_store;
@@ -136,6 +147,15 @@ public:
     // Reads CURRENT + manifest only. No baseline artifact is mapped.
     [[nodiscard]] status probe(
         baseline_probe& output) const noexcept;
+
+    // BUILD fast path: reads CURRENT + manifest once, returns the
+    // persisted configuration identity, and maps compiled + Source Manager
+    // from that same immutable transaction. build_cache stays deferred.
+    [[nodiscard]] status open_current_decision(
+        baseline_probe& probe,
+        baseline_snapshot& output,
+        baseline_open_telemetry* telemetry = nullptr) const noexcept;
+
 
     // BUILD/SAVE boundary: maps all three artifacts.
     [[nodiscard]] status open(
@@ -164,11 +184,42 @@ public:
         baseline_snapshot& output,
         baseline_open_telemetry* telemetry = nullptr) const noexcept;
 
+    [[nodiscard]] status open_transaction_decision(
+        const baseline_fingerprint& expected,
+        std::string_view transaction,
+        baseline_snapshot& output,
+        baseline_open_telemetry* telemetry = nullptr) const noexcept;
+
+    [[nodiscard]] status map_source_manager(
+        const baseline_fingerprint& expected,
+        std::string_view transaction,
+        baseline_snapshot& snapshot,
+        baseline_open_telemetry* telemetry = nullptr) const noexcept;
+
+
     [[nodiscard]] status map_build_cache(
         const baseline_fingerprint& expected,
         std::string_view transaction,
         baseline_snapshot& snapshot,
         baseline_open_telemetry* telemetry = nullptr) const noexcept;
+
+    // Fused BUILD path: manifest identity and artifact size were already
+    // validated while opening CURRENT. This maps only the immutable cache file.
+    [[nodiscard]] status map_build_cache_cached(
+        const baseline_fingerprint& expected,
+        std::string_view transaction,
+        std::uint64_t expected_build_cache_size,
+        baseline_snapshot& snapshot,
+        baseline_open_telemetry* telemetry = nullptr) const noexcept;
+
+    [[nodiscard]] status commit(
+        const baseline_fingerprint& fingerprint,
+        const baseline_configuration_state& configuration,
+        std::span<const std::byte> compiled,
+        std::span<const std::byte> source_manager,
+        std::span<const std::byte> change_state,
+        std::span<const std::byte> build_cache,
+        baseline_commit_result& output) const noexcept;
 
     [[nodiscard]] status commit(
         const baseline_fingerprint& fingerprint,
@@ -196,6 +247,8 @@ private:
     [[nodiscard]] status open_selected(
         const baseline_fingerprint& expected,
         std::string_view transaction,
+        bool include_source_manager,
+        bool include_change_state,
         bool include_build_cache,
         baseline_snapshot& output,
         baseline_open_telemetry* telemetry) const noexcept;

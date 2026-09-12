@@ -40,9 +40,19 @@ constexpr std::array<std::byte, 8> manifest_magic{
 
 constexpr std::string_view compiled_name = "compiled.bin";
 constexpr std::string_view source_manager_name = "source_manager.bin";
+constexpr std::string_view change_state_name = "change_state.bin";
 constexpr std::string_view build_cache_name = "build_cache.bin";
 constexpr std::string_view manifest_name = "manifest.bin";
 constexpr std::string_view current_name = "CURRENT";
+constexpr std::array<std::byte, 8> current_selector_magic{
+    std::byte{'S'}, std::byte{'E'}, std::byte{'C'}, std::byte{'U'},
+    std::byte{'R'}, std::byte{'R'}, std::byte{'2'}, std::byte{0}};
+constexpr std::uint32_t current_selector_version = 2;
+constexpr std::size_t current_selector_transaction_capacity = 64;
+constexpr std::size_t current_selector_header_size =
+    8 + 4 + 4 + current_selector_transaction_capacity;
+constexpr std::size_t current_selector_size =
+    current_selector_header_size + manifest_size;
 
 std::atomic<std::uint64_t> transaction_counter{0};
 
@@ -132,35 +142,153 @@ void write_u64(std::array<std::byte, manifest_size>& output, std::size_t offset,
     std::vector<std::byte>& output) noexcept {
 
     output.clear();
-    try {
-        std::error_code existence_error;
-        if (!std::filesystem::exists(path, existence_error))
-            return existence_error ? status{status_code::io_failed} : status{status_code::not_found};
 
-        std::ifstream file(path, std::ios::binary | std::ios::ate);
-        if (!file)
-            return {status_code::io_failed};
-        const auto end = file.tellg();
-        if (end < 0)
-            return {status_code::io_failed};
-        const auto size = static_cast<std::uint64_t>(end);
-        if (size > maximum)
-            return {status_code::artifact_corrupt};
+#if defined(_WIN32)
+    const auto handle = ::CreateFileW(
+        path.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+        nullptr);
+
+    if (handle == INVALID_HANDLE_VALUE) {
+        const auto error = ::GetLastError();
+        return error == ERROR_FILE_NOT_FOUND ||
+            error == ERROR_PATH_NOT_FOUND
+            ? status{status_code::not_found}
+            : status{status_code::io_failed};
+    }
+
+    LARGE_INTEGER native_size{};
+    if (::GetFileSizeEx(handle, &native_size) == 0 ||
+        native_size.QuadPart < 0) {
+        ::CloseHandle(handle);
+        return {status_code::io_failed};
+    }
+
+    const auto size =
+        static_cast<std::uint64_t>(native_size.QuadPart);
+    if (size > maximum ||
+        size >
+            static_cast<std::uint64_t>(
+                (std::numeric_limits<std::size_t>::max)())) {
+        ::CloseHandle(handle);
+        return {status_code::artifact_corrupt};
+    }
+
+    try {
         output.resize(static_cast<std::size_t>(size));
-        file.seekg(0, std::ios::beg);
-        if (!output.empty()) {
-            file.read(reinterpret_cast<char*>(output.data()), static_cast<std::streamsize>(output.size()));
-            if (!file)
-                return {status_code::io_failed};
-        }
-        return {};
     }
     catch (const std::bad_alloc&) {
+        ::CloseHandle(handle);
         return {status_code::not_available};
     }
     catch (const std::length_error&) {
+        ::CloseHandle(handle);
         return {status_code::not_available};
     }
+
+    std::size_t offset = 0;
+    while (offset < output.size()) {
+        const auto remaining = output.size() - offset;
+        const auto chunk = static_cast<DWORD>(
+            (std::min<std::size_t>)(
+                remaining,
+                (std::numeric_limits<DWORD>::max)()));
+
+        DWORD read = 0;
+        if (::ReadFile(
+                handle,
+                output.data() + offset,
+                chunk,
+                &read,
+                nullptr) == 0 ||
+            read == 0) {
+            ::CloseHandle(handle);
+            output.clear();
+            return {status_code::io_failed};
+        }
+
+        offset += static_cast<std::size_t>(read);
+    }
+
+    if (::CloseHandle(handle) == 0) {
+        output.clear();
+        return {status_code::io_failed};
+    }
+
+    return {};
+#else
+    const auto handle = ::open(path.c_str(), O_RDONLY);
+    if (handle < 0) {
+        return errno == ENOENT
+            ? status{status_code::not_found}
+            : status{status_code::io_failed};
+    }
+
+    struct stat information {};
+    if (::fstat(handle, &information) != 0 ||
+        information.st_size < 0) {
+        ::close(handle);
+        return {status_code::io_failed};
+    }
+
+    const auto size =
+        static_cast<std::uint64_t>(information.st_size);
+    if (size > maximum ||
+        size >
+            static_cast<std::uint64_t>(
+                (std::numeric_limits<std::size_t>::max)())) {
+        ::close(handle);
+        return {status_code::artifact_corrupt};
+    }
+
+    try {
+        output.resize(static_cast<std::size_t>(size));
+    }
+    catch (const std::bad_alloc&) {
+        ::close(handle);
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        ::close(handle);
+        return {status_code::not_available};
+    }
+
+    std::size_t offset = 0;
+    while (offset < output.size()) {
+        const auto result = ::read(
+            handle,
+            output.data() + offset,
+            output.size() - offset);
+
+        if (result < 0) {
+            if (errno == EINTR)
+                continue;
+
+            ::close(handle);
+            output.clear();
+            return {status_code::io_failed};
+        }
+
+        if (result == 0) {
+            ::close(handle);
+            output.clear();
+            return {status_code::io_failed};
+        }
+
+        offset += static_cast<std::size_t>(result);
+    }
+
+    if (::close(handle) != 0) {
+        output.clear();
+        return {status_code::io_failed};
+    }
+
+    return {};
+#endif
 }
 
 [[nodiscard]] status durable_write_file(
@@ -283,10 +411,48 @@ void write_u64(std::array<std::byte, manifest_size>& output, std::size_t offset,
             160,
             static_cast<std::uint64_t>(
                 configuration.observation.size));
-        write_u32(output, 168, 1);
+        const auto identity_version =
+            configuration.change_token_available
+            ? 4u
+            : (configuration.content_hash_available ? 2u : 1u);
+
+        write_u32(output, 168, identity_version);
         write_u32(output, 172, configuration.project_version);
         write_u32(output, 176, configuration.abi_target);
         write_u32(output, 180, configuration.abi_pack);
+
+        if (configuration.content_hash_available) {
+            for (std::size_t index = 0;
+                 index < configuration.content_hash.bytes.size();
+                 ++index) {
+                output[184 + index] =
+                    configuration.content_hash.bytes[index];
+            }
+        }
+
+        if (configuration.change_token_available) {
+            const auto& token = configuration.change_token;
+            if (!token)
+                return {status_code::invalid_argument};
+
+            write_u64(
+                output,
+                216,
+                token.volume_serial);
+            write_u64(
+                output,
+                224,
+                token.file_reference);
+            write_u64(
+                output,
+                232,
+                static_cast<std::uint64_t>(
+                    token.file_usn));
+            write_u64(
+                output,
+                240,
+                0);
+        }
     }
 
     write_u64(output, manifest_crc_offset, crc64(std::span<const std::byte>{output}.first(manifest_crc_offset)));
@@ -348,10 +514,10 @@ struct parsed_manifest final {
 
     const auto configuration_identity_version =
         read_u32(input, 168);
-    if (configuration_identity_version > 1)
+    if (configuration_identity_version > 4)
         return {status_code::artifact_corrupt};
 
-    if (configuration_identity_version == 1) {
+    if (configuration_identity_version >= 1) {
         output.configuration.observation.write_time_ticks =
             static_cast<std::int64_t>(
                 read_u64(input, 152));
@@ -367,29 +533,213 @@ struct parsed_manifest final {
         output.configuration.available = true;
     }
 
+    if (configuration_identity_version >= 2) {
+        for (std::size_t index = 0;
+             index < output.configuration.content_hash.bytes.size();
+             ++index) {
+            output.configuration.content_hash.bytes[index] =
+                input[184 + index];
+        }
+        output.configuration.content_hash_available = true;
+    }
+
+    // v3 stored a volume-journal checkpoint. It remains readable but
+    // intentionally uses the content-hash fallback until the next SAVE.
+    if (configuration_identity_version >= 4) {
+        file_change_token token;
+        token.volume_serial =
+            read_u64(input, 216);
+        token.file_reference =
+            read_u64(input, 224);
+        token.file_usn =
+            static_cast<std::int64_t>(
+                read_u64(input, 232));
+
+        if (!token || read_u64(input, 240) != 0)
+            return {status_code::artifact_corrupt};
+
+        output.configuration.change_token = token;
+        output.configuration.change_token_available = true;
+    }
+
     return {};
 }
 
-[[nodiscard]] status read_current_transaction(
+[[nodiscard]] status create_current_selector(
+    std::string_view transaction,
+    std::span<const std::byte, manifest_size> manifest,
+    std::array<std::byte, current_selector_size>& output) noexcept {
+
+    if (!valid_transaction_name(transaction) ||
+        transaction.size() > current_selector_transaction_capacity) {
+        return {status_code::invalid_argument};
+    }
+
+    output.fill(std::byte{0});
+    std::copy(
+        current_selector_magic.begin(),
+        current_selector_magic.end(),
+        output.begin());
+
+    const auto write_selector_u32 =
+        [&output](std::size_t offset, std::uint32_t value) noexcept {
+            output[offset + 0] =
+                static_cast<std::byte>(value & 0xffu);
+            output[offset + 1] =
+                static_cast<std::byte>((value >> 8u) & 0xffu);
+            output[offset + 2] =
+                static_cast<std::byte>((value >> 16u) & 0xffu);
+            output[offset + 3] =
+                static_cast<std::byte>((value >> 24u) & 0xffu);
+        };
+
+    write_selector_u32(
+        8,
+        current_selector_version);
+    write_selector_u32(
+        12,
+        static_cast<std::uint32_t>(transaction.size()));
+
+    for (std::size_t index = 0;
+         index < transaction.size();
+         ++index) {
+        output[16 + index] =
+            static_cast<std::byte>(transaction[index]);
+    }
+
+    std::copy(
+        manifest.begin(),
+        manifest.end(),
+        output.begin() + current_selector_header_size);
+
+    const auto embedded =
+        std::span<const std::byte>{output}.subspan(
+            current_selector_header_size,
+            manifest_size);
+
+    if (!std::equal(
+            manifest.begin(),
+            manifest.end(),
+            embedded.begin(),
+            embedded.end())) {
+        return {status_code::artifact_corrupt};
+    }
+
+    parsed_manifest validated_manifest;
+    const auto validation =
+        parse_manifest(
+            embedded,
+            validated_manifest);
+    if (!validation.ok() ||
+        validated_manifest.transaction != transaction) {
+        return {status_code::artifact_corrupt};
+    }
+
+    return {};
+}
+
+[[nodiscard]] status read_current_selector(
     const std::filesystem::path& root,
-    std::string& output) noexcept {
+    std::string& transaction,
+    std::array<std::byte, manifest_size>* manifest,
+    bool* embedded_manifest_available = nullptr) noexcept {
+
+    transaction.clear();
+    if (manifest != nullptr)
+        manifest->fill(std::byte{0});
+    if (embedded_manifest_available != nullptr)
+        *embedded_manifest_available = false;
 
     std::vector<std::byte> bytes;
-    const auto result = read_small_file(root / current_name, 128, bytes);
+    const auto result = read_small_file(
+        root / current_name,
+        current_selector_size,
+        bytes);
     if (!result.ok())
         return result;
 
+    if (bytes.size() == current_selector_size &&
+        std::equal(
+            current_selector_magic.begin(),
+            current_selector_magic.end(),
+            bytes.begin())) {
+
+        if (read_u32(bytes, 8) != current_selector_version)
+            return {status_code::artifact_corrupt};
+
+        const auto transaction_size = read_u32(bytes, 12);
+        if (transaction_size == 0 ||
+            transaction_size >
+                current_selector_transaction_capacity) {
+            return {status_code::artifact_corrupt};
+        }
+
+        try {
+            transaction.resize(transaction_size);
+        }
+        catch (const std::bad_alloc&) {
+            return {status_code::not_available};
+        }
+        catch (const std::length_error&) {
+            return {status_code::not_available};
+        }
+
+        for (std::size_t index = 0;
+             index < transaction_size;
+             ++index) {
+            transaction[index] =
+                static_cast<char>(
+                    std::to_integer<unsigned char>(
+                        bytes[16 + index]));
+        }
+
+        if (!valid_transaction_name(transaction))
+            return {status_code::artifact_corrupt};
+
+        const auto embedded =
+            std::span<const std::byte>{bytes}.subspan(
+                current_selector_header_size,
+                manifest_size);
+
+        parsed_manifest validated_manifest;
+        const auto manifest_result =
+            parse_manifest(
+                embedded,
+                validated_manifest);
+        if (!manifest_result.ok())
+            return {status_code::artifact_corrupt};
+
+        if (validated_manifest.transaction != transaction)
+            return {status_code::artifact_corrupt};
+
+        if (manifest != nullptr) {
+            std::copy(
+                embedded.begin(),
+                embedded.end(),
+                manifest->begin());
+        }
+
+        if (embedded_manifest_available != nullptr)
+            *embedded_manifest_available = true;
+
+        return {};
+    }
+
     while (!bytes.empty()) {
-        const auto value = static_cast<char>(std::to_integer<unsigned char>(bytes.back()));
+        const auto value =
+            static_cast<char>(
+                std::to_integer<unsigned char>(
+                    bytes.back()));
         if (value != '\n' && value != '\r')
             break;
         bytes.pop_back();
     }
+
     if (bytes.empty() || bytes.size() > 63)
         return {status_code::artifact_corrupt};
 
     try {
-        output.resize(bytes.size());
+        transaction.resize(bytes.size());
     }
     catch (const std::bad_alloc&) {
         return {status_code::not_available};
@@ -398,9 +748,29 @@ struct parsed_manifest final {
         return {status_code::not_available};
     }
 
-    for (std::size_t index = 0; index < bytes.size(); ++index)
-        output[index] = static_cast<char>(std::to_integer<unsigned char>(bytes[index]));
-    return valid_transaction_name(output) ? status{} : status{status_code::artifact_corrupt};
+    for (std::size_t index = 0;
+         index < bytes.size();
+         ++index) {
+        transaction[index] =
+            static_cast<char>(
+                std::to_integer<unsigned char>(
+                    bytes[index]));
+    }
+
+    return valid_transaction_name(transaction)
+        ? status{}
+        : status{status_code::artifact_corrupt};
+}
+
+[[nodiscard]] status read_current_transaction(
+    const std::filesystem::path& root,
+    std::string& output) noexcept {
+
+    return read_current_selector(
+        root,
+        output,
+        nullptr,
+        nullptr);
 }
 
 } // namespace
@@ -414,27 +784,27 @@ struct read_only_file_mapping::state final {
 #endif
     void* address = nullptr;
     std::size_t size = 0;
+
+    ~state() noexcept {
+#if defined(_WIN32)
+        if (address != nullptr)
+            ::UnmapViewOfFile(address);
+        if (mapping != nullptr)
+            ::CloseHandle(mapping);
+        if (file != INVALID_HANDLE_VALUE)
+            ::CloseHandle(file);
+#else
+        if (address != nullptr && size != 0)
+            ::munmap(address, size);
+        if (file >= 0)
+            ::close(file);
+#endif
+    }
 };
 
 read_only_file_mapping::read_only_file_mapping() noexcept = default;
 
-read_only_file_mapping::~read_only_file_mapping() noexcept {
-    if (value == nullptr)
-        return;
-#if defined(_WIN32)
-    if (value->address != nullptr)
-        ::UnmapViewOfFile(value->address);
-    if (value->mapping != nullptr)
-        ::CloseHandle(value->mapping);
-    if (value->file != INVALID_HANDLE_VALUE)
-        ::CloseHandle(value->file);
-#else
-    if (value->address != nullptr && value->size != 0)
-        ::munmap(value->address, value->size);
-    if (value->file >= 0)
-        ::close(value->file);
-#endif
-}
+read_only_file_mapping::~read_only_file_mapping() noexcept = default;
 
 read_only_file_mapping::read_only_file_mapping(read_only_file_mapping&&) noexcept = default;
 read_only_file_mapping& read_only_file_mapping::operator=(read_only_file_mapping&&) noexcept = default;
@@ -510,6 +880,7 @@ std::span<const std::byte> baseline_snapshot::artifact(baseline_artifact_kind ki
     switch (kind) {
         case baseline_artifact_kind::compiled: return compiled.bytes();
         case baseline_artifact_kind::source_manager: return source_manager.bytes();
+        case baseline_artifact_kind::change_state: return change_state.bytes();
         case baseline_artifact_kind::build_cache: return build_cache.bytes();
     }
     return {};
@@ -523,6 +894,8 @@ bool baseline_snapshot::mapped(
         return compiled.open();
     case baseline_artifact_kind::source_manager:
         return source_manager.open();
+    case baseline_artifact_kind::change_state:
+        return change_state.open();
     case baseline_artifact_kind::build_cache:
         return build_cache.open();
     }
@@ -533,6 +906,176 @@ std::filesystem::path baseline_store::root_path() const {
     return configuration_path.parent_path() /
         ".serverengine" /
         configuration_path.filename();
+}
+
+status baseline_store::open_current_decision(
+    baseline_probe& probe,
+    baseline_snapshot& output,
+    baseline_open_telemetry* telemetry) const noexcept {
+
+    probe = {};
+    output = {};
+    if (telemetry != nullptr)
+        *telemetry = {};
+
+    try {
+        const auto root = root_path();
+
+        std::string transaction;
+        std::array<std::byte, manifest_size>
+            embedded_manifest{};
+        bool embedded_manifest_available = false;
+
+        const auto current_read_begin =
+            std::chrono::steady_clock::now();
+
+        auto result = read_current_selector(
+            root,
+            transaction,
+            &embedded_manifest,
+            &embedded_manifest_available);
+
+        if (telemetry != nullptr) {
+            telemetry->current_read_ns =
+                elapsed_ns(
+                    current_read_begin,
+                    std::chrono::steady_clock::now());
+        }
+
+        if (!result.ok())
+            return result;
+
+        const auto directory =
+            root / transaction;
+
+        const auto manifest_begin =
+            std::chrono::steady_clock::now();
+
+        parsed_manifest manifest;
+
+        if (embedded_manifest_available) {
+            const auto embedded_parse_begin =
+                std::chrono::steady_clock::now();
+
+            result = parse_manifest(
+                embedded_manifest,
+                manifest);
+
+            if (telemetry != nullptr) {
+                telemetry->embedded_manifest_parse_ns =
+                    elapsed_ns(
+                        embedded_parse_begin,
+                        std::chrono::steady_clock::now());
+            }
+        }
+        else {
+            std::vector<std::byte> manifest_bytes;
+            result = read_small_file(
+                directory / manifest_name,
+                manifest_size,
+                manifest_bytes);
+            if (!result.ok()) {
+                return result.code == status_code::not_found
+                    ? status{status_code::artifact_corrupt}
+                    : result;
+            }
+
+            result = parse_manifest(
+                manifest_bytes,
+                manifest);
+        }
+        if (!result.ok())
+            return result;
+
+        if (manifest.transaction != transaction)
+            return {status_code::artifact_corrupt};
+
+        if (telemetry != nullptr) {
+            telemetry->manifest_validation_ns =
+                elapsed_ns(
+                    manifest_begin,
+                    std::chrono::steady_clock::now());
+        }
+
+        baseline_snapshot candidate;
+        candidate.fingerprint_value =
+            manifest.fingerprint;
+        candidate.transaction_value =
+            manifest.transaction;
+
+        const auto compiled_map_begin =
+            std::chrono::steady_clock::now();
+
+        result = candidate.compiled.map(
+            directory / compiled_name);
+
+        if (telemetry != nullptr) {
+            telemetry->compiled_map_ns =
+                elapsed_ns(
+                    compiled_map_begin,
+                    std::chrono::steady_clock::now());
+        }
+
+        if (!result.ok()) {
+            return result.code == status_code::not_found
+                ? status{status_code::artifact_corrupt}
+                : result;
+        }
+
+        const auto source_manager_map_begin =
+            std::chrono::steady_clock::now();
+
+        result = candidate.source_manager.map(
+            directory / source_manager_name);
+
+        if (telemetry != nullptr) {
+            telemetry->source_manager_map_ns =
+                elapsed_ns(
+                    source_manager_map_begin,
+                    std::chrono::steady_clock::now());
+        }
+
+        if (!result.ok()) {
+            return result.code == status_code::not_found
+                ? status{status_code::artifact_corrupt}
+                : result;
+        }
+
+        const auto size_validation_begin =
+            std::chrono::steady_clock::now();
+
+        const bool size_mismatch =
+            candidate.compiled.bytes().size() !=
+                manifest.compiled_size ||
+            candidate.source_manager.bytes().size() !=
+                manifest.source_manager_size;
+
+        if (telemetry != nullptr) {
+            telemetry->size_validation_ns =
+                elapsed_ns(
+                    size_validation_begin,
+                    std::chrono::steady_clock::now());
+        }
+
+        if (size_mismatch)
+            return {status_code::artifact_corrupt};
+
+        probe.fingerprint = manifest.fingerprint;
+        probe.configuration = manifest.configuration;
+        probe.transaction = transaction;
+        probe.build_cache_size = manifest.build_cache_size;
+        output = std::move(candidate);
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+    catch (const std::filesystem::filesystem_error&) {
+        return {status_code::io_failed};
+    }
 }
 
 status baseline_store::probe(
@@ -576,6 +1119,7 @@ status baseline_store::probe(
         output.fingerprint = manifest.fingerprint;
         output.configuration = manifest.configuration;
         output.transaction = std::move(transaction);
+        output.build_cache_size = manifest.build_cache_size;
         return {};
     }
     catch (const std::bad_alloc&) {
@@ -607,6 +1151,8 @@ status baseline_store::open(
         return open_selected(
             expected,
             transaction,
+            true,
+            false,
             true,
             output,
             nullptr);
@@ -640,6 +1186,8 @@ status baseline_store::open_ready(
         return open_selected(
             expected,
             transaction,
+            true,
+            false,
             false,
             output,
             nullptr);
@@ -672,6 +1220,8 @@ status baseline_store::open_transaction(
         expected,
         transaction,
         true,
+        false,
+        true,
         output,
         telemetry);
 }
@@ -692,9 +1242,113 @@ status baseline_store::open_transaction_ready(
     return open_selected(
         expected,
         transaction,
+        true,
+        false,
         false,
         output,
         telemetry);
+}
+
+
+status baseline_store::open_transaction_decision(
+    const baseline_fingerprint& expected,
+    std::string_view transaction,
+    baseline_snapshot& output,
+    baseline_open_telemetry* telemetry) const noexcept {
+
+    output = {};
+    if (telemetry != nullptr)
+        *telemetry = {};
+
+    if (!valid_transaction_name(transaction))
+        return {status_code::invalid_argument};
+
+    // BUILD decision maps compiled.bin + source_manager.bin.
+    // build_cache.bin remains deferred until dirty Sources are confirmed.
+    return open_selected(
+        expected,
+        transaction,
+        true,
+        false,
+        false,
+        output,
+        telemetry);
+}
+
+
+status baseline_store::map_source_manager(
+    const baseline_fingerprint& expected,
+    std::string_view transaction,
+    baseline_snapshot& snapshot,
+    baseline_open_telemetry* telemetry) const noexcept {
+
+    if (telemetry != nullptr)
+        *telemetry = {};
+
+    if (!valid_transaction_name(transaction) ||
+        !snapshot.valid() ||
+        snapshot.transaction() != transaction ||
+        !(snapshot.fingerprint() == expected) ||
+        snapshot.mapped(
+            baseline_artifact_kind::source_manager)) {
+        return {status_code::invalid_argument};
+    }
+
+    try {
+        const auto directory =
+            root_path() / std::string{transaction};
+
+        std::vector<std::byte> manifest_bytes;
+        auto result = read_small_file(
+            directory / manifest_name,
+            manifest_size,
+            manifest_bytes);
+        if (!result.ok())
+            return result;
+
+        parsed_manifest manifest;
+        result = parse_manifest(
+            manifest_bytes,
+            manifest);
+        if (!result.ok())
+            return result;
+
+        if (manifest.transaction != transaction ||
+            !(manifest.fingerprint == expected)) {
+            return {status_code::artifact_corrupt};
+        }
+
+        const auto begin =
+            std::chrono::steady_clock::now();
+        result = snapshot.source_manager.map(
+            directory / source_manager_name);
+        if (telemetry != nullptr) {
+            telemetry->source_manager_map_ns =
+                elapsed_ns(
+                    begin,
+                    std::chrono::steady_clock::now());
+        }
+
+        if (!result.ok())
+            return result;
+
+        if (snapshot.source_manager.bytes().size() !=
+            manifest.source_manager_size) {
+            snapshot.source_manager = {};
+            return {status_code::artifact_corrupt};
+        }
+
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+    catch (const std::filesystem::filesystem_error&) {
+        return {status_code::io_failed};
+    }
 }
 
 status baseline_store::map_build_cache(
@@ -800,9 +1454,84 @@ status baseline_store::map_build_cache(
     }
 }
 
+status baseline_store::map_build_cache_cached(
+    const baseline_fingerprint& expected,
+    std::string_view transaction,
+    std::uint64_t expected_build_cache_size,
+    baseline_snapshot& snapshot,
+    baseline_open_telemetry* telemetry) const noexcept {
+
+    if (telemetry != nullptr)
+        *telemetry = {};
+
+    if (!valid_transaction_name(transaction))
+        return {status_code::invalid_argument};
+
+    if (snapshot.transaction() != transaction ||
+        !(snapshot.fingerprint() == expected) ||
+        !snapshot.mapped(baseline_artifact_kind::compiled) ||
+        !snapshot.mapped(baseline_artifact_kind::source_manager)) {
+        return {status_code::invalid_argument};
+    }
+
+    try {
+        const auto directory =
+            root_path() / std::string{transaction};
+
+        const auto map_begin =
+            std::chrono::steady_clock::now();
+
+        auto result = snapshot.build_cache.map(
+            directory / build_cache_name);
+
+        if (telemetry != nullptr) {
+            telemetry->build_cache_map_ns =
+                elapsed_ns(
+                    map_begin,
+                    std::chrono::steady_clock::now());
+        }
+
+        if (!result.ok()) {
+            return result.code == status_code::not_found
+                ? status{status_code::artifact_corrupt}
+                : result;
+        }
+
+        const auto validation_begin =
+            std::chrono::steady_clock::now();
+
+        const bool mismatch =
+            snapshot.build_cache.bytes().size() !=
+                expected_build_cache_size;
+
+        if (telemetry != nullptr) {
+            telemetry->size_validation_ns =
+                elapsed_ns(
+                    validation_begin,
+                    std::chrono::steady_clock::now());
+        }
+
+        return mismatch
+            ? status{status_code::artifact_corrupt}
+            : status{};
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+    catch (const std::filesystem::filesystem_error&) {
+        return {status_code::io_failed};
+    }
+}
+
+
 status baseline_store::open_selected(
     const baseline_fingerprint& expected,
     std::string_view transaction,
+    bool include_source_manager,
+    bool include_change_state,
     bool include_build_cache,
     baseline_snapshot& output,
     baseline_open_telemetry* telemetry) const noexcept {
@@ -876,20 +1605,44 @@ status baseline_store::open_selected(
                 : result;
         }
 
-        const auto source_manager_map_begin =
-            std::chrono::steady_clock::now();
-        result = candidate.source_manager.map(
-            directory / source_manager_name);
-        if (telemetry != nullptr) {
-            telemetry->source_manager_map_ns =
-                elapsed_ns(
-                    source_manager_map_begin,
-                    std::chrono::steady_clock::now());
+        if (include_source_manager) {
+            const auto source_manager_map_begin =
+                std::chrono::steady_clock::now();
+            result = candidate.source_manager.map(
+                directory / source_manager_name);
+            if (telemetry != nullptr) {
+                telemetry->source_manager_map_ns =
+                    elapsed_ns(
+                        source_manager_map_begin,
+                        std::chrono::steady_clock::now());
+            }
+            if (!result.ok()) {
+                return result.code == status_code::not_found
+                    ? status{status_code::artifact_corrupt}
+                    : result;
+            }
         }
-        if (!result.ok()) {
-            return result.code == status_code::not_found
-                ? status{status_code::artifact_corrupt}
-                : result;
+
+        if (include_change_state) {
+            const auto change_state_map_begin =
+                std::chrono::steady_clock::now();
+            result = candidate.change_state.map(
+                directory / change_state_name);
+            if (telemetry != nullptr) {
+                telemetry->change_state_map_ns =
+                    elapsed_ns(
+                        change_state_map_begin,
+                        std::chrono::steady_clock::now());
+            }
+
+            // change_state.bin was introduced after baseline format v1.
+            // Generic LOAD/open remains backward-compatible with transactions
+            // produced by the legacy three-artifact commit API. BUILD decision
+            // validates presence explicitly in open_transaction_decision().
+            if (!result.ok() &&
+                result.code != status_code::not_found) {
+                return result;
+            }
         }
 
         if (include_build_cache) {
@@ -916,8 +1669,9 @@ status baseline_store::open_selected(
         const bool size_mismatch =
             candidate.compiled.bytes().size() !=
                 manifest.compiled_size ||
-            candidate.source_manager.bytes().size() !=
-                manifest.source_manager_size ||
+            (include_source_manager &&
+             candidate.source_manager.bytes().size() !=
+                manifest.source_manager_size) ||
             (include_build_cache &&
              candidate.build_cache.bytes().size() !=
                 manifest.build_cache_size);
@@ -951,6 +1705,7 @@ status baseline_store::commit(
     const baseline_configuration_state& configuration,
     std::span<const std::byte> compiled,
     std::span<const std::byte> source_manager,
+    std::span<const std::byte> change_state,
     std::span<const std::byte> build_cache,
     baseline_commit_result& output) const noexcept {
 
@@ -994,6 +1749,16 @@ status baseline_store::commit(
             cleanup_failed_transaction();
             return {status_code::persistence_failed};
         }
+        if (!change_state.empty()) {
+            result = durable_write_file(
+                directory / change_state_name,
+                change_state);
+            if (!result.ok()) {
+                cleanup_failed_transaction();
+                return {status_code::persistence_failed};
+            }
+        }
+
         result = durable_write_file(directory / build_cache_name, build_cache);
         if (!result.ok()) {
             cleanup_failed_transaction();
@@ -1029,9 +1794,17 @@ status baseline_store::commit(
             return {status_code::persistence_failed};
         }
 
-        const auto selector_text = transaction + "\n";
-        const auto selector = std::span<const std::byte>{
-            reinterpret_cast<const std::byte*>(selector_text.data()), selector_text.size()};
+        std::array<std::byte, current_selector_size> selector_bytes{};
+        result = create_current_selector(
+            transaction,
+            manifest,
+            selector_bytes);
+        if (!result.ok()) {
+            cleanup_failed_transaction();
+            return result;
+        }
+        const auto selector =
+            std::span<const std::byte>{selector_bytes};
         const auto selector_temp = root / ("CURRENT.tmp-" + std::to_string(process_id()) + "-" +
             std::to_string(transaction_counter.fetch_add(1, std::memory_order_relaxed)));
         result = durable_write_file(selector_temp, selector);
@@ -1054,7 +1827,8 @@ status baseline_store::commit(
         output.bytes_written =
             static_cast<std::uint64_t>(compiled.size()) +
             static_cast<std::uint64_t>(source_manager.size()) +
-            static_cast<std::uint64_t>(build_cache.size()) + manifest_size + selector_text.size();
+            static_cast<std::uint64_t>(change_state.size()) +
+            static_cast<std::uint64_t>(build_cache.size()) + manifest_size + current_selector_size;
         return {};
     }
     catch (const std::bad_alloc&) {
@@ -1066,6 +1840,25 @@ status baseline_store::commit(
     catch (const std::filesystem::filesystem_error&) {
         return {status_code::persistence_failed};
     }
+}
+
+
+status baseline_store::commit(
+    const baseline_fingerprint& fingerprint,
+    const baseline_configuration_state& configuration,
+    std::span<const std::byte> compiled,
+    std::span<const std::byte> source_manager,
+    std::span<const std::byte> build_cache,
+    baseline_commit_result& output) const noexcept {
+
+    return commit(
+        fingerprint,
+        configuration,
+        compiled,
+        source_manager,
+        {},
+        build_cache,
+        output);
 }
 
 status baseline_store::commit(
