@@ -174,7 +174,7 @@ struct sparse_case_result final {
 void print_header() {
     std::cout
         << "baseline_sources,scenario,"
-           "manager_ms,configuration_ms,fingerprint_ms,"
+           "manager_ms,configuration_identity_ms,configuration_ms,fingerprint_ms,"
            "baseline_open_ms,dirty_detection_ms,"
            "baseline_activation_ms,build_activation_ms,"
            "dirty_backend,dirty_fast,dirty_fallback,"
@@ -203,6 +203,8 @@ void print_result(
         << scenario << ','
         << static_cast<double>(
             telemetry.manager_total_ns) / 1'000'000.0 << ','
+        << static_cast<double>(
+            telemetry.configuration_identity_ns) / 1'000'000.0 << ','
         << static_cast<double>(
             telemetry.configuration_ns) / 1'000'000.0 << ','
         << static_cast<double>(
@@ -539,6 +541,9 @@ void print_result(
     const bool pass =
         !build.telemetry.dirty_detection_fallback &&
         build.telemetry.dirty_sources == 0 &&
+        build.telemetry.configuration_identity_ns != 0 &&
+        build.telemetry.configuration_ns == 0 &&
+        build.telemetry.fingerprint_ns == 0 &&
         dirty_ms <= dirty_limit_ms;
 
     std::cout
@@ -626,8 +631,9 @@ void print_result(
         build.telemetry.builder.validation_dependency_edges == 0;
 
     const bool timing_correctness =
-        build.telemetry.configuration_ns != 0 &&
-        build.telemetry.fingerprint_ns != 0 &&
+        build.telemetry.configuration_identity_ns != 0 &&
+        build.telemetry.configuration_ns == 0 &&
+        build.telemetry.fingerprint_ns == 0 &&
         build.telemetry.baseline_open_ns != 0 &&
         build.telemetry.dirty_detection_ns != 0 &&
         build.telemetry.baseline_activation_ns == 0 &&
@@ -669,6 +675,7 @@ void print_result(
         dirty_ms <= dirty_limit_ms;
 
     const auto accounted_ns =
+        build.telemetry.configuration_identity_ns +
         build.telemetry.configuration_ns +
         build.telemetry.fingerprint_ns +
         build.telemetry.baseline_open_ns +

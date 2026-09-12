@@ -238,6 +238,7 @@ void write_u64(std::array<std::byte, manifest_size>& output, std::size_t offset,
 
 [[nodiscard]] status create_manifest(
     const baseline_fingerprint& fingerprint,
+    const baseline_configuration_state& configuration,
     std::string_view transaction,
     std::uint64_t compiled_size,
     std::uint64_t source_manager_size,
@@ -261,12 +262,31 @@ void write_u64(std::array<std::byte, manifest_size>& output, std::size_t offset,
     write_u64(output, 128, compiled_size);
     write_u64(output, 136, source_manager_size);
     write_u64(output, 144, build_cache_size);
+
+    if (configuration.available) {
+        write_u64(
+            output,
+            152,
+            static_cast<std::uint64_t>(
+                configuration.observation.write_time_ticks));
+        write_u64(
+            output,
+            160,
+            static_cast<std::uint64_t>(
+                configuration.observation.size));
+        write_u32(output, 168, 1);
+        write_u32(output, 172, configuration.project_version);
+        write_u32(output, 176, configuration.abi_target);
+        write_u32(output, 180, configuration.abi_pack);
+    }
+
     write_u64(output, manifest_crc_offset, crc64(std::span<const std::byte>{output}.first(manifest_crc_offset)));
     return {};
 }
 
 struct parsed_manifest final {
     baseline_fingerprint fingerprint{};
+    baseline_configuration_state configuration{};
     std::string transaction;
     std::uint64_t compiled_size = 0;
     std::uint64_t source_manager_size = 0;
@@ -316,6 +336,28 @@ struct parsed_manifest final {
     output.compiled_size = read_u64(input, 128);
     output.source_manager_size = read_u64(input, 136);
     output.build_cache_size = read_u64(input, 144);
+
+    const auto configuration_identity_version =
+        read_u32(input, 168);
+    if (configuration_identity_version > 1)
+        return {status_code::artifact_corrupt};
+
+    if (configuration_identity_version == 1) {
+        output.configuration.observation.write_time_ticks =
+            static_cast<std::int64_t>(
+                read_u64(input, 152));
+        output.configuration.observation.size =
+            static_cast<std::uintmax_t>(
+                read_u64(input, 160));
+        output.configuration.project_version =
+            read_u32(input, 172);
+        output.configuration.abi_target =
+            read_u32(input, 176);
+        output.configuration.abi_pack =
+            read_u32(input, 180);
+        output.configuration.available = true;
+    }
+
     return {};
 }
 
@@ -482,6 +524,60 @@ std::filesystem::path baseline_store::root_path() const {
     return configuration_path.parent_path() /
         ".serverengine" /
         configuration_path.filename();
+}
+
+status baseline_store::probe(
+    baseline_probe& output) const noexcept {
+
+    output = {};
+
+    try {
+        std::string transaction;
+        auto result =
+            read_current_transaction(
+                root_path(),
+                transaction);
+        if (!result.ok())
+            return result;
+
+        const auto directory =
+            root_path() / transaction;
+
+        std::vector<std::byte> manifest_bytes;
+        result = read_small_file(
+            directory / manifest_name,
+            manifest_size,
+            manifest_bytes);
+        if (!result.ok()) {
+            return result.code == status_code::not_found
+                ? status{status_code::artifact_corrupt}
+                : result;
+        }
+
+        parsed_manifest manifest;
+        result = parse_manifest(
+            manifest_bytes,
+            manifest);
+        if (!result.ok())
+            return result;
+
+        if (manifest.transaction != transaction)
+            return {status_code::artifact_corrupt};
+
+        output.fingerprint = manifest.fingerprint;
+        output.configuration = manifest.configuration;
+        output.transaction = std::move(transaction);
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+    catch (const std::filesystem::filesystem_error&) {
+        return {status_code::io_failed};
+    }
 }
 
 status baseline_store::open(
@@ -664,6 +760,7 @@ status baseline_store::open_selected(
 
 status baseline_store::commit(
     const baseline_fingerprint& fingerprint,
+    const baseline_configuration_state& configuration,
     std::span<const std::byte> compiled,
     std::span<const std::byte> source_manager,
     std::span<const std::byte> build_cache,
@@ -718,6 +815,7 @@ status baseline_store::commit(
         std::array<std::byte, manifest_size> manifest{};
         result = create_manifest(
             fingerprint,
+            configuration,
             transaction,
             static_cast<std::uint64_t>(compiled.size()),
             static_cast<std::uint64_t>(source_manager.size()),
@@ -780,6 +878,22 @@ status baseline_store::commit(
     catch (const std::filesystem::filesystem_error&) {
         return {status_code::persistence_failed};
     }
+}
+
+status baseline_store::commit(
+    const baseline_fingerprint& fingerprint,
+    std::span<const std::byte> compiled,
+    std::span<const std::byte> source_manager,
+    std::span<const std::byte> build_cache,
+    baseline_commit_result& output) const noexcept {
+
+    return commit(
+        fingerprint,
+        baseline_configuration_state{},
+        compiled,
+        source_manager,
+        build_cache,
+        output);
 }
 
 status baseline_store::collect_garbage(std::string_view pinned_transaction) const noexcept {

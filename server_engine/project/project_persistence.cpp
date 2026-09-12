@@ -44,6 +44,50 @@ void append_bytes(std::string& output, std::string_view value) {
 
 } // namespace
 
+status observe_project_configuration(
+    const std::filesystem::path& configuration_path,
+    file_snapshot_observation& output) noexcept {
+
+    output = {};
+
+    std::error_code error;
+    const auto file_status =
+        std::filesystem::status(
+            configuration_path,
+            error);
+    if (error) {
+        return error ==
+            std::errc::no_such_file_or_directory
+            ? status{status_code::not_found}
+            : status{status_code::io_failed};
+    }
+
+    if (!std::filesystem::exists(file_status))
+        return {status_code::not_found};
+    if (!std::filesystem::is_regular_file(file_status))
+        return {status_code::io_failed};
+
+    const auto size =
+        std::filesystem::file_size(
+            configuration_path,
+            error);
+    if (error)
+        return {status_code::io_failed};
+
+    const auto write_time =
+        std::filesystem::last_write_time(
+            configuration_path,
+            error);
+    if (error)
+        return {status_code::io_failed};
+
+    output.size = size;
+    output.write_time_ticks =
+        static_cast<std::int64_t>(
+            write_time.time_since_epoch().count());
+    return {};
+}
+
 status make_project_baseline_fingerprint(
     const project_configuration& configuration,
     baseline_fingerprint& output) noexcept {
@@ -132,6 +176,7 @@ status make_project_baseline_fingerprint(
 
 status encode_project_baseline(
     const project_context& project,
+    const project_configuration& configuration,
     project_baseline_images& output) noexcept {
 
     output = {};
@@ -154,9 +199,9 @@ status encode_project_baseline(
 
     try {
         std::vector<source_manager_image_root> roots;
-        roots.reserve(project.configuration().project.size());
+        roots.reserve(configuration.project.size());
 
-        for (const auto& item : project.configuration().project) {
+        for (const auto& item : configuration.project) {
             std::string normalized;
             result = normalize_source_path(item.path, normalized);
             if (!result.ok())
@@ -220,6 +265,16 @@ status encode_project_baseline(
         return result;
 
     return build_cache.verify_against(compiled, sources);
+}
+
+status encode_project_baseline(
+    const project_context& project,
+    project_baseline_images& output) noexcept {
+
+    return encode_project_baseline(
+        project,
+        project.configuration(),
+        output);
 }
 
 status project_baseline_dirty_sources(

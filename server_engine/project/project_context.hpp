@@ -115,6 +115,12 @@ public:
         return baseline != nullptr ? baseline->transaction() : std::string_view{};
     }
 
+    [[nodiscard]] const baseline_fingerprint* baseline_fingerprint_value() const noexcept {
+        return baseline != nullptr
+            ? &baseline->fingerprint()
+            : nullptr;
+    }
+
     [[nodiscard]] identity_ref identity_root() const noexcept {
         return compiled != nullptr
             ? compiled->identities.root()

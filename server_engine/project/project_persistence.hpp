@@ -7,6 +7,7 @@
 #include "project_configuration.hpp"
 
 #include <cstdint>
+#include <filesystem>
 #include <vector>
 
 namespace cw::server {
@@ -19,14 +20,27 @@ struct project_baseline_images final {
     std::vector<std::byte> build_cache;
 };
 
+// Reads only project.json filesystem metadata. This is the hot BUILD identity
+// check; semantic compatibility is still decided by the baseline fingerprint
+// after any metadata miss.
+[[nodiscard]] status observe_project_configuration(
+    const std::filesystem::path& configuration_path,
+    file_snapshot_observation& output) noexcept;
+
 // Produces the compatibility fingerprint used by manifest.bin. Source contents
 // are intentionally excluded; they are validated by source_manager.bin.
 [[nodiscard]] status make_project_baseline_fingerprint(
     const project_configuration& configuration,
     baseline_fingerprint& output) noexcept;
 
-// Encodes one coherent READY construction state. Normal SAVE preserves all
-// existing numeric IDs, handles, SourceContribution ranges, and stale arenas.
+// Encodes one coherent READY construction state using an explicitly validated
+// full configuration. Sparse baseline-backed BUILD may retain only execution
+// metadata until this cold SAVE boundary.
+[[nodiscard]] status encode_project_baseline(
+    const project_context& project,
+    const project_configuration& configuration,
+    project_baseline_images& output) noexcept;
+
 [[nodiscard]] status encode_project_baseline(
     const project_context& project,
     project_baseline_images& output) noexcept;

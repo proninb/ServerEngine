@@ -3,6 +3,7 @@
 #include <chrono>
 #include <exception>
 #include <new>
+#include <optional>
 #include <stdexcept>
 #include <system_error>
 #include <utility>
@@ -153,56 +154,160 @@ status project_manager::build(
         return {status_code::invalid_state};
 
     project_configuration configuration;
-    const auto configuration_begin = std::chrono::steady_clock::now();
-    auto result = load_project_configuration_file(
-        configuration_path,
-        operation,
-        diagnostics,
-        configuration);
-    const auto configuration_end = std::chrono::steady_clock::now();
-    const auto configuration_ns = static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            configuration_end - configuration_begin).count());
-
-    if (!result.ok()) {
-        abandon_construction();
-        return result;
-    }
-
-    baseline_fingerprint fingerprint;
-    const auto fingerprint_begin = std::chrono::steady_clock::now();
-    result = make_project_baseline_fingerprint(
-        configuration,
-        fingerprint);
-    const auto fingerprint_end = std::chrono::steady_clock::now();
-    const auto fingerprint_ns = static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            fingerprint_end - fingerprint_begin).count());
-    if (!result.ok()) {
-        abandon_construction();
-        return result;
-    }
+    std::uint64_t configuration_ns = 0;
+    std::uint64_t fingerprint_ns = 0;
+    std::uint64_t baseline_open_ns = 0;
 
     baseline_store store{configuration_path};
     baseline_snapshot snapshot;
+    baseline_probe probe;
 
-    const auto baseline_open_begin = std::chrono::steady_clock::now();
-    result = store.open(fingerprint, snapshot);
-    const auto baseline_open_end = std::chrono::steady_clock::now();
-    const auto baseline_open_ns = static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            baseline_open_end - baseline_open_begin).count());
+    const auto configuration_identity_begin =
+        std::chrono::steady_clock::now();
 
-    if (result.code == status_code::not_found ||
-        result.code == status_code::rebuild_required) {
-        return construct_reserved(
-            std::move(configuration),
+    auto result = store.probe(probe);
+    bool fast_configuration = false;
+
+    if (result.ok() &&
+        probe.configuration.available) {
+
+        file_snapshot_observation observation;
+        result = observe_project_configuration(
+            configuration_path,
+            observation);
+
+        if (result.ok() &&
+            observation ==
+                probe.configuration.observation) {
+
+            if (probe.configuration.project_version !=
+                    current_project_configuration_version ||
+                probe.configuration.abi_target >
+                    static_cast<std::uint32_t>(
+                        abi_target::posix_x64)) {
+                abandon_construction();
+                return {status_code::artifact_corrupt};
+            }
+
+            configuration.version =
+                probe.configuration.project_version;
+            configuration.materialized = false;
+            configuration.abi.target =
+                static_cast<abi_target>(
+                    probe.configuration.abi_target);
+            configuration.abi.pack =
+                probe.configuration.abi_pack;
+
+            if (!is_supported_abi_configuration(
+                    configuration.abi)) {
+                abandon_construction();
+                return {status_code::artifact_corrupt};
+            }
+
+            fast_configuration = true;
+        }
+    }
+
+    const auto configuration_identity_end =
+        std::chrono::steady_clock::now();
+    const auto configuration_identity_ns =
+        static_cast<std::uint64_t>(
+            std::chrono::duration_cast<
+                std::chrono::nanoseconds>(
+                configuration_identity_end -
+                configuration_identity_begin).count());
+
+    if (fast_configuration) {
+        const auto baseline_open_begin =
+            std::chrono::steady_clock::now();
+
+        result = store.open_transaction(
+            probe.fingerprint,
+            probe.transaction,
+            snapshot);
+
+        const auto baseline_open_end =
+            std::chrono::steady_clock::now();
+        baseline_open_ns =
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<
+                    std::chrono::nanoseconds>(
+                    baseline_open_end -
+                    baseline_open_begin).count());
+    }
+    else {
+        const auto configuration_begin =
+            std::chrono::steady_clock::now();
+
+        result = load_project_configuration_file(
             configuration_path,
             operation,
             diagnostics,
-            output,
-            worker_limit,
-            false);
+            configuration);
+
+        const auto configuration_end =
+            std::chrono::steady_clock::now();
+        configuration_ns =
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<
+                    std::chrono::nanoseconds>(
+                    configuration_end -
+                    configuration_begin).count());
+
+        if (!result.ok()) {
+            abandon_construction();
+            return result;
+        }
+
+        baseline_fingerprint fingerprint;
+        const auto fingerprint_begin =
+            std::chrono::steady_clock::now();
+
+        result = make_project_baseline_fingerprint(
+            configuration,
+            fingerprint);
+
+        const auto fingerprint_end =
+            std::chrono::steady_clock::now();
+        fingerprint_ns =
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<
+                    std::chrono::nanoseconds>(
+                    fingerprint_end -
+                    fingerprint_begin).count());
+
+        if (!result.ok()) {
+            abandon_construction();
+            return result;
+        }
+
+        const auto baseline_open_begin =
+            std::chrono::steady_clock::now();
+
+        result = store.open(
+            fingerprint,
+            snapshot);
+
+        const auto baseline_open_end =
+            std::chrono::steady_clock::now();
+        baseline_open_ns =
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<
+                    std::chrono::nanoseconds>(
+                    baseline_open_end -
+                    baseline_open_begin).count());
+
+        if (result.code == status_code::not_found ||
+            result.code == status_code::rebuild_required) {
+            return construct_reserved(
+                std::move(configuration),
+                configuration_path,
+                operation,
+                diagnostics,
+                output,
+                worker_limit,
+                false);
+        }
     }
 
     if (!result.ok()) {
@@ -258,6 +363,8 @@ status project_manager::build(
     std::uint64_t build_activation_ns = 0;
 
     const auto publish_manager_telemetry = [&](project_build_result& value) noexcept {
+        value.telemetry.configuration_identity_ns =
+            configuration_identity_ns;
         value.telemetry.configuration_ns = configuration_ns;
         value.telemetry.fingerprint_ns = fingerprint_ns;
         value.telemetry.baseline_open_ns = baseline_open_ns;
@@ -487,12 +594,67 @@ status project_manager::save(
         return {status_code::invalid_state};
     }
 
+    file_snapshot configuration_file;
+    const auto acquisition =
+        acquire_file_snapshot(
+            project->configuration_path(),
+            std::nullopt,
+            configuration_file);
+
+    if (acquisition !=
+        file_snapshot_result::acquired) {
+
+        if (acquisition ==
+            file_snapshot_result::allocation_failed) {
+            return {status_code::not_available};
+        }
+
+        if (acquisition ==
+            file_snapshot_result::missing) {
+            return {status_code::not_found};
+        }
+
+        return {status_code::io_failed};
+    }
+
+    diagnostic_buffer configuration_diagnostics;
+    project_configuration configuration;
+    auto result = load_project_configuration(
+        configuration_file.bytes,
+        project->configuration_path(),
+        operation_id{},
+        configuration_diagnostics,
+        configuration);
+    if (!result.ok())
+        return result;
+
     baseline_fingerprint fingerprint;
-    auto result = make_project_baseline_fingerprint(
-        project->configuration(),
+    result = make_project_baseline_fingerprint(
+        configuration,
         fingerprint);
     if (!result.ok())
         return result;
+
+    if (project->baseline_backed()) {
+        const auto* expected =
+            project->baseline_fingerprint_value();
+        if (expected == nullptr ||
+            !(*expected == fingerprint)) {
+            return {status_code::rebuild_required};
+        }
+    }
+
+    baseline_configuration_state configuration_state;
+    configuration_state.observation =
+        configuration_file.observation;
+    configuration_state.project_version =
+        configuration.version;
+    configuration_state.abi_target =
+        static_cast<std::uint32_t>(
+            configuration.abi.target);
+    configuration_state.abi_pack =
+        configuration.abi.pack;
+    configuration_state.available = true;
 
     baseline_store store{
         project->configuration_path()};
@@ -501,12 +663,14 @@ status project_manager::save(
         project_baseline_images images;
         result = encode_project_baseline(
             *project,
+            configuration,
             images);
         if (!result.ok())
             return result;
 
         return store.commit(
             fingerprint,
+            configuration_state,
             images.compiled,
             images.source_manager,
             images.build_cache,
@@ -558,6 +722,7 @@ status project_manager::save(
 
     return store.commit(
         fingerprint,
+        configuration_state,
         active.artifact(baseline_artifact_kind::compiled),
         active.artifact(baseline_artifact_kind::source_manager),
         active.artifact(baseline_artifact_kind::build_cache),

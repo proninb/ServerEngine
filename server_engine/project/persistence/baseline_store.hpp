@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../status.hpp"
+#include "../source/file_snapshot.hpp"
 
 #include <array>
 #include <cstddef>
@@ -33,6 +34,22 @@ enum class baseline_artifact_kind : std::uint8_t {
 struct baseline_commit_result final {
     std::string transaction;
     std::uint64_t bytes_written = 0;
+};
+
+// Persisted project.json fast-path identity. Filesystem metadata is only a
+// change token; semantic compatibility remains the baseline fingerprint.
+struct baseline_configuration_state final {
+    file_snapshot_observation observation{};
+    std::uint32_t project_version = 0;
+    std::uint32_t abi_target = 0;
+    std::uint32_t abi_pack = 0;
+    bool available = false;
+};
+
+struct baseline_probe final {
+    baseline_fingerprint fingerprint{};
+    baseline_configuration_state configuration{};
+    std::string transaction;
 };
 
 // Owns one read-only mapped file. Mapping lifetime pins the backing artifact even
@@ -108,6 +125,10 @@ public:
     baseline_store(const baseline_store&) = delete;
     baseline_store& operator=(const baseline_store&) = delete;
 
+    // Reads CURRENT + manifest only. No baseline artifact is mapped.
+    [[nodiscard]] status probe(
+        baseline_probe& output) const noexcept;
+
     // BUILD/SAVE boundary: maps all three artifacts.
     [[nodiscard]] status open(
         const baseline_fingerprint& expected,
@@ -126,6 +147,16 @@ public:
         std::string_view transaction,
         baseline_snapshot& output) const noexcept;
 
+    [[nodiscard]] status commit(
+        const baseline_fingerprint& fingerprint,
+        const baseline_configuration_state& configuration,
+        std::span<const std::byte> compiled,
+        std::span<const std::byte> source_manager,
+        std::span<const std::byte> build_cache,
+        baseline_commit_result& output) const noexcept;
+
+    // Compatibility boundary for low-level persistence callers. This overload
+    // intentionally commits without a fast project.json identity.
     [[nodiscard]] status commit(
         const baseline_fingerprint& fingerprint,
         std::span<const std::byte> compiled,

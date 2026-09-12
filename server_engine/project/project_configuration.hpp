@@ -47,6 +47,10 @@ struct project_configuration {
     std::string name;
     std::vector<project_item_configuration> project;
     abi_configuration abi;
+
+    // Persisted hot BUILD may retain only execution metadata. When false, name
+    // and project roots are intentionally not materialized in the READY context.
+    bool materialized = true;
 };
 
 inline constexpr std::uint32_t current_project_configuration_version = 1;
