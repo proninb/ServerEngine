@@ -641,7 +641,6 @@ private:
 
 [[nodiscard]] status read_usn_changes(
     const source_manager_image_view& sources,
-    const build_cache_image_view& build_cache,
     const source_change_checkpoint& checkpoint,
     std::vector<source_id>& dirty_sources,
     source_change_detection_telemetry& telemetry) noexcept {
@@ -807,7 +806,7 @@ private:
                         USN_REASON_REPARSE_POINT_CHANGE;
 
                     const auto watch_flags =
-                        build_cache.directory_watch_flags(
+                        sources.directory_watch_flags(
                             record.FileReferenceNumber);
 
                     if ((record.Reason &
@@ -824,7 +823,7 @@ private:
                         USN_REASON_RENAME_NEW_NAME;
 
                     const auto parent_watch_flags =
-                        build_cache.directory_watch_flags(
+                        sources.directory_watch_flags(
                             record.ParentFileReferenceNumber);
 
                     if ((record.Reason & arrival_reasons) != 0 &&
@@ -835,7 +834,7 @@ private:
                     }
 
                     const auto source =
-                        build_cache.find_source_file(
+                        sources.find_source_file(
                             record.FileReferenceNumber);
 
                     if (source) {
@@ -1128,7 +1127,6 @@ status prepare_source_change_capture(
 
 status detect_source_changes(
     const source_manager_image_view& sources,
-    const build_cache_image_view& build_cache,
     std::vector<source_id>& dirty_sources,
     source_change_detection_telemetry& telemetry) noexcept {
 
@@ -1136,7 +1134,7 @@ status detect_source_changes(
     telemetry = {};
 
     const auto checkpoint =
-        build_cache.change_checkpoint();
+        sources.change_checkpoint();
 
     if (!checkpoint) {
         telemetry.fallback = true;
@@ -1147,7 +1145,6 @@ status detect_source_changes(
     const auto result =
         read_usn_changes(
             sources,
-            build_cache,
             checkpoint,
             dirty_sources,
             telemetry);

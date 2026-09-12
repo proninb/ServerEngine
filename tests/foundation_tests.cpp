@@ -3271,7 +3271,24 @@ bool test_source_manager_image_integrity() {
         return false;
     }
 
-    image.back() ^= std::byte{0x01};
+    const auto leaf_path = before.path(leaf_source);
+    if (leaf_path.empty()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    const auto* image_begin = image.data();
+    const auto* leaf_begin =
+        reinterpret_cast<const std::byte*>(leaf_path.data());
+    if (leaf_begin < image_begin ||
+        leaf_begin >= image_begin + image.size()) {
+        std::filesystem::remove_all(directory, error);
+        return false;
+    }
+
+    const auto corruption_offset =
+        static_cast<std::size_t>(leaf_begin - image_begin);
+    image[corruption_offset] ^= std::byte{0x01};
 
     source_manager_image_view after;
     const bool pass =
@@ -4371,9 +4388,14 @@ struct persistent_lifecycle_fixture final {
     }
     before_save.reset();
 
-    if (!manager.save(committed).ok() ||
+    const auto initial_save_result =
+        manager.save(committed);
+
+    if (!initial_save_result.ok() ||
         committed.transaction.empty() ||
         committed.bytes_written == 0) {
+
+
         return false;
     }
 
@@ -4662,7 +4684,7 @@ bool test_project_build_no_change_reuses_baseline() {
         manager.acquire(access).ok() &&
         access &&
         access->baseline_backed() &&
-        access->build_cache_mapped() &&
+        !access->build_cache_mapped() &&
         access->baseline_transaction() ==
             committed.transaction &&
         access->find_object("B", object).ok() &&
@@ -4784,9 +4806,14 @@ bool test_project_build_changed_baseline_sparse_save_load() {
     sparse.reset();
 
     baseline_commit_result sparse_commit;
-    if (!manager.save(sparse_commit).ok() ||
+    const auto sparse_save_result =
+        manager.save(sparse_commit);
+
+    if (!sparse_save_result.ok() ||
         sparse_commit.transaction.empty() ||
         sparse_commit.transaction == baseline_commit.transaction) {
+
+
         if (manager.ready())
             (void)manager.unload();
         std::error_code error;
@@ -4915,15 +4942,20 @@ bool test_project_build_link_tombstone_handle_restore() {
         project_manager manager;
         diagnostic_buffer diagnostics;
         project_build_result build;
-        if (!manager.build(
+        const auto tombstone_build_result =
+            manager.build(
                 fixture.configuration_path,
                 operation_id{1421},
                 diagnostics,
                 build,
-                1).ok() ||
+                1);
+
+        if (!tombstone_build_result.ok() ||
             diagnostics.has_errors() ||
             !build.changed ||
             build.rebuilt) {
+
+
             std::error_code error;
             std::filesystem::remove_all(fixture.directory, error);
             return false;

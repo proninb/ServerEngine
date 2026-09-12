@@ -19,6 +19,11 @@ struct project_build_telemetry final {
     std::uint64_t configuration_ns = 0;
     std::uint64_t fingerprint_ns = 0;
     std::uint64_t baseline_open_ns = 0;
+    std::uint64_t baseline_manifest_validation_ns = 0;
+    std::uint64_t baseline_compiled_map_ns = 0;
+    std::uint64_t baseline_source_manager_map_ns = 0;
+    std::uint64_t baseline_build_cache_map_ns = 0;
+    std::uint64_t baseline_size_validation_ns = 0;
     std::uint64_t dirty_detection_ns = 0;
     std::uint64_t baseline_activation_ns = 0;
     std::uint64_t build_activation_ns = 0;

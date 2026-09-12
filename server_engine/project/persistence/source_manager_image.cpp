@@ -25,10 +25,20 @@ constexpr std::size_t first_section_offset =
 
 constexpr std::uint32_t physical_present = 0x00000001u;
 
+constexpr std::size_t header_change_backend_offset = 96;
+constexpr std::size_t header_change_volume_offset = 104;
+constexpr std::size_t header_change_journal_offset = 112;
+constexpr std::size_t header_change_usn_offset = 120;
+constexpr std::size_t header_crc_offset = 128;
+constexpr std::size_t header_directory_crc_offset = 136;
+constexpr std::size_t header_reserved_begin = 144;
+
 constexpr std::size_t source_core_size = 16;
 constexpr std::size_t physical_state_size = 56;
 constexpr std::size_t root_record_size = 8;
 constexpr std::size_t path_index_record_size = 8;
+constexpr std::size_t source_file_identity_index_record_size = 16;
+constexpr std::size_t tracked_directory_identity_index_record_size = 16;
 
 struct layout_section final {
     source_manager_image_section kind{};
@@ -248,6 +258,17 @@ constexpr std::uint64_t crc64_polynomial = 0x42f0e1eba9ea3693ULL;
     return capacity;
 }
 
+[[nodiscard]] bool zero_bytes(
+    const std::byte* data,
+    std::size_t count) noexcept {
+
+    for (std::size_t index = 0; index < count; ++index) {
+        if (data[index] != std::byte{0})
+            return false;
+    }
+    return true;
+}
+
 [[nodiscard]] bool section_bounds(
     std::size_t image_size,
     std::uint64_t offset,
@@ -292,6 +313,7 @@ void source_manager_image_view::reset() noexcept {
     generation_value = 0;
     source_count_value = 0;
     root_count_value = 0;
+    change_checkpoint_value = {};
 }
 
 status source_manager_image_view::bind(std::span<const std::byte> image) noexcept {
@@ -320,28 +342,63 @@ status source_manager_image_view::bind(std::span<const std::byte> image) noexcep
 
     std::array<std::byte, source_manager_image_header_size> header{};
     std::memcpy(header.data(), image.data(), header.size());
-    const auto stored_header_crc = read_u64(header.data() + 104);
-    write_u64(header.data() + 104, 0);
+    const auto stored_header_crc =
+        read_u64(header.data() + header_crc_offset);
+    write_u64(header.data() + header_crc_offset, 0);
     if (crc64(header) != stored_header_crc)
         return {status_code::artifact_corrupt};
 
-    const auto directory_crc = read_u64(image.data() + 112);
+    const auto directory_crc =
+        read_u64(image.data() + header_directory_crc_offset);
     const auto directory_span = image.subspan(directory_offset, directory_bytes);
     if (crc64(directory_span) != directory_crc)
         return {status_code::artifact_corrupt};
 
     section_view candidate[source_manager_image_directory_count]{};
-    for (std::size_t index = 0; index < source_manager_image_directory_count; ++index) {
+    std::uint64_t previous_end = first_section_offset;
+
+    for (std::size_t index = 0;
+         index < source_manager_image_directory_count;
+         ++index) {
+
         const auto* entry =
-            image.data() + directory_offset + index * source_manager_image_directory_entry_size;
+            image.data() +
+            directory_offset +
+            index * source_manager_image_directory_entry_size;
+
         const auto raw_kind = read_u32(entry);
         const auto record_size = read_u32(entry + 4);
         const auto offset = read_u64(entry + 8);
         const auto count = read_u64(entry + 16);
         const auto section_crc = read_u64(entry + 24);
+        const auto expected_offset = align64(previous_end);
 
-        if (raw_kind != index + 1 || record_size == 0 ||
-            !section_bounds(image.size(), offset, count, record_size)) {
+        if (raw_kind != index + 1 ||
+            record_size == 0 ||
+            offset != expected_offset ||
+            offset > image.size() ||
+            !section_bounds(
+                image.size(),
+                offset,
+                count,
+                record_size)) {
+            return {status_code::artifact_corrupt};
+        }
+
+        if (offset > previous_end &&
+            !zero_bytes(
+                image.data() +
+                    static_cast<std::size_t>(previous_end),
+                static_cast<std::size_t>(
+                    offset - previous_end))) {
+            return {status_code::artifact_corrupt};
+        }
+
+        std::uint64_t byte_count = 0;
+        std::uint64_t end = 0;
+        if (!multiply_u64(count, record_size, byte_count) ||
+            !add_u64(offset, byte_count, end) ||
+            end > image.size()) {
             return {status_code::artifact_corrupt};
         }
 
@@ -351,7 +408,12 @@ status source_manager_image_view::bind(std::span<const std::byte> image) noexcep
             record_size,
             section_crc,
         };
+
+        previous_end = end;
     }
+
+    if (previous_end != image.size())
+        return {status_code::artifact_corrupt};
 
     if (candidate[section_index(source_manager_image_section::source_core)].record_size !=
             source_core_size ||
@@ -365,7 +427,11 @@ status source_manager_image_view::bind(std::span<const std::byte> image) noexcep
             root_record_size ||
         candidate[section_index(source_manager_image_section::path_index)].record_size !=
             path_index_record_size ||
-        candidate[section_index(source_manager_image_section::path_bytes)].record_size != 1) {
+        candidate[section_index(source_manager_image_section::path_bytes)].record_size != 1 ||
+        candidate[section_index(source_manager_image_section::source_file_identity_index)].record_size !=
+            source_file_identity_index_record_size ||
+        candidate[section_index(source_manager_image_section::tracked_directory_identity_index)].record_size !=
+            tracked_directory_identity_index_record_size) {
         return {status_code::artifact_corrupt};
     }
 
@@ -393,6 +459,56 @@ status source_manager_image_view::bind(std::span<const std::byte> image) noexcep
         candidate[section_index(source_manager_image_section::reverse_edges)];
     const auto& roots = candidate[section_index(source_manager_image_section::roots)];
     const auto& path_index = candidate[section_index(source_manager_image_section::path_index)];
+    const auto& source_file_identity_index =
+        candidate[section_index(source_manager_image_section::source_file_identity_index)];
+    const auto& tracked_directory_identity_index =
+        candidate[section_index(source_manager_image_section::tracked_directory_identity_index)];
+
+    const auto raw_change_backend =
+        read_u32(image.data() + header_change_backend_offset);
+    if (read_u32(image.data() + header_change_backend_offset + 4) != 0 ||
+        raw_change_backend >
+            static_cast<std::uint32_t>(source_change_backend::windows_usn)) {
+        return {status_code::artifact_corrupt};
+    }
+
+    source_change_checkpoint change_checkpoint;
+    change_checkpoint.backend =
+        static_cast<source_change_backend>(raw_change_backend);
+    change_checkpoint.volume_serial =
+        read_u64(image.data() + header_change_volume_offset);
+    change_checkpoint.journal_id =
+        read_u64(image.data() + header_change_journal_offset);
+    change_checkpoint.next_usn =
+        static_cast<std::int64_t>(
+            read_u64(image.data() + header_change_usn_offset));
+
+    const auto valid_optional_index = [](std::uint64_t count) noexcept {
+        return count == 0 || (count & (count - 1)) == 0;
+    };
+
+    if ((!change_checkpoint &&
+         (change_checkpoint.volume_serial != 0 ||
+          change_checkpoint.journal_id != 0 ||
+          change_checkpoint.next_usn != 0 ||
+          source_file_identity_index.count != 0 ||
+          tracked_directory_identity_index.count != 0)) ||
+        (change_checkpoint &&
+         (change_checkpoint.volume_serial == 0 ||
+          change_checkpoint.journal_id == 0 ||
+          change_checkpoint.next_usn < 0 ||
+          (source_count != 0 && source_file_identity_index.count == 0))) ||
+        !valid_optional_index(source_file_identity_index.count) ||
+        !valid_optional_index(tracked_directory_identity_index.count)) {
+        return {status_code::artifact_corrupt};
+    }
+
+    for (std::size_t index = header_reserved_begin;
+         index < source_manager_image_header_size;
+         ++index) {
+        if (image[index] != std::byte{0})
+            return {status_code::artifact_corrupt};
+    }
 
     if (source_core.count != source_count ||
         physical.count != source_count ||
@@ -421,6 +537,7 @@ status source_manager_image_view::bind(std::span<const std::byte> image) noexcep
     generation_value = read_u64(image.data() + 48);
     source_count_value = static_cast<std::size_t>(source_count);
     root_count_value = static_cast<std::size_t>(root_count);
+    change_checkpoint_value = change_checkpoint;
     return {};
 }
 
@@ -558,6 +675,77 @@ status source_manager_image_view::find(
     return {status_code::not_found};
 }
 
+source_id source_manager_image_view::find_source_file(
+    std::uint64_t file_reference) const noexcept {
+
+    if (file_reference == 0)
+        return {};
+
+    const auto& values =
+        section(source_manager_image_section::source_file_identity_index);
+    if (values.count == 0 ||
+        (values.count & (values.count - 1)) != 0) {
+        return {};
+    }
+
+    const auto mask = static_cast<std::size_t>(values.count - 1);
+    auto position = static_cast<std::size_t>(mix64(file_reference)) & mask;
+
+    for (std::size_t probe = 0; probe < values.count; ++probe) {
+        const auto* slot =
+            values.data + position * source_file_identity_index_record_size;
+        const auto candidate = read_u64(slot);
+        if (candidate == 0)
+            return {};
+        if (candidate == file_reference) {
+            const source_id source{read_u32(slot + 8)};
+            return source &&
+                static_cast<std::size_t>(source.value()) <= source_count_value &&
+                read_u32(slot + 12) == 0
+                ? source
+                : source_id{};
+        }
+        position = (position + 1) & mask;
+    }
+
+    return {};
+}
+
+std::uint32_t source_manager_image_view::directory_watch_flags(
+    std::uint64_t file_reference) const noexcept {
+
+    if (file_reference == 0)
+        return 0;
+
+    const auto& values =
+        section(source_manager_image_section::tracked_directory_identity_index);
+    if (values.count == 0 ||
+        (values.count & (values.count - 1)) != 0) {
+        return 0;
+    }
+
+    const auto mask = static_cast<std::size_t>(values.count - 1);
+    auto position = static_cast<std::size_t>(mix64(file_reference)) & mask;
+
+    for (std::size_t probe = 0; probe < values.count; ++probe) {
+        const auto* slot =
+            values.data + position * tracked_directory_identity_index_record_size;
+        const auto candidate = read_u64(slot);
+        if (candidate == 0)
+            return 0;
+        if (candidate == file_reference) {
+            const auto flags = read_u32(slot + 8);
+            return read_u32(slot + 12) == 0 &&
+                (flags & ~source_change_directory_watch_known) == 0
+                ? flags
+                : 0;
+        }
+        position = (position + 1) & mask;
+    }
+
+    return 0;
+}
+
 status source_manager_image_view::verify_contents() const noexcept {
     if (!valid())
         return {status_code::invalid_state};
@@ -643,6 +831,23 @@ status encode_source_manager_image(
         }
     }
 
+    if ((!options.change_checkpoint &&
+         (!options.file_identity_index.empty() ||
+          !options.directory_identity_index.empty())) ||
+        (options.change_checkpoint &&
+         (options.change_checkpoint.volume_serial == 0 ||
+          options.change_checkpoint.journal_id == 0 ||
+          options.change_checkpoint.next_usn < 0 ||
+          (source_count != 0 && options.file_identity_index.empty()))) ||
+        (!options.file_identity_index.empty() &&
+         (options.file_identity_index.size() &
+          (options.file_identity_index.size() - 1)) != 0) ||
+        (!options.directory_identity_index.empty() &&
+         (options.directory_identity_index.size() &
+          (options.directory_identity_index.size() - 1)) != 0)) {
+        return {status_code::invalid_argument};
+    }
+
     const auto index_capacity = path_index_capacity(source_count);
     if (index_capacity == 0)
         return {status_code::not_available};
@@ -657,6 +862,10 @@ status encode_source_manager_image(
         {source_manager_image_section::roots, root_record_size, options.roots.size()},
         {source_manager_image_section::path_index, path_index_record_size, index_capacity},
         {source_manager_image_section::path_bytes, 1, path_bytes},
+        {source_manager_image_section::source_file_identity_index,
+            source_file_identity_index_record_size, options.file_identity_index.size()},
+        {source_manager_image_section::tracked_directory_identity_index,
+            tracked_directory_identity_index_record_size, options.directory_identity_index.size()},
     }};
 
     std::uint64_t cursor = first_section_offset;
@@ -708,6 +917,10 @@ status encode_source_manager_image(
         layout[section_index(source_manager_image_section::path_index)].offset);
     auto* path_data = base + static_cast<std::size_t>(
         layout[section_index(source_manager_image_section::path_bytes)].offset);
+    auto* file_identity_data = base + static_cast<std::size_t>(
+        layout[section_index(source_manager_image_section::source_file_identity_index)].offset);
+    auto* directory_identity_data = base + static_cast<std::size_t>(
+        layout[section_index(source_manager_image_section::tracked_directory_identity_index)].offset);
 
     write_u64(forward_offsets, 0);
     write_u64(reverse_offsets, 0);
@@ -793,6 +1006,50 @@ status encode_source_manager_image(
         write_u32(slot + 4, source.value());
     }
 
+    for (std::size_t index = 0;
+         index < options.file_identity_index.size();
+         ++index) {
+        const auto& item = options.file_identity_index[index];
+        if ((item.file_reference == 0 &&
+             (item.source || item.reserved != 0)) ||
+            (item.file_reference != 0 &&
+             (!item.source ||
+              static_cast<std::size_t>(item.source.value()) > source_count ||
+              item.reserved != 0))) {
+            output.clear();
+            return {status_code::invalid_argument};
+        }
+
+        auto* record =
+            file_identity_data +
+            index * source_file_identity_index_record_size;
+        write_u64(record, item.file_reference);
+        write_u32(record + 8, item.source.value());
+        write_u32(record + 12, item.reserved);
+    }
+
+    for (std::size_t index = 0;
+         index < options.directory_identity_index.size();
+         ++index) {
+        const auto& item = options.directory_identity_index[index];
+        if ((item.file_reference == 0 &&
+             (item.flags != 0 || item.reserved != 0)) ||
+            (item.file_reference != 0 &&
+             (item.flags == 0 ||
+              (item.flags & ~source_change_directory_watch_known) != 0 ||
+              item.reserved != 0))) {
+            output.clear();
+            return {status_code::invalid_argument};
+        }
+
+        auto* record =
+            directory_identity_data +
+            index * tracked_directory_identity_index_record_size;
+        write_u64(record, item.file_reference);
+        write_u32(record + 8, item.flags);
+        write_u32(record + 12, item.reserved);
+    }
+
     for (auto& item : layout) {
         std::uint64_t byte_count = 0;
         if (!multiply_u64(item.count, item.record_size, byte_count) ||
@@ -821,10 +1078,19 @@ status encode_source_manager_image(
     write_u64(base + 72, index_capacity);
     write_u64(base + 80, forward_edges);
     write_u64(base + 88, reverse_edges);
-    write_u64(base + 96, 0);
-    write_u64(base + 104, 0);
-    write_u64(base + 112, 0);
-    write_u64(base + 120, 0);
+    write_u32(
+        base + header_change_backend_offset,
+        static_cast<std::uint32_t>(options.change_checkpoint.backend));
+    write_u32(base + header_change_backend_offset + 4, 0);
+    write_u64(base + header_change_volume_offset, options.change_checkpoint.volume_serial);
+    write_u64(base + header_change_journal_offset, options.change_checkpoint.journal_id);
+    write_u64(
+        base + header_change_usn_offset,
+        static_cast<std::uint64_t>(options.change_checkpoint.next_usn));
+    write_u64(base + header_crc_offset, 0);
+    write_u64(base + header_directory_crc_offset, 0);
+    write_u64(base + header_reserved_begin, 0);
+    write_u64(base + header_reserved_begin + 8, 0);
 
     for (std::size_t index = 0; index < layout.size(); ++index) {
         const auto& item = layout[index];
@@ -839,13 +1105,13 @@ status encode_source_manager_image(
 
     const auto directory_crc = crc64(std::span<const std::byte>{
         base + directory_offset, directory_bytes});
-    write_u64(base + 112, directory_crc);
+    write_u64(base + header_directory_crc_offset, directory_crc);
 
     std::array<std::byte, source_manager_image_header_size> header{};
     std::memcpy(header.data(), base, header.size());
-    write_u64(header.data() + 104, 0);
+    write_u64(header.data() + header_crc_offset, 0);
     const auto header_crc = crc64(header);
-    write_u64(base + 104, header_crc);
+    write_u64(base + header_crc_offset, header_crc);
 
     source_manager_image_view validation;
     const auto bind_result = validation.bind(output);

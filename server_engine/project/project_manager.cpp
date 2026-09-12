@@ -161,6 +161,7 @@ status project_manager::build(
     baseline_store store{configuration_path};
     baseline_snapshot snapshot;
     baseline_probe probe;
+    baseline_open_telemetry baseline_open_detail;
 
     const auto configuration_identity_begin =
         std::chrono::steady_clock::now();
@@ -221,10 +222,11 @@ status project_manager::build(
         const auto baseline_open_begin =
             std::chrono::steady_clock::now();
 
-        result = store.open_transaction(
+        result = store.open_transaction_ready(
             probe.fingerprint,
             probe.transaction,
-            snapshot);
+            snapshot,
+            &baseline_open_detail);
 
         const auto baseline_open_end =
             std::chrono::steady_clock::now();
@@ -328,20 +330,10 @@ status project_manager::build(
         return result;
     }
 
-    build_cache_image_view build_cache;
-    result = build_cache.bind(
-        snapshot.artifact(
-            baseline_artifact_kind::build_cache));
-    if (!result.ok()) {
-        abandon_construction();
-        return result;
-    }
-
     std::vector<source_id> dirty_sources;
     project_dirty_source_telemetry dirty_telemetry;
     result = project_baseline_dirty_sources(
         sources,
-        build_cache,
         dirty_sources,
         dirty_telemetry);
     if (!result.ok()) {
@@ -368,6 +360,16 @@ status project_manager::build(
         value.telemetry.configuration_ns = configuration_ns;
         value.telemetry.fingerprint_ns = fingerprint_ns;
         value.telemetry.baseline_open_ns = baseline_open_ns;
+        value.telemetry.baseline_manifest_validation_ns =
+            baseline_open_detail.manifest_validation_ns;
+        value.telemetry.baseline_compiled_map_ns =
+            baseline_open_detail.compiled_map_ns;
+        value.telemetry.baseline_source_manager_map_ns =
+            baseline_open_detail.source_manager_map_ns;
+        value.telemetry.baseline_build_cache_map_ns =
+            baseline_open_detail.build_cache_map_ns;
+        value.telemetry.baseline_size_validation_ns =
+            baseline_open_detail.size_validation_ns;
         value.telemetry.dirty_detection_ns = dirty_detection_ns;
         value.telemetry.baseline_activation_ns = baseline_activation_ns;
         value.telemetry.build_activation_ns = build_activation_ns;
@@ -403,8 +405,43 @@ status project_manager::build(
                 baseline_activation_end -
                 baseline_activation_begin).count());
 
+
         publish_manager_telemetry(output);
         return activate_result;
+    }
+
+    if (!snapshot.mapped(
+            baseline_artifact_kind::build_cache)) {
+
+        baseline_open_telemetry deferred_cache;
+        const auto deferred_begin =
+            std::chrono::steady_clock::now();
+
+        result = store.map_build_cache(
+            probe.fingerprint,
+            probe.transaction,
+            snapshot,
+            &deferred_cache);
+
+        const auto deferred_end =
+            std::chrono::steady_clock::now();
+
+        baseline_open_ns += static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                deferred_end - deferred_begin).count());
+
+        baseline_open_detail.manifest_validation_ns +=
+            deferred_cache.manifest_validation_ns;
+        baseline_open_detail.build_cache_map_ns +=
+            deferred_cache.build_cache_map_ns;
+        baseline_open_detail.size_validation_ns +=
+            deferred_cache.size_validation_ns;
+
+        if (!result.ok()) {
+            publish_manager_telemetry(output);
+            abandon_construction();
+            return result;
+        }
     }
 
     try {

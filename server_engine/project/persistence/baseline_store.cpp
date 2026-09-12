@@ -46,6 +46,15 @@ constexpr std::string_view current_name = "CURRENT";
 
 std::atomic<std::uint64_t> transaction_counter{0};
 
+[[nodiscard]] std::uint64_t elapsed_ns(
+    std::chrono::steady_clock::time_point begin,
+    std::chrono::steady_clock::time_point end) noexcept {
+
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            end - begin).count());
+}
+
 [[nodiscard]] constexpr std::uint64_t crc64_update(
     std::uint64_t crc,
     std::byte input) noexcept {
@@ -599,7 +608,8 @@ status baseline_store::open(
             expected,
             transaction,
             true,
-            output);
+            output,
+            nullptr);
     }
     catch (const std::bad_alloc&) {
         return {status_code::not_available};
@@ -631,7 +641,8 @@ status baseline_store::open_ready(
             expected,
             transaction,
             false,
-            output);
+            output,
+            nullptr);
     }
     catch (const std::bad_alloc&) {
         return {status_code::not_available};
@@ -647,9 +658,12 @@ status baseline_store::open_ready(
 status baseline_store::open_transaction(
     const baseline_fingerprint& expected,
     std::string_view transaction,
-    baseline_snapshot& output) const noexcept {
+    baseline_snapshot& output,
+    baseline_open_telemetry* telemetry) const noexcept {
 
     output = {};
+    if (telemetry != nullptr)
+        *telemetry = {};
 
     if (!valid_transaction_name(transaction))
         return {status_code::invalid_argument};
@@ -658,16 +672,144 @@ status baseline_store::open_transaction(
         expected,
         transaction,
         true,
-        output);
+        output,
+        telemetry);
+}
+
+status baseline_store::open_transaction_ready(
+    const baseline_fingerprint& expected,
+    std::string_view transaction,
+    baseline_snapshot& output,
+    baseline_open_telemetry* telemetry) const noexcept {
+
+    output = {};
+    if (telemetry != nullptr)
+        *telemetry = {};
+
+    if (!valid_transaction_name(transaction))
+        return {status_code::invalid_argument};
+
+    return open_selected(
+        expected,
+        transaction,
+        false,
+        output,
+        telemetry);
+}
+
+status baseline_store::map_build_cache(
+    const baseline_fingerprint& expected,
+    std::string_view transaction,
+    baseline_snapshot& snapshot,
+    baseline_open_telemetry* telemetry) const noexcept {
+
+    if (telemetry != nullptr)
+        *telemetry = {};
+
+    if (!valid_transaction_name(transaction) ||
+        !snapshot.valid() ||
+        snapshot.transaction() != transaction ||
+        !(snapshot.fingerprint() == expected) ||
+        snapshot.mapped(baseline_artifact_kind::build_cache)) {
+        return {status_code::invalid_argument};
+    }
+
+    try {
+        const auto directory =
+            root_path() / std::string{transaction};
+
+        const auto manifest_begin =
+            std::chrono::steady_clock::now();
+
+        std::vector<std::byte> manifest_bytes;
+        auto result = read_small_file(
+            directory / manifest_name,
+            manifest_size,
+            manifest_bytes);
+        if (!result.ok()) {
+            return result.code == status_code::not_found
+                ? status{status_code::artifact_corrupt}
+                : result;
+        }
+
+        parsed_manifest manifest;
+        result = parse_manifest(manifest_bytes, manifest);
+        if (!result.ok())
+            return result;
+
+        if (manifest.transaction != transaction ||
+            !(manifest.fingerprint == expected)) {
+            return {status_code::artifact_corrupt};
+        }
+
+        if (telemetry != nullptr) {
+            telemetry->manifest_validation_ns =
+                elapsed_ns(
+                    manifest_begin,
+                    std::chrono::steady_clock::now());
+        }
+
+        const auto map_begin =
+            std::chrono::steady_clock::now();
+
+        result = snapshot.build_cache.map(
+            directory / build_cache_name);
+
+        if (telemetry != nullptr) {
+            telemetry->build_cache_map_ns =
+                elapsed_ns(
+                    map_begin,
+                    std::chrono::steady_clock::now());
+        }
+
+        if (!result.ok()) {
+            return result.code == status_code::not_found
+                ? status{status_code::artifact_corrupt}
+                : result;
+        }
+
+        const auto validation_begin =
+            std::chrono::steady_clock::now();
+
+        const bool mismatch =
+            snapshot.build_cache.bytes().size() !=
+            manifest.build_cache_size;
+
+        if (telemetry != nullptr) {
+            telemetry->size_validation_ns =
+                elapsed_ns(
+                    validation_begin,
+                    std::chrono::steady_clock::now());
+        }
+
+        if (mismatch) {
+            snapshot.build_cache = {};
+            return {status_code::artifact_corrupt};
+        }
+
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+    catch (const std::filesystem::filesystem_error&) {
+        return {status_code::io_failed};
+    }
 }
 
 status baseline_store::open_selected(
     const baseline_fingerprint& expected,
     std::string_view transaction,
     bool include_build_cache,
-    baseline_snapshot& output) const noexcept {
+    baseline_snapshot& output,
+    baseline_open_telemetry* telemetry) const noexcept {
 
     output = {};
+    if (telemetry != nullptr)
+        *telemetry = {};
 
     if (!valid_transaction_name(transaction))
         return {status_code::invalid_argument};
@@ -676,6 +818,9 @@ status baseline_store::open_selected(
         const auto root = root_path();
         const auto directory =
             root / std::string{transaction};
+
+        const auto manifest_begin =
+            std::chrono::steady_clock::now();
 
         std::vector<std::byte> manifest_bytes;
         auto result = read_small_file(
@@ -702,22 +847,45 @@ status baseline_store::open_selected(
         if (!(manifest.fingerprint == expected))
             return {status_code::rebuild_required};
 
+        if (telemetry != nullptr) {
+            telemetry->manifest_validation_ns =
+                elapsed_ns(
+                    manifest_begin,
+                    std::chrono::steady_clock::now());
+        }
+
         baseline_snapshot candidate;
         candidate.fingerprint_value =
             manifest.fingerprint;
         candidate.transaction_value =
             manifest.transaction;
 
+        const auto compiled_map_begin =
+            std::chrono::steady_clock::now();
         result = candidate.compiled.map(
             directory / compiled_name);
+        if (telemetry != nullptr) {
+            telemetry->compiled_map_ns =
+                elapsed_ns(
+                    compiled_map_begin,
+                    std::chrono::steady_clock::now());
+        }
         if (!result.ok()) {
             return result.code == status_code::not_found
                 ? status{status_code::artifact_corrupt}
                 : result;
         }
 
+        const auto source_manager_map_begin =
+            std::chrono::steady_clock::now();
         result = candidate.source_manager.map(
             directory / source_manager_name);
+        if (telemetry != nullptr) {
+            telemetry->source_manager_map_ns =
+                elapsed_ns(
+                    source_manager_map_begin,
+                    std::chrono::steady_clock::now());
+        }
         if (!result.ok()) {
             return result.code == status_code::not_found
                 ? status{status_code::artifact_corrupt}
@@ -725,8 +893,16 @@ status baseline_store::open_selected(
         }
 
         if (include_build_cache) {
+            const auto build_cache_map_begin =
+                std::chrono::steady_clock::now();
             result = candidate.build_cache.map(
                 directory / build_cache_name);
+            if (telemetry != nullptr) {
+                telemetry->build_cache_map_ns =
+                    elapsed_ns(
+                        build_cache_map_begin,
+                        std::chrono::steady_clock::now());
+            }
             if (!result.ok()) {
                 return result.code == status_code::not_found
                     ? status{status_code::artifact_corrupt}
@@ -734,15 +910,27 @@ status baseline_store::open_selected(
             }
         }
 
-        if (candidate.compiled.bytes().size() !=
+        const auto size_validation_begin =
+            std::chrono::steady_clock::now();
+
+        const bool size_mismatch =
+            candidate.compiled.bytes().size() !=
                 manifest.compiled_size ||
             candidate.source_manager.bytes().size() !=
                 manifest.source_manager_size ||
             (include_build_cache &&
              candidate.build_cache.bytes().size() !=
-                manifest.build_cache_size)) {
-            return {status_code::artifact_corrupt};
+                manifest.build_cache_size);
+
+        if (telemetry != nullptr) {
+            telemetry->size_validation_ns =
+                elapsed_ns(
+                    size_validation_begin,
+                    std::chrono::steady_clock::now());
         }
+
+        if (size_mismatch)
+            return {status_code::artifact_corrupt};
 
         output = std::move(candidate);
         return {};

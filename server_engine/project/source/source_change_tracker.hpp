@@ -79,7 +79,6 @@ struct source_change_detection_telemetry final {
 // filesystem scan. Allocation failures remain hard failures.
 [[nodiscard]] status detect_source_changes(
     const source_manager_image_view& sources,
-    const build_cache_image_view& build_cache,
     std::vector<source_id>& dirty_sources,
     source_change_detection_telemetry& telemetry) noexcept;
 

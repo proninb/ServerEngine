@@ -1,0 +1,41 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project>
+  <ProjectOutputs>
+    <ProjectOutput>
+      <FullPath>C:\Boris\ServerEngine\build-se-v3-10d3d\x64\Release\ZERO_CHECK</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Boris\ServerEngine\build-se-v3-10d3d\Release\server_engine.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Boris\ServerEngine\build-se-v3-10d3d\Release\server_engine_complete_graph_benchmark.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Boris\ServerEngine\build-se-v3-10d3d\Release\server_engine_generation_builder_benchmark.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Boris\ServerEngine\build-se-v3-10d3d\Release\server_engine_identity_benchmark.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Boris\ServerEngine\build-se-v3-10d3d\Release\server_engine_persisted_sparse_build_benchmark.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Boris\ServerEngine\build-se-v3-10d3d\Release\server_engine_project_build_benchmark.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Boris\ServerEngine\build-se-v3-10d3d\Release\server_engine_source_manager_benchmark.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Boris\ServerEngine\build-se-v3-10d3d\Release\server_engine_string_table_benchmark.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Boris\ServerEngine\build-se-v3-10d3d\Release\server_engine_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Boris\ServerEngine\build-se-v3-10d3d\x64\Release\ALL_BUILD</FullPath>
+    </ProjectOutput>
+  </ProjectOutputs>
+  <ContentFiles />
+  <SatelliteDlls />
+  <NonRecipeFileRefs />
+</Project>

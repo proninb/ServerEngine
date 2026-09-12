@@ -61,7 +61,6 @@ struct project_dirty_source_telemetry final {
 
 [[nodiscard]] status project_baseline_dirty_sources(
     const source_manager_image_view& sources,
-    const build_cache_image_view& build_cache,
     std::vector<source_id>& dirty_sources,
     project_dirty_source_telemetry& telemetry) noexcept;
 

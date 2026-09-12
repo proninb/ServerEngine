@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Solution>
+	<Configurations>
+		<BuildType Name="Debug"/>
+		<BuildType Name="Release"/>
+		<BuildType Name="MinSizeRel"/>
+		<BuildType Name="RelWithDebInfo"/>
+		<Platform Name="x64"/>
+	</Configurations>
+	<Project Path="ALL_BUILD.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="e092a1fa-2ced-3272-943f-ab105164b518" DefaultStartup="true">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="server_engine.vcxproj"/>
+		<BuildDependency Project="server_engine_complete_graph_benchmark.vcxproj"/>
+		<BuildDependency Project="server_engine_core.vcxproj"/>
+		<BuildDependency Project="server_engine_generation_builder_benchmark.vcxproj"/>
+		<BuildDependency Project="server_engine_identity_benchmark.vcxproj"/>
+		<BuildDependency Project="server_engine_persisted_sparse_build_benchmark.vcxproj"/>
+		<BuildDependency Project="server_engine_project_build_benchmark.vcxproj"/>
+		<BuildDependency Project="server_engine_source_manager_benchmark.vcxproj"/>
+		<BuildDependency Project="server_engine_string_table_benchmark.vcxproj"/>
+		<BuildDependency Project="server_engine_tests.vcxproj"/>
+		<Build Solution="Debug|*" Project="false"/>
+		<Build Solution="Release|*" Project="false"/>
+		<Build Solution="MinSizeRel|*" Project="false"/>
+		<Build Solution="RelWithDebInfo|*" Project="false"/>
+	</Project>
+	<Project Path="RUN_TESTS.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="f10ab4f9-b1ff-37c9-9149-45f4e8a3120d">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<Build Solution="Debug|*" Project="false"/>
+		<Build Solution="Release|*" Project="false"/>
+		<Build Solution="MinSizeRel|*" Project="false"/>
+		<Build Solution="RelWithDebInfo|*" Project="false"/>
+	</Project>
+	<Project Path="ZERO_CHECK.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="b63bf84a-4a82-34b9-9346-5a3674034336"/>
+	<Project Path="server_engine.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="01a01988-89a3-3843-8076-c1785deece83">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="server_engine_core.vcxproj"/>
+	</Project>
+	<Project Path="server_engine_complete_graph_benchmark.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="af8ed68f-db82-35c5-b8fd-e8988bf5a3ad">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="server_engine_core.vcxproj"/>
+	</Project>
+	<Project Path="server_engine_core.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="e610ea39-20df-396a-b277-f0149d5969f5">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+	</Project>
+	<Project Path="server_engine_generation_builder_benchmark.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="a92bcec9-0eb8-3d3b-b82d-cd82d06c7849">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="server_engine_core.vcxproj"/>
+	</Project>
+	<Project Path="server_engine_identity_benchmark.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="0f4e4ad4-fcf3-3f11-a47f-4c36833de8e6">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="server_engine_core.vcxproj"/>
+	</Project>
+	<Project Path="server_engine_persisted_sparse_build_benchmark.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="261215a2-f6c6-3771-8fb7-b2ae559be1fd">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="server_engine_core.vcxproj"/>
+	</Project>
+	<Project Path="server_engine_project_build_benchmark.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="5b59f323-b50d-3ecf-b3f0-7a22aa2b5514">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="server_engine_core.vcxproj"/>
+	</Project>
+	<Project Path="server_engine_source_manager_benchmark.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="a59fe43d-2368-3f46-9af1-a34689936ee6">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="server_engine_core.vcxproj"/>
+	</Project>
+	<Project Path="server_engine_string_table_benchmark.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="59a6adad-d686-31d5-ae51-119af0a014f8">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="server_engine_core.vcxproj"/>
+	</Project>
+	<Project Path="server_engine_tests.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="e350652c-d0da-3800-b483-ede262dbcb8f">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="server_engine_core.vcxproj"/>
+	</Project>
+</Solution>

@@ -218,6 +218,9 @@ status encode_project_baseline(
         source_manager_image_options options;
         options.generation = 1;
         options.roots = std::span<const source_manager_image_root>{roots};
+        options.change_checkpoint = change_capture.checkpoint;
+        options.file_identity_index = change_capture.file_index;
+        options.directory_identity_index = change_capture.directory_index;
 
         result = encode_source_manager_image(
             project.sources(),
@@ -361,7 +364,6 @@ status project_baseline_dirty_sources(
 
 status project_baseline_dirty_sources(
     const source_manager_image_view& sources,
-    const build_cache_image_view& build_cache,
     std::vector<source_id>& dirty_sources,
     project_dirty_source_telemetry& telemetry) noexcept {
 
@@ -372,7 +374,6 @@ status project_baseline_dirty_sources(
     const auto fast_result =
         detect_source_changes(
             sources,
-            build_cache,
             dirty_sources,
             detector);
 

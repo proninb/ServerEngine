@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../project_root.hpp"
+#include "../source/source_change_tracker.hpp"
 #include "../source/source_manager.hpp"
 
 #include <cstddef>
@@ -11,9 +12,9 @@
 
 namespace cw::server {
 
-inline constexpr std::uint32_t source_manager_image_format_version = 1;
-inline constexpr std::size_t source_manager_image_header_size = 128;
-inline constexpr std::size_t source_manager_image_directory_count = 9;
+inline constexpr std::uint32_t source_manager_image_format_version = 2;
+inline constexpr std::size_t source_manager_image_header_size = 160;
+inline constexpr std::size_t source_manager_image_directory_count = 11;
 inline constexpr std::size_t source_manager_image_directory_entry_size = 32;
 
 enum class source_manager_image_section : std::uint32_t {
@@ -26,6 +27,8 @@ enum class source_manager_image_section : std::uint32_t {
     roots = 7,
     path_index = 8,
     path_bytes = 9,
+    source_file_identity_index = 10,
+    tracked_directory_identity_index = 11,
 };
 
 struct source_manager_image_root final {
@@ -36,6 +39,9 @@ struct source_manager_image_root final {
 struct source_manager_image_options final {
     std::uint64_t generation = 0;
     std::span<const source_manager_image_root> roots;
+    source_change_checkpoint change_checkpoint{};
+    std::span<const source_change_file_index_slot> file_identity_index;
+    std::span<const source_change_directory_index_slot> directory_identity_index;
 };
 
 struct source_manager_image_physical_state final {
@@ -99,6 +105,16 @@ public:
         std::string_view normalized_path,
         source_id& output) const noexcept;
 
+    [[nodiscard]] source_change_checkpoint change_checkpoint() const noexcept {
+        return change_checkpoint_value;
+    }
+
+    [[nodiscard]] source_id find_source_file(
+        std::uint64_t file_reference) const noexcept;
+
+    [[nodiscard]] std::uint32_t directory_watch_flags(
+        std::uint64_t file_reference) const noexcept;
+
     // Explicit maintenance/diagnostic integrity pass. This reads every section.
     [[nodiscard]] status verify_contents() const noexcept;
 
@@ -120,6 +136,7 @@ private:
     std::uint64_t generation_value = 0;
     std::size_t source_count_value = 0;
     std::size_t root_count_value = 0;
+    source_change_checkpoint change_checkpoint_value{};
 };
 
 // Deterministic field-wise little-endian encoder for source_manager.bin v1.

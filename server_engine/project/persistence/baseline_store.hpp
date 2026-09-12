@@ -52,6 +52,14 @@ struct baseline_probe final {
     std::string transaction;
 };
 
+struct baseline_open_telemetry final {
+    std::uint64_t manifest_validation_ns = 0;
+    std::uint64_t compiled_map_ns = 0;
+    std::uint64_t source_manager_map_ns = 0;
+    std::uint64_t build_cache_map_ns = 0;
+    std::uint64_t size_validation_ns = 0;
+};
+
 // Owns one read-only mapped file. Mapping lifetime pins the backing artifact even
 // after a later SAVE commits a different baseline for the next LOAD/BUILD.
 class read_only_file_mapping final {
@@ -145,7 +153,22 @@ public:
     [[nodiscard]] status open_transaction(
         const baseline_fingerprint& expected,
         std::string_view transaction,
-        baseline_snapshot& output) const noexcept;
+        baseline_snapshot& output,
+        baseline_open_telemetry* telemetry = nullptr) const noexcept;
+
+    // Opens only compiled + Source Manager. build_cache stays unmapped until
+    // dirty detection proves that a sparse construction overlay is required.
+    [[nodiscard]] status open_transaction_ready(
+        const baseline_fingerprint& expected,
+        std::string_view transaction,
+        baseline_snapshot& output,
+        baseline_open_telemetry* telemetry = nullptr) const noexcept;
+
+    [[nodiscard]] status map_build_cache(
+        const baseline_fingerprint& expected,
+        std::string_view transaction,
+        baseline_snapshot& snapshot,
+        baseline_open_telemetry* telemetry = nullptr) const noexcept;
 
     [[nodiscard]] status commit(
         const baseline_fingerprint& fingerprint,
@@ -174,7 +197,8 @@ private:
         const baseline_fingerprint& expected,
         std::string_view transaction,
         bool include_build_cache,
-        baseline_snapshot& output) const noexcept;
+        baseline_snapshot& output,
+        baseline_open_telemetry* telemetry) const noexcept;
 
     [[nodiscard]] std::filesystem::path root_path() const;
 

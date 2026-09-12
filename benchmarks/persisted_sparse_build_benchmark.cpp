@@ -175,7 +175,8 @@ void print_header() {
     std::cout
         << "baseline_sources,scenario,"
            "manager_ms,configuration_identity_ms,configuration_ms,fingerprint_ms,"
-           "baseline_open_ms,dirty_detection_ms,"
+           "baseline_open_ms,manifest_ms,compiled_map_ms,source_manager_map_ms,"
+           "build_cache_map_ms,size_validation_us,dirty_detection_ms,"
            "baseline_activation_ms,build_activation_ms,"
            "dirty_backend,dirty_fast,dirty_fallback,"
            "journal_records,journal_matched,"
@@ -211,6 +212,16 @@ void print_result(
             telemetry.fingerprint_ns) / 1'000'000.0 << ','
         << static_cast<double>(
             telemetry.baseline_open_ns) / 1'000'000.0 << ','
+        << static_cast<double>(
+            telemetry.baseline_manifest_validation_ns) / 1'000'000.0 << ','
+        << static_cast<double>(
+            telemetry.baseline_compiled_map_ns) / 1'000'000.0 << ','
+        << static_cast<double>(
+            telemetry.baseline_source_manager_map_ns) / 1'000'000.0 << ','
+        << static_cast<double>(
+            telemetry.baseline_build_cache_map_ns) / 1'000'000.0 << ','
+        << static_cast<double>(
+            telemetry.baseline_size_validation_ns) / 1'000.0 << ','
         << static_cast<double>(
             telemetry.dirty_detection_ns) / 1'000'000.0 << ','
         << static_cast<double>(
@@ -544,6 +555,7 @@ void print_result(
         build.telemetry.configuration_identity_ns != 0 &&
         build.telemetry.configuration_ns == 0 &&
         build.telemetry.fingerprint_ns == 0 &&
+        build.telemetry.baseline_build_cache_map_ns == 0 &&
         dirty_ms <= dirty_limit_ms;
 
     std::cout
@@ -635,6 +647,7 @@ void print_result(
         build.telemetry.configuration_ns == 0 &&
         build.telemetry.fingerprint_ns == 0 &&
         build.telemetry.baseline_open_ns != 0 &&
+        build.telemetry.baseline_build_cache_map_ns != 0 &&
         build.telemetry.dirty_detection_ns != 0 &&
         build.telemetry.baseline_activation_ns == 0 &&
         build.telemetry.build_activation_ns != 0 &&
