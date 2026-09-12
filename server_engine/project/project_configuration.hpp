@@ -12,6 +12,10 @@ namespace cw::server {
 struct project_item_configuration {
     std::filesystem::path path;
     project_item_role role = project_item_role::source;
+
+    // The JSON loader resolves roots against an absolute configuration path and
+    // lexically normalizes them. Programmatic configurations leave this false.
+    bool canonical_path = false;
 };
 
 enum class abi_target : std::uint8_t {

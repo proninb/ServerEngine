@@ -82,10 +82,29 @@ status make_project_baseline_fingerprint(
 
         for (const auto& item : configuration.project) {
             std::string normalized;
-            const auto normalize_result =
-                normalize_source_path(item.path, normalized);
-            if (!normalize_result.ok())
-                return normalize_result;
+
+            if (item.canonical_path) {
+                normalized =
+                    item.path.generic_string();
+#ifdef _WIN32
+                if (normalized.size() >= 2 &&
+                    normalized[1] == ':' &&
+                    normalized[0] >= 'A' &&
+                    normalized[0] <= 'Z') {
+                    normalized[0] =
+                        static_cast<char>(
+                            normalized[0] - 'A' + 'a');
+                }
+#endif
+            }
+            else {
+                const auto normalize_result =
+                    normalize_source_path(
+                        item.path,
+                        normalized);
+                if (!normalize_result.ok())
+                    return normalize_result;
+            }
 
             append_u32(
                 canonical,

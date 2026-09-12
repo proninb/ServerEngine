@@ -325,8 +325,14 @@ private:
 
     void finish_item() noexcept {
         try {
-            item.path = resolve_configuration_path(configuration_path, item_path);
-            candidate.project.push_back(std::move(item));
+            item.path =
+                resolve_configuration_path(
+                    configuration_path,
+                    item_path);
+            item.canonical_path =
+                item.path.is_absolute();
+            candidate.project.push_back(
+                std::move(item));
         }
         catch (const std::bad_alloc&) {
             internal_failure = true;
