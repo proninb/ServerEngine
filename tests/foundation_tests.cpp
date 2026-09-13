@@ -4500,8 +4500,20 @@ bool test_project_load_does_not_map_build_cache() {
         "build_cache.bin";
 
     std::error_code error;
-    if (!std::filesystem::remove(build_cache_path, error) || error) {
-        std::filesystem::remove_all(fixture.directory, error);
+    const auto build_cache_exists =
+        std::filesystem::exists(
+            build_cache_path,
+            error);
+
+    if (error ||
+        (build_cache_exists &&
+         (!std::filesystem::remove(
+              build_cache_path,
+              error) ||
+          error))) {
+        std::filesystem::remove_all(
+            fixture.directory,
+            error);
         return false;
     }
 

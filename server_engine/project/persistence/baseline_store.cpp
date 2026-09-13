@@ -1713,6 +1713,42 @@ status baseline_store::map_build_cache(
                     std::chrono::steady_clock::now());
         }
 
+        if (snapshot.packed_build_state &&
+            snapshot.source_manager.open()) {
+
+            const auto validation_begin =
+                std::chrono::steady_clock::now();
+
+            const auto mapped_size =
+                static_cast<std::uint64_t>(
+                    snapshot.source_manager.bytes().size());
+
+            const bool size_ok =
+                snapshot.source_manager_size_value ==
+                    manifest.source_manager_size &&
+                snapshot.build_cache_size_value ==
+                    manifest.build_cache_size &&
+                manifest.source_manager_size <=
+                    (std::numeric_limits<std::uint64_t>::max)() -
+                        manifest.build_cache_size &&
+                mapped_size ==
+                    manifest.source_manager_size +
+                        manifest.build_cache_size;
+
+            if (telemetry != nullptr) {
+                telemetry->size_validation_ns =
+                    elapsed_ns(
+                        validation_begin,
+                        std::chrono::steady_clock::now());
+            }
+
+            if (!size_ok)
+                return {status_code::artifact_corrupt};
+
+            snapshot.packed_build_cache_enabled = true;
+            return {};
+        }
+
         const auto map_begin =
             std::chrono::steady_clock::now();
 
@@ -2190,10 +2226,17 @@ status baseline_store::commit(
             }
         }
 
-        result = durable_write_file(directory / build_cache_name, build_cache);
-        if (!result.ok()) {
-            cleanup_failed_transaction();
-            return {status_code::persistence_failed};
+        // Packed production transactions already persist Build Cache as the
+        // tail of source_manager.bin. Legacy three-artifact transactions keep
+        // their standalone build_cache.bin for backward compatibility.
+        if (!pack_build_state) {
+            result = durable_write_file(
+                directory / build_cache_name,
+                build_cache);
+            if (!result.ok()) {
+                cleanup_failed_transaction();
+                return {status_code::persistence_failed};
+            }
         }
 
         std::array<std::byte, manifest_size> manifest{};
