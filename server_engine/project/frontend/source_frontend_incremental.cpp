@@ -11,6 +11,28 @@
 namespace cw::server {
 namespace {
 
+[[nodiscard]] std::size_t default_incremental_acquisition_workers(
+    std::size_t cpu_workers) noexcept {
+
+#ifdef _WIN32
+    const auto extra =
+        (cpu_workers + 2) / 3;
+    const auto oversubscribed =
+        cpu_workers > (std::numeric_limits<std::size_t>::max)() - extra
+        ? cpu_workers
+        : cpu_workers + extra;
+
+    constexpr std::size_t practical_cap = 64;
+    return (std::max)(
+        cpu_workers,
+        (std::min)(
+            oversubscribed,
+            practical_cap));
+#else
+    return cpu_workers;
+#endif
+}
+
 struct incremental_import final {
     std::uint32_t visible_from = 0;
     source_id dependency{};
@@ -197,19 +219,32 @@ source_frontend_generation::source_frontend_generation(
     project_semantic_services semantic_value,
     source_manager_update& source_update,
     const source_frontend_cache& cache_value,
-    std::size_t worker_limit_value) noexcept
+    std::size_t worker_limit_value,
+    std::size_t acquisition_worker_limit_value) noexcept
     : semantic(semantic_value), sources(source_update), cache(&cache_value),
       worker_limit(worker_limit_value == 0
           ? (std::thread::hardware_concurrency() == 0 ? 1 : std::thread::hardware_concurrency())
-          : worker_limit_value) {}
+          : worker_limit_value),
+      acquisition_worker_limit(
+          acquisition_worker_limit_value == 0
+              ? default_incremental_acquisition_workers(
+                    worker_limit)
+              : (std::max)(
+                    std::size_t{1},
+                    acquisition_worker_limit_value)) {}
 
 source_frontend_generation::source_frontend_generation(
     project_context& project_value,
     source_manager_update& source_update,
     const source_frontend_cache& cache_value,
-    std::size_t worker_limit_value) noexcept
+    std::size_t worker_limit_value,
+    std::size_t acquisition_worker_limit_value) noexcept
     : source_frontend_generation(
-          project_value.parser_services(), source_update, cache_value, worker_limit_value) {}
+          project_value.parser_services(),
+          source_update,
+          cache_value,
+          worker_limit_value,
+          acquisition_worker_limit_value) {}
 
 status source_frontend_generation::build_incremental(
     std::span<const source_id> dirty_sources,
@@ -227,6 +262,8 @@ status source_frontend_generation::build_incremental(
         source_frontend_summary summary;
         summary.dirty = static_cast<std::uint32_t>(dirty_sources.size());
         summary.worker_limit = worker_limit;
+        summary.acquisition_worker_limit =
+            acquisition_worker_limit;
         const auto initial_source_count = sources.source_count();
 
         source_index dirty_index;
@@ -255,7 +292,10 @@ status source_frontend_generation::build_incremental(
 
         std::vector<status> acquire_status(unique_dirty.size());
         const auto worker_count = (std::min)(
-            unique_dirty.size(), (std::max)(std::size_t{1}, worker_limit));
+            unique_dirty.size(),
+            (std::max)(
+                std::size_t{1},
+                acquisition_worker_limit));
         if (worker_count <= 1) {
             for (std::size_t index = 0; index < jobs.size(); ++index)
                 acquire_status[index] = source_manager_update::execute_acquire(jobs[index], acquired[index]);

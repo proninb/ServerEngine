@@ -40,7 +40,8 @@ public:
     [[nodiscard]] const source_interface* interface(source_id source) const noexcept;
 
     // Allocation-free SAVE boundary. Untouched baseline interface records are
-    // read directly from build_cache.bin; changed/new Sources read sparse overlay.
+    // read directly from the persisted Build Cache image; changed/new Sources
+    // read the sparse overlay.
     [[nodiscard]] status persistence_record(
         source_id source,
         source_frontend_persistence_record& output) const noexcept;

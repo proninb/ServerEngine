@@ -6,6 +6,7 @@
 #include "source_manager.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <iterator>
 #include <filesystem>
@@ -15,6 +16,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -144,7 +146,11 @@ public:
 
     [[nodiscard]] status insert(
         std::filesystem::path value,
-        std::uint32_t flags) noexcept {
+        std::uint32_t flags,
+        bool* inserted = nullptr) noexcept {
+
+        if (inserted != nullptr)
+            *inserted = false;
 
         if ((flags & ~source_change_directory_watch_known) != 0 ||
             flags == 0) {
@@ -204,6 +210,10 @@ public:
                     slots[position] =
                         static_cast<std::uint32_t>(
                             paths.size());
+
+                    if (inserted != nullptr)
+                        *inserted = true;
+
                     return {};
                 }
 
@@ -1319,6 +1329,142 @@ status same_file_identity(
 }
 
 
+namespace {
+
+enum class capture_validation_kind : std::uint8_t {
+    valid,
+    disable_capture,
+    rebuild_required,
+    io_failed,
+    not_available,
+};
+
+struct capture_validation_job final {
+    std::filesystem::path path;
+    source_content_hash expected_hash{};
+    bool present = false;
+};
+
+struct capture_validation_result final {
+    capture_validation_kind kind =
+        capture_validation_kind::valid;
+    std::uint64_t file_reference = 0;
+    bool missing = false;
+};
+
+[[nodiscard]] std::size_t parallel_capture_worker_count(
+    std::size_t count) noexcept {
+
+    if (count <= 1)
+        return count;
+
+    auto cpu =
+        static_cast<std::size_t>(
+            std::thread::hardware_concurrency());
+
+    if (cpu == 0)
+        cpu = 1;
+
+#if defined(_WIN32)
+    auto workers =
+        cpu + (cpu + 2) / 3;
+    workers =
+        (std::min)(
+            workers,
+            std::size_t{64});
+#else
+    auto workers = cpu;
+#endif
+
+    workers =
+        (std::min)(
+            workers,
+            count);
+
+    return (std::max)(
+        workers,
+        std::size_t{1});
+}
+
+void validate_capture_job(
+    const capture_validation_job& job,
+    std::uint64_t expected_volume,
+    capture_validation_result& output) noexcept {
+
+    output = {};
+
+    if (job.present) {
+        file_snapshot verified;
+        const auto acquisition =
+            acquire_file_snapshot(
+                job.path,
+                std::nullopt,
+                verified);
+
+        switch (acquisition) {
+        case file_snapshot_result::acquired:
+            break;
+
+        case file_snapshot_result::missing:
+            output.kind =
+                capture_validation_kind::rebuild_required;
+            return;
+
+        case file_snapshot_result::allocation_failed:
+            output.kind =
+                capture_validation_kind::not_available;
+            return;
+
+        case file_snapshot_result::unchanged:
+        case file_snapshot_result::changed_during_read:
+        case file_snapshot_result::failed:
+            output.kind =
+                capture_validation_kind::io_failed;
+            return;
+        }
+
+        if (verified.hash != job.expected_hash) {
+            output.kind =
+                capture_validation_kind::rebuild_required;
+            return;
+        }
+
+        if (!verified.identity ||
+            verified.identity.volume_serial !=
+                expected_volume) {
+            output.kind =
+                capture_validation_kind::disable_capture;
+            return;
+        }
+
+        output.file_reference =
+            verified.identity.file_reference;
+        return;
+    }
+
+    file_snapshot_observation observation;
+    bool missing = false;
+
+    if (!observe_regular_file(
+            job.path,
+            observation,
+            missing)) {
+        output.kind =
+            capture_validation_kind::disable_capture;
+        return;
+    }
+
+    if (!missing) {
+        output.kind =
+            capture_validation_kind::rebuild_required;
+        return;
+    }
+
+    output.missing = true;
+}
+
+} // namespace
+
 status prepare_source_change_capture(
     const source_manager& sources,
     source_change_capture& output) noexcept {
@@ -1353,6 +1499,7 @@ status prepare_source_change_capture(
 
             const source_id source{
                 static_cast<std::uint32_t>(index + 1)};
+
             first = sources.current(source);
             if (!first)
                 continue;
@@ -1374,6 +1521,8 @@ status prepare_source_change_capture(
             return {};
         }
 
+        // The checkpoint is captured before content validation, so every
+        // subsequent filesystem change remains visible to the next BUILD.
         source_change_checkpoint checkpoint;
         if (!query_usn_checkpoint(
                 std::filesystem::path{
@@ -1387,8 +1536,11 @@ status prepare_source_change_capture(
         output.journal_anchor_path.assign(
             first.normalized_path());
 
+        const auto source_count =
+            sources.source_count();
+
         const auto file_capacity =
-            next_capacity(sources.source_count());
+            next_capacity(source_count);
         if (file_capacity == 0)
             return {status_code::not_available};
 
@@ -1396,112 +1548,161 @@ status prepare_source_change_capture(
             file_capacity,
             source_change_file_index_slot{});
 
-        unique_path_set directories;
+        std::vector<capture_validation_job> jobs;
+        jobs.reserve(source_count);
 
         for (std::size_t index = 0;
-             index < sources.source_count();
+             index < source_count;
              ++index) {
 
             const source_id source{
                 static_cast<std::uint32_t>(index + 1)};
+
             const auto path_text =
                 sources.path(source);
+
             if (path_text.empty()) {
                 output.reset();
                 return {};
             }
 
-            const auto path =
+            capture_validation_job job;
+            job.path =
                 std::filesystem::path{path_text};
+
             const auto snapshot =
                 sources.current(source);
 
-            file_snapshot_observation observation;
-            bool missing = false;
-            if (!observe_regular_file(
-                    path,
-                    observation,
-                    missing)) {
-                output.reset();
-                return {};
+            if (snapshot) {
+                job.present = true;
+                job.expected_hash =
+                    snapshot.hash();
             }
 
-            if (snapshot) {
-                if (missing) {
-                    output.reset();
-                    return {status_code::rebuild_required};
-                }
+            jobs.push_back(
+                std::move(job));
+        }
 
-                file_snapshot verified;
-                const auto acquisition =
-                    acquire_file_snapshot(
-                        path,
-                        std::nullopt,
-                        verified);
+        std::vector<capture_validation_result>
+            validation(source_count);
 
-                if (acquisition ==
-                        file_snapshot_result::allocation_failed) {
-                    output.reset();
-                    return {status_code::not_available};
-                }
+        const auto worker_count =
+            parallel_capture_worker_count(
+                source_count);
 
-                if (acquisition !=
-                        file_snapshot_result::acquired) {
-                    output.reset();
-                    return acquisition ==
-                        file_snapshot_result::missing
-                        ? status{status_code::rebuild_required}
-                        : status{status_code::io_failed};
-                }
+        if (worker_count > 1) {
+            std::atomic<std::size_t> next{0};
+            std::vector<std::jthread> workers;
+            workers.reserve(worker_count);
 
-                if (verified.hash != snapshot.hash()) {
-                    output.reset();
-                    return {status_code::rebuild_required};
-                }
+            for (std::size_t worker = 0;
+                 worker < worker_count;
+                 ++worker) {
 
-                observed_file_identity identity;
-                if (!query_file_identity(
-                        path,
-                        identity) ||
-                    identity.volume_serial !=
-                        checkpoint.volume_serial) {
-                    output.reset();
-                    return {};
-                }
+                workers.emplace_back([&]() noexcept {
+                    for (;;) {
+                        const auto index =
+                            next.fetch_add(
+                                1,
+                                std::memory_order_relaxed);
 
-                if (!insert_file_identity(
+                        if (index >= source_count)
+                            return;
+
+                        validate_capture_job(
+                            jobs[index],
+                            checkpoint.volume_serial,
+                            validation[index]);
+                    }
+                });
+            }
+        }
+        else {
+            for (std::size_t index = 0;
+                 index < source_count;
+                 ++index) {
+
+                validate_capture_job(
+                    jobs[index],
+                    checkpoint.volume_serial,
+                    validation[index]);
+            }
+        }
+
+        unique_path_set directories;
+
+        // Publication remains serial and source-id ordered. Workers only write
+        // their own result slot, so identity/index order stays deterministic.
+        for (std::size_t index = 0;
+             index < source_count;
+             ++index) {
+
+            const source_id source{
+                static_cast<std::uint32_t>(index + 1)};
+
+            const auto& job =
+                jobs[index];
+            const auto& checked =
+                validation[index];
+
+            switch (checked.kind) {
+            case capture_validation_kind::valid:
+                break;
+
+            case capture_validation_kind::disable_capture:
+                output.reset();
+                return {};
+
+            case capture_validation_kind::rebuild_required:
+                output.reset();
+                return {status_code::rebuild_required};
+
+            case capture_validation_kind::io_failed:
+                output.reset();
+                return {status_code::io_failed};
+
+            case capture_validation_kind::not_available:
+                output.reset();
+                return {status_code::not_available};
+            }
+
+            if (job.present) {
+                if (checked.file_reference == 0 ||
+                    !insert_file_identity(
                         output.file_index,
-                        identity.file_reference,
+                        checked.file_reference,
                         source)) {
                     output.reset();
                     return {};
                 }
             }
-            else if (!missing) {
-                output.reset();
-                return {status_code::rebuild_required};
-            }
 
             const bool watch_arrival =
-                !snapshot && missing;
+                !job.present &&
+                checked.missing;
 
-            auto parent = path.parent_path();
-            const auto root = parent.root_path();
+            auto parent =
+                job.path.parent_path();
+            const auto root =
+                parent.root_path();
             bool first_parent = true;
 
             while (!parent.empty()) {
                 auto flags =
                     source_change_directory_watch_topology;
 
-                if (first_parent && watch_arrival) {
+                if (first_parent &&
+                    watch_arrival) {
                     flags |=
                         source_change_directory_watch_arrival;
                 }
 
+                bool directory_inserted = false;
                 const auto directory_result =
                     directories.insert(
                         parent,
-                        flags);
+                        flags,
+                        &directory_inserted);
 
                 if (!directory_result.ok()) {
                     output.reset();
@@ -1510,14 +1711,21 @@ status prepare_source_change_capture(
 
                 first_parent = false;
 
-                if (parent == root)
+                // An already-known directory implies that its full ancestor
+                // chain was published by the Source that first inserted it.
+                if (!directory_inserted ||
+                    parent == root) {
+                    break;
+                }
+
+                const auto next_parent =
+                    parent.parent_path();
+
+                if (next_parent == parent)
                     break;
 
-                const auto next =
-                    parent.parent_path();
-                if (next == parent)
-                    break;
-                parent = next;
+                parent =
+                    next_parent;
             }
         }
 
@@ -1541,6 +1749,7 @@ status prepare_source_change_capture(
              directories.values()) {
 
             observed_file_identity identity;
+
             if (!query_file_identity(
                     std::filesystem::path{
                         directory.path},
@@ -1556,7 +1765,8 @@ status prepare_source_change_capture(
             }
         }
 
-        output.checkpoint = checkpoint;
+        output.checkpoint =
+            checkpoint;
         return {};
     }
     catch (const std::bad_alloc&) {

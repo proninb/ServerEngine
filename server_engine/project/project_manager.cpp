@@ -97,38 +97,128 @@ status project_manager::load(
     if (!reserve_construction())
         return {status_code::invalid_state};
 
-    project_configuration configuration;
-    auto result = load_project_configuration_file(
-        configuration_path,
-        operation,
-        diagnostics,
-        configuration);
-
-    if (!result.ok()) {
-        abandon_construction();
-        return result;
-    }
-
-    baseline_fingerprint fingerprint;
-    result = make_project_baseline_fingerprint(
-        configuration,
-        fingerprint);
-    if (!result.ok()) {
-        abandon_construction();
-        return result;
-    }
-
     baseline_store store{configuration_path};
+    baseline_probe probe;
     baseline_snapshot snapshot;
-    result = store.open_ready(fingerprint, snapshot);
-    if (!result.ok()) {
-        abandon_construction();
-        return result;
+
+    auto result = store.open_current_ready(
+        probe,
+        snapshot);
+
+    project_configuration configuration;
+    bool fast_configuration = false;
+
+    if (result.ok() &&
+        probe.configuration.available &&
+        probe.configuration.change_token_available &&
+        probe.configuration.content_hash_available) {
+
+        if (probe.configuration.project_version !=
+                current_project_configuration_version ||
+            probe.configuration.abi_target >
+                static_cast<std::uint32_t>(
+                    abi_target::posix_x64)) {
+            abandon_construction();
+            return {status_code::artifact_corrupt};
+        }
+
+        configuration.version =
+            probe.configuration.project_version;
+        configuration.materialized = false;
+        configuration.abi.target =
+            static_cast<abi_target>(
+                probe.configuration.abi_target);
+        configuration.abi.pack =
+            probe.configuration.abi_pack;
+
+        if (!is_supported_abi_configuration(
+                configuration.abi)) {
+            abandon_construction();
+            return {status_code::artifact_corrupt};
+        }
+
+        bool unchanged = false;
+        const auto proof = prove_file_unchanged(
+            configuration_path,
+            probe.configuration.change_token,
+            unchanged);
+
+        if (proof.ok() && unchanged) {
+            fast_configuration = true;
+        }
+        else if (!proof.ok() &&
+                 proof.code != status_code::not_found) {
+            abandon_construction();
+            return proof;
+        }
     }
 
-    if (snapshot.mapped(baseline_artifact_kind::build_cache) ||
-        !snapshot.mapped(baseline_artifact_kind::compiled) ||
-        !snapshot.mapped(baseline_artifact_kind::source_manager)) {
+    if (!fast_configuration) {
+        configuration = {};
+
+        result = load_project_configuration_file(
+            configuration_path,
+            operation,
+            diagnostics,
+            configuration);
+        if (!result.ok()) {
+            abandon_construction();
+            return result;
+        }
+
+        baseline_fingerprint fingerprint;
+        result = make_project_baseline_fingerprint(
+            configuration,
+            fingerprint);
+        if (!result.ok()) {
+            abandon_construction();
+            return result;
+        }
+
+        if (snapshot.valid()) {
+            if (!(fingerprint == probe.fingerprint)) {
+                abandon_construction();
+                return {status_code::rebuild_required};
+            }
+        }
+        else {
+            result = store.open_ready(
+                fingerprint,
+                snapshot);
+            if (!result.ok()) {
+                abandon_construction();
+                return result;
+            }
+
+            if (snapshot.mapped(
+                    baseline_artifact_kind::build_cache) ||
+                !snapshot.mapped(
+                    baseline_artifact_kind::compiled) ||
+                !snapshot.mapped(
+                    baseline_artifact_kind::source_manager)) {
+                abandon_construction();
+                return {status_code::initialization_failed};
+            }
+
+            return activate_baseline_reserved(
+                std::move(configuration),
+                configuration_path,
+                std::move(snapshot),
+                &output);
+        }
+    }
+
+    if (!snapshot.mapped(
+            baseline_artifact_kind::compiled)) {
+        abandon_construction();
+        return {status_code::initialization_failed};
+    }
+
+
+    if (snapshot.mapped(
+            baseline_artifact_kind::build_cache) ||
+        !snapshot.mapped(
+            baseline_artifact_kind::compiled)) {
         abandon_construction();
         return {status_code::initialization_failed};
     }
@@ -145,7 +235,8 @@ status project_manager::build(
     operation_id operation,
     diagnostic_buffer& diagnostics,
     project_build_result& output,
-    std::size_t worker_limit) noexcept {
+    std::size_t worker_limit,
+    std::size_t acquisition_worker_limit) noexcept {
 
     output = {};
     const auto manager_begin = std::chrono::steady_clock::now();
@@ -304,6 +395,7 @@ status project_manager::build(
                 diagnostics,
                 output,
                 worker_limit,
+                    acquisition_worker_limit,
                 false);
         }
     }
@@ -500,6 +592,7 @@ status project_manager::build(
                     diagnostics,
                     output,
                     worker_limit,
+                    acquisition_worker_limit,
                     false);
             }
 
@@ -684,7 +777,8 @@ status project_manager::build(
 
         project_build_orchestrator builder{
             *candidate,
-            worker_limit};
+            worker_limit,
+            acquisition_worker_limit};
 
         result = builder.update(
             dirty_sources,
@@ -727,7 +821,8 @@ status project_manager::rebuild(
     operation_id operation,
     diagnostic_buffer& diagnostics,
     project_build_result& output,
-    std::size_t worker_limit) noexcept {
+    std::size_t worker_limit,
+    std::size_t acquisition_worker_limit) noexcept {
 
     output = {};
     if (!reserve_construction())
@@ -753,6 +848,7 @@ status project_manager::rebuild(
         diagnostics,
         output,
         worker_limit,
+                    acquisition_worker_limit,
         true);
 }
 
@@ -761,7 +857,8 @@ status project_manager::rebuild(
     operation_id operation,
     diagnostic_buffer& diagnostics,
     project_build_result& output,
-    std::size_t worker_limit) noexcept {
+    std::size_t worker_limit,
+    std::size_t acquisition_worker_limit) noexcept {
 
     output = {};
     if (!reserve_construction())
@@ -774,6 +871,7 @@ status project_manager::rebuild(
         diagnostics,
         output,
         worker_limit,
+                    acquisition_worker_limit,
         true);
 }
 
@@ -784,6 +882,7 @@ status project_manager::construct_reserved(
     diagnostic_buffer& diagnostics,
     project_build_result& output,
     std::size_t worker_limit,
+    std::size_t acquisition_worker_limit,
     bool mark_rebuild) noexcept {
 
     try {
@@ -804,7 +903,8 @@ status project_manager::construct_reserved(
 
         project_build_orchestrator builder{
             *candidate,
-            worker_limit};
+            worker_limit,
+            acquisition_worker_limit};
 
         const auto result =
             builder.construct(

@@ -1,4 +1,5 @@
 #include "source_manager_image.hpp"
+#include "crc64_ecma.hpp"
 
 #include <algorithm>
 #include <array>
@@ -114,21 +115,6 @@ void write_i64(std::byte* target, std::int64_t value) noexcept {
 
 [[nodiscard]] std::int64_t read_i64(const std::byte* source) noexcept {
     return static_cast<std::int64_t>(read_u64(source));
-}
-
-constexpr std::uint64_t crc64_polynomial = 0x42f0e1eba9ea3693ULL;
-
-[[nodiscard]] std::uint64_t crc64(std::span<const std::byte> bytes) noexcept {
-    std::uint64_t crc = 0;
-    for (const auto byte : bytes) {
-        crc ^= static_cast<std::uint64_t>(byte) << 56;
-        for (unsigned bit = 0; bit < 8; ++bit) {
-            crc = (crc & (std::uint64_t{1} << 63)) != 0
-                ? (crc << 1) ^ crc64_polynomial
-                : crc << 1;
-        }
-    }
-    return crc;
 }
 
 [[nodiscard]] constexpr std::uint64_t mix64(std::uint64_t value) noexcept {
@@ -345,13 +331,13 @@ status source_manager_image_view::bind(std::span<const std::byte> image) noexcep
     const auto stored_header_crc =
         read_u64(header.data() + header_crc_offset);
     write_u64(header.data() + header_crc_offset, 0);
-    if (crc64(header) != stored_header_crc)
+    if (persistence_crc64(header) != stored_header_crc)
         return {status_code::artifact_corrupt};
 
     const auto directory_crc =
         read_u64(image.data() + header_directory_crc_offset);
     const auto directory_span = image.subspan(directory_offset, directory_bytes);
-    if (crc64(directory_span) != directory_crc)
+    if (persistence_crc64(directory_span) != directory_crc)
         return {status_code::artifact_corrupt};
 
     section_view candidate[source_manager_image_directory_count]{};
@@ -758,7 +744,7 @@ status source_manager_image_view::verify_contents() const noexcept {
             return {status_code::artifact_corrupt};
         }
 
-        if (crc64(std::span<const std::byte>{
+        if (persistence_crc64(std::span<const std::byte>{
                 item.data, static_cast<std::size_t>(byte_count)}) != item.crc64) {
             return {status_code::artifact_corrupt};
         }
@@ -1058,7 +1044,7 @@ status encode_source_manager_image(
             return {status_code::not_available};
         }
 
-        item.crc64 = crc64(std::span<const std::byte>{
+        item.crc64 = persistence_crc64(std::span<const std::byte>{
             base + static_cast<std::size_t>(item.offset),
             static_cast<std::size_t>(byte_count)});
     }
@@ -1103,14 +1089,14 @@ status encode_source_manager_image(
         write_u64(entry + 24, item.crc64);
     }
 
-    const auto directory_crc = crc64(std::span<const std::byte>{
+    const auto directory_crc = persistence_crc64(std::span<const std::byte>{
         base + directory_offset, directory_bytes});
     write_u64(base + header_directory_crc_offset, directory_crc);
 
     std::array<std::byte, source_manager_image_header_size> header{};
     std::memcpy(header.data(), base, header.size());
     write_u64(header.data() + header_crc_offset, 0);
-    const auto header_crc = crc64(header);
+    const auto header_crc = persistence_crc64(header);
     write_u64(base + header_crc_offset, header_crc);
 
     source_manager_image_view validation;

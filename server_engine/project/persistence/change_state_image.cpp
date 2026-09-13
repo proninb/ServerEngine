@@ -1,4 +1,5 @@
 #include "change_state_image.hpp"
+#include "crc64_ecma.hpp"
 
 #include <algorithm>
 #include <array>
@@ -95,25 +96,6 @@ void write_u64(std::byte* target, std::uint64_t value) noexcept {
             (index * 8);
     }
     return value;
-}
-
-constexpr std::uint64_t crc64_polynomial =
-    0x42f0e1eba9ea3693ULL;
-
-[[nodiscard]] std::uint64_t crc64(
-    std::span<const std::byte> value) noexcept {
-    std::uint64_t crc = 0;
-    for (const auto byte : value) {
-        crc ^=
-            static_cast<std::uint64_t>(
-                std::to_integer<std::uint8_t>(byte)) << 56;
-        for (unsigned bit = 0; bit < 8; ++bit) {
-            crc = (crc & (std::uint64_t{1} << 63)) != 0
-                ? (crc << 1) ^ crc64_polynomial
-                : crc << 1;
-        }
-    }
-    return crc;
 }
 
 [[nodiscard]] constexpr std::uint64_t mix64(
@@ -279,13 +261,13 @@ void bloom_add(
     std::memcpy(header.data(), image.data(), header.size());
     write_u64(header.data() + 96, 0);
 
-    if (crc64(header) != stored_header_crc)
+    if (persistence_crc64(header) != stored_header_crc)
         return {status_code::artifact_corrupt};
 
     const auto directory_span =
         image.subspan(directory_offset, expected_directory_bytes);
 
-    if (crc64(directory_span) != read_u64(image.data() + 104))
+    if (persistence_crc64(directory_span) != read_u64(image.data() + 104))
         return {status_code::artifact_corrupt};
 
     const auto stored_source_count =
@@ -935,10 +917,10 @@ status change_state_image_view::verify_contents() const noexcept {
                 journal_anchor_path.size()};
 
         return
-            crc64(source_bytes) == source_bloom_crc &&
-            crc64(topology_bytes) == topology_bloom_crc &&
-            crc64(arrival_bytes) == arrival_bloom_crc &&
-            crc64(anchor_bytes) == anchor_crc
+            persistence_crc64(source_bytes) == source_bloom_crc &&
+            persistence_crc64(topology_bytes) == topology_bloom_crc &&
+            persistence_crc64(arrival_bytes) == arrival_bloom_crc &&
+            persistence_crc64(anchor_bytes) == anchor_crc
             ? status{}
             : status{status_code::artifact_corrupt};
     }
@@ -948,7 +930,7 @@ status change_state_image_view::verify_contents() const noexcept {
             directory_index,
             directory_index_count * directory_slot_size};
 
-    if (crc64(directory_bytes_view) != directory_index_crc)
+    if (persistence_crc64(directory_bytes_view) != directory_index_crc)
         return {status_code::artifact_corrupt};
 
     const auto anchor_entry_index =
@@ -964,7 +946,7 @@ status change_state_image_view::verify_contents() const noexcept {
                 journal_anchor_path.data()),
             journal_anchor_path.size()};
 
-    if (crc64(anchor_bytes) != read_u64(anchor_entry + 24))
+    if (persistence_crc64(anchor_bytes) != read_u64(anchor_entry + 24))
         return {status_code::artifact_corrupt};
 
     if (format_version_value == 1) {
@@ -973,7 +955,7 @@ status change_state_image_view::verify_contents() const noexcept {
                 legacy_file_index,
                 file_index_count * v1_file_slot_size};
 
-        return crc64(file_bytes) == legacy_file_index_crc
+        return persistence_crc64(file_bytes) == legacy_file_index_crc
             ? status{}
             : status{status_code::artifact_corrupt};
     }
@@ -992,9 +974,9 @@ status change_state_image_view::verify_contents() const noexcept {
             file_index_count * file_source_size};
 
     return
-        crc64(control_bytes) == file_control_crc &&
-        crc64(reference_bytes) == file_reference_crc &&
-        crc64(source_bytes) == file_source_crc
+        persistence_crc64(control_bytes) == file_control_crc &&
+        persistence_crc64(reference_bytes) == file_reference_crc &&
+        persistence_crc64(source_bytes) == file_source_crc
         ? status{}
         : status{status_code::artifact_corrupt};
 }
@@ -1258,23 +1240,23 @@ status encode_change_state_image(
 
         write_u64(
             source_entry + 24,
-            crc64(source_filter));
+            persistence_crc64(source_filter));
         write_u64(
             topology_entry + 24,
-            crc64(topology_filter));
+            persistence_crc64(topology_filter));
         write_u64(
             arrival_entry + 24,
-            crc64(arrival_filter));
+            persistence_crc64(arrival_filter));
         write_u64(
             anchor_entry + 24,
-            crc64(
+            persistence_crc64(
                 std::span<const std::byte>{
                     anchor_target,
                     journal_anchor_path.size()}));
 
         write_u64(
             output.data() + 104,
-            crc64(
+            persistence_crc64(
                 std::span<const std::byte>{
                     output}.subspan(
                         directory_offset,
@@ -1285,7 +1267,7 @@ status encode_change_state_image(
             0);
         write_u64(
             output.data() + 96,
-            crc64(
+            persistence_crc64(
                 std::span<const std::byte>{
                     output}.first(
                         header_size)));

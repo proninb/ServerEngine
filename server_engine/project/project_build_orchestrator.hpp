@@ -68,9 +68,12 @@ class project_build_orchestrator final {
 public:
     explicit project_build_orchestrator(
         project_context& project_value,
-        std::size_t worker_limit_value = 0) noexcept
+        std::size_t worker_limit_value = 0,
+        std::size_t acquisition_worker_limit_value = 0) noexcept
         : project(project_value),
-          worker_limit(worker_limit_value) {}
+          worker_limit(worker_limit_value),
+          acquisition_worker_limit(
+              acquisition_worker_limit_value) {}
 
     // Builds directly into a construction-only Project Context. Failure leaves
     // that candidate disposable; project_manager destroys it and returns UNLOADED.
@@ -99,6 +102,7 @@ private:
 
     project_context& project;
     std::size_t worker_limit = 0;
+    std::size_t acquisition_worker_limit = 0;
 };
 
 } // namespace cw::server

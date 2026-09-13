@@ -20,14 +20,19 @@ using build_clock = std::chrono::steady_clock;
 
 [[nodiscard]] status collect_roots(
     const project_configuration& configuration,
-    std::vector<std::filesystem::path>& roots) noexcept {
+    std::vector<std::filesystem::path>& roots,
+    bool& roots_are_canonical) noexcept {
 
     try {
         roots.clear();
         roots.reserve(configuration.project.size());
+        roots_are_canonical = true;
         for (const auto& item : configuration.project) {
             if (item.role == project_item_role::project)
                 return {status_code::not_available};
+            roots_are_canonical =
+                roots_are_canonical &&
+                item.canonical_path;
             roots.push_back(item.path);
         }
         return roots.empty() ? status{status_code::invalid_argument} : status{};
@@ -118,18 +123,31 @@ status project_build_orchestrator::rebuild_current(
 
     try {
         std::vector<std::filesystem::path> roots;
-        auto result = collect_roots(project.configuration(), roots);
+        bool roots_are_canonical = false;
+        auto result = collect_roots(
+            project.configuration(),
+            roots,
+            roots_are_canonical);
         if (!result.ok())
             return result;
 
         auto& state = project.mutable_compiled();
         auto semantic = project.parser_services();
         auto source_update = state.sources.begin_update();
-        source_frontend_generation frontend_builder{semantic, source_update, worker_limit};
+        source_frontend_generation frontend_builder{
+            semantic,
+            source_update,
+            worker_limit,
+            acquisition_worker_limit};
         source_frontend_result frontend;
 
         const auto frontend_begin = build_clock::now();
-        result = frontend_builder.build(roots, operation, diagnostics, frontend);
+        result = frontend_builder.build(
+            roots,
+            operation,
+            diagnostics,
+            frontend,
+            roots_are_canonical);
         const auto frontend_end = build_clock::now();
         output.telemetry.frontend_ns = elapsed_ns(frontend_begin, frontend_end);
         output.telemetry.frontend = frontend.summary();
@@ -225,7 +243,11 @@ status project_build_orchestrator::update(
         auto semantic = project.parser_services();
         auto source_update = state.sources.begin_update();
         source_frontend_generation frontend_builder{
-            semantic, source_update, state.frontend_cache, worker_limit};
+            semantic,
+            source_update,
+            state.frontend_cache,
+            worker_limit,
+            acquisition_worker_limit};
         source_frontend_result frontend;
 
         const auto frontend_begin = build_clock::now();

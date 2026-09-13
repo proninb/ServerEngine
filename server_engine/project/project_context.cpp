@@ -55,6 +55,15 @@ status project_context::activate_ready_baseline(
         set_build_fingerprint(owner->fingerprint());
         baseline = std::move(owner);
         compiled.reset();
+
+        if (mapped_sources.valid()) {
+            source_mapping_status = {};
+            source_mapping_attempted = true;
+            source_mapping_ready.store(
+                true,
+                std::memory_order_release);
+        }
+
         return {};
     }
     catch (const std::bad_alloc&) {
@@ -103,6 +112,13 @@ status project_context::activate_build_baseline(
             mapped_compiled,
             mapped_sources,
             mapped_build_cache);
+
+        source_mapping_status = {};
+        source_mapping_attempted = true;
+        source_mapping_ready.store(
+            true,
+            std::memory_order_release);
+
         return {};
     }
     catch (const std::bad_alloc&) {
@@ -113,10 +129,18 @@ status project_context::activate_build_baseline(
 
 
 status project_context::ensure_sources_mapped() const noexcept {
-    std::lock_guard<std::mutex> lock{source_mapping_mutex};
-
-    if (mapped_sources.valid())
+    if (source_mapping_ready.load(
+            std::memory_order_acquire)) {
         return {};
+    }
+
+    std::lock_guard<std::mutex> lock{
+        source_mapping_mutex};
+
+    if (source_mapping_ready.load(
+            std::memory_order_relaxed)) {
+        return {};
+    }
 
     if (source_mapping_attempted)
         return source_mapping_status;
@@ -126,16 +150,21 @@ status project_context::ensure_sources_mapped() const noexcept {
     if (baseline == nullptr ||
         !baseline->valid() ||
         !build_fingerprint_available) {
-        source_mapping_status = {status_code::invalid_state};
+        source_mapping_status = {
+            status_code::invalid_state};
         return source_mapping_status;
     }
 
-    if (!baseline->mapped(baseline_artifact_kind::source_manager)) {
-        baseline_store store{project_configuration_path};
+    if (!baseline->mapped(
+            baseline_artifact_kind::source_manager)) {
+        baseline_store store{
+            project_configuration_path};
+
         auto result = store.map_source_manager(
             build_fingerprint_value,
             baseline->transaction(),
             *baseline);
+
         if (!result.ok()) {
             source_mapping_status = result;
             return result;
@@ -143,8 +172,19 @@ status project_context::ensure_sources_mapped() const noexcept {
     }
 
     auto result = mapped_sources.bind(
-        baseline->artifact(baseline_artifact_kind::source_manager));
+        baseline->artifact(
+            baseline_artifact_kind::source_manager));
+
     source_mapping_status = result;
+
+    if (result.ok()) {
+        // Release publishes mapped_sources and the mapped baseline ownership.
+        // Warm readers need only the acquire load above and never enter mutex.
+        source_mapping_ready.store(
+            true,
+            std::memory_order_release);
+    }
+
     return result;
 }
 

@@ -1,4 +1,5 @@
 #include "build_cache_image.hpp"
+#include "crc64_ecma.hpp"
 
 #include "compiled_image.hpp"
 #include "source_manager_image.hpp"
@@ -11,6 +12,10 @@
 #include <limits>
 #include <new>
 #include <stdexcept>
+#include <atomic>
+#include <thread>
+#include <system_error>
+#include <vector>
 
 namespace cw::server {
 namespace {
@@ -144,23 +149,6 @@ void write_u64(std::byte* target, std::uint64_t value) noexcept {
     for (std::size_t index = 0; index < 8; ++index)
         value |= static_cast<std::uint64_t>(source[index]) << (index * 8);
     return value;
-}
-
-constexpr std::uint64_t crc64_polynomial = 0x42f0e1eba9ea3693ULL;
-
-[[nodiscard]] std::uint64_t crc64(
-    std::span<const std::byte> bytes) noexcept {
-
-    std::uint64_t crc = 0;
-    for (const auto byte : bytes) {
-        crc ^= static_cast<std::uint64_t>(byte) << 56;
-        for (unsigned bit = 0; bit < 8; ++bit) {
-            crc = (crc & (std::uint64_t{1} << 63)) != 0
-                ? (crc << 1) ^ crc64_polynomial
-                : crc << 1;
-        }
-    }
-    return crc;
 }
 
 [[nodiscard]] bool zero_bytes(
@@ -433,12 +421,12 @@ status build_cache_image_view::bind(
     const auto stored_header_crc =
         read_u64(header.data() + header_crc_offset);
     write_u64(header.data() + header_crc_offset, 0);
-    if (crc64(header) != stored_header_crc)
+    if (persistence_crc64(header) != stored_header_crc)
         return {status_code::artifact_corrupt};
 
     const auto directory_span =
         image.subspan(directory_offset, directory_bytes);
-    if (crc64(directory_span) !=
+    if (persistence_crc64(directory_span) !=
         read_u64(image.data() + header_directory_crc_offset)) {
         return {status_code::artifact_corrupt};
     }
@@ -1547,7 +1535,8 @@ std::size_t build_cache_image_view::named_ref_count() const noexcept {
         section(build_cache_image_section::graph_named_refs).count);
 }
 
-status build_cache_image_view::verify_contents() const noexcept {
+status build_cache_image_view::verify_contents(
+    bool verify_section_crc) const noexcept {
     if (!valid())
         return {status_code::invalid_state};
 
@@ -1558,7 +1547,8 @@ status build_cache_image_view::verify_contents() const noexcept {
             return {status_code::artifact_corrupt};
         }
 
-        if (crc64(std::span<const std::byte>{
+        if (verify_section_crc &&
+            persistence_crc64(std::span<const std::byte>{
                 value.data,
                 static_cast<std::size_t>(byte_count)}) != value.crc64) {
             return {status_code::artifact_corrupt};
@@ -1978,96 +1968,212 @@ status build_cache_image_view::verify_against(
         return {status_code::artifact_corrupt};
     }
 
-    for (std::size_t index = 0; index < source_count_value; ++index) {
-        const source_id source_value{
-            static_cast<std::uint32_t>(index + 1)};
+    const auto verify_source =
+        [&](std::size_t index) noexcept {
+            const source_id source_value{
+                static_cast<std::uint32_t>(index + 1)};
 
-        build_cache_source_record record;
-        source_manager_image_physical_state physical;
-        if (!source(source_value, record).ok() ||
-            !sources.physical(source_value, physical).ok()) {
-            return {status_code::artifact_corrupt};
+            build_cache_source_record record;
+            source_manager_image_physical_state physical;
+            if (!source(source_value, record).ok() ||
+                !sources.physical(source_value, physical).ok()) {
+                return false;
+            }
+
+            if (record.snapshot_present != physical.present)
+                return false;
+
+            if (record.snapshot_present) {
+                const auto text = source_text(source_value);
+                if (text.size() != record.text_length ||
+                    physical.size != text.size() ||
+                    hash_source_content(text) != physical.hash) {
+                    return false;
+                }
+            }
+
+            if (!record.frontend_present)
+                return true;
+
+            for (std::size_t local = 0;
+                 local < record.local_types.count;
+                 ++local) {
+
+                identity_ref identity;
+                if (!frontend_local_type(
+                        source_value,
+                        local,
+                        identity).ok() ||
+                    !compiled.identity_valid(identity) ||
+                    identity.kind() != identity_kind::type) {
+                    return false;
+                }
+            }
+
+            for (std::size_t local = 0;
+                 local < record.type_slots.count;
+                 ++local) {
+
+                source_interface_type_slot slot;
+                if (!frontend_type_slot(
+                        source_value,
+                        local,
+                        slot).ok()) {
+                    return false;
+                }
+
+                if (!slot.identity)
+                    continue;
+
+                if (!compiled.identity_valid(slot.parent) ||
+                    !compiled.identity_valid(slot.identity) ||
+                    slot.identity.kind() != identity_kind::type ||
+                    compiled.string(slot.name).empty()) {
+                    return false;
+                }
+            }
+
+            for (std::size_t local = 0;
+                 local < record.object_slots.count;
+                 ++local) {
+
+                source_interface_object_slot slot;
+                if (!frontend_object_slot(
+                        source_value,
+                        local,
+                        slot).ok()) {
+                    return false;
+                }
+
+                if (!slot.identity)
+                    continue;
+
+                if (!compiled.identity_valid(slot.parent) ||
+                    !compiled.identity_valid(slot.identity) ||
+                    slot.identity.kind() != identity_kind::object ||
+                    compiled.string(slot.name).empty() ||
+                    (slot.named_type &&
+                     (!compiled.identity_valid(slot.named_type) ||
+                      slot.named_type.kind() != identity_kind::type))) {
+                    return false;
+                }
+            }
+
+            for (std::size_t local = 0;
+                 local < record.member_slots.count;
+                 ++local) {
+
+                source_interface_member_slot slot;
+                if (!frontend_member_slot(
+                        source_value,
+                        local,
+                        slot).ok()) {
+                    return false;
+                }
+
+                if (!slot.type)
+                    continue;
+
+                if (!compiled.identity_valid(slot.type) ||
+                    slot.type.kind() != identity_kind::type ||
+                    compiled.string(slot.name).empty()) {
+                    return false;
+                }
+            }
+
+            return true;
+        };
+
+    const auto parallel_verify_source_count =
+        source_count_value;
+
+    auto verify_sources_serial = [&]() noexcept {
+        for (std::size_t index = 0;
+             index < parallel_verify_source_count;
+             ++index) {
+
+            if (!verify_source(index))
+                return false;
         }
 
-        if (record.snapshot_present != physical.present)
-            return {status_code::artifact_corrupt};
+        return true;
+    };
 
-        if (record.snapshot_present) {
-            const auto text = source_text(source_value);
-            if (text.size() != record.text_length ||
-                physical.size != text.size() ||
-                hash_source_content(text) != physical.hash) {
+    if (parallel_verify_source_count != 0) {
+        auto worker_count =
+            static_cast<std::size_t>(
+                std::thread::hardware_concurrency());
+
+        if (worker_count == 0)
+            worker_count = 1;
+
+        worker_count =
+            (std::min)(
+                worker_count,
+                parallel_verify_source_count);
+
+        if (worker_count == 1) {
+            if (!verify_sources_serial())
                 return {status_code::artifact_corrupt};
-            }
         }
+        else {
+            std::atomic<std::size_t> next_source{0};
+            std::atomic<bool> source_failed{false};
+            bool parallel_started = false;
 
-        if (!record.frontend_present)
-            continue;
+            try {
+                std::vector<std::jthread> workers;
+                workers.reserve(worker_count);
 
-        for (std::size_t local = 0;
-             local < record.local_types.count;
-             ++local) {
-            identity_ref identity;
-            if (!frontend_local_type(
-                    source_value, local, identity).ok() ||
-                !compiled.identity_valid(identity) ||
-                identity.kind() != identity_kind::type) {
-                return {status_code::artifact_corrupt};
-            }
-        }
+                for (std::size_t worker = 0;
+                     worker < worker_count;
+                     ++worker) {
 
-        for (std::size_t local = 0;
-             local < record.type_slots.count;
-             ++local) {
-            source_interface_type_slot slot;
-            if (!frontend_type_slot(
-                    source_value, local, slot).ok()) {
-                return {status_code::artifact_corrupt};
-            }
-            if (!slot.identity)
-                continue;
-            if (!compiled.identity_valid(slot.parent) ||
-                !compiled.identity_valid(slot.identity) ||
-                slot.identity.kind() != identity_kind::type ||
-                compiled.string(slot.name).empty()) {
-                return {status_code::artifact_corrupt};
-            }
-        }
+                    workers.emplace_back([&]() noexcept {
+                        for (;;) {
+                            if (source_failed.load(
+                                    std::memory_order_relaxed)) {
+                                return;
+                            }
 
-        for (std::size_t local = 0;
-             local < record.object_slots.count;
-             ++local) {
-            source_interface_object_slot slot;
-            if (!frontend_object_slot(
-                    source_value, local, slot).ok()) {
-                return {status_code::artifact_corrupt};
-            }
-            if (!slot.identity)
-                continue;
-            if (!compiled.identity_valid(slot.parent) ||
-                !compiled.identity_valid(slot.identity) ||
-                slot.identity.kind() != identity_kind::object ||
-                compiled.string(slot.name).empty() ||
-                (slot.named_type &&
-                 (!compiled.identity_valid(slot.named_type) ||
-                  slot.named_type.kind() != identity_kind::type))) {
-                return {status_code::artifact_corrupt};
-            }
-        }
+                            const auto index =
+                                next_source.fetch_add(
+                                    1,
+                                    std::memory_order_relaxed);
 
-        for (std::size_t local = 0;
-             local < record.member_slots.count;
-             ++local) {
-            source_interface_member_slot slot;
-            if (!frontend_member_slot(
-                    source_value, local, slot).ok()) {
-                return {status_code::artifact_corrupt};
+                            if (index >=
+                                parallel_verify_source_count) {
+                                return;
+                            }
+
+                            if (!verify_source(index)) {
+                                source_failed.store(
+                                    true,
+                                    std::memory_order_relaxed);
+                                return;
+                            }
+                        }
+                    });
+                }
+
+                parallel_started = true;
             }
-            if (!slot.type)
-                continue;
-            if (!compiled.identity_valid(slot.type) ||
-                slot.type.kind() != identity_kind::type ||
-                compiled.string(slot.name).empty()) {
+            catch (const std::bad_alloc&) {
+                parallel_started = false;
+            }
+            catch (const std::length_error&) {
+                parallel_started = false;
+            }
+            catch (const std::system_error&) {
+                parallel_started = false;
+            }
+
+            if (!parallel_started) {
+                if (!verify_sources_serial())
+                    return {status_code::artifact_corrupt};
+            }
+            else if (source_failed.load(
+                         std::memory_order_relaxed)) {
                 return {status_code::artifact_corrupt};
             }
         }
@@ -2881,21 +2987,90 @@ status encode_build_cache_image(
         write_u32(target + 12, 0);
     }
 
-    for (auto& value : layout) {
-        std::uint64_t byte_count = 0;
-        if (!multiply_u64(
-                value.count,
-                value.record_size,
-                byte_count) ||
-            byte_count >
-                (std::numeric_limits<std::size_t>::max)()) {
+    const auto parallel_crc_worker_count =
+        (std::min)(
+            layout.size(),
+            (std::max)(
+                std::size_t{1},
+                static_cast<std::size_t>(
+                    std::thread::hardware_concurrency())));
+
+    std::atomic<std::size_t> next_crc_section{0};
+    std::atomic<bool> crc_failed{false};
+
+    const auto crc_worker = [&]() noexcept {
+        for (;;) {
+            if (crc_failed.load(
+                    std::memory_order_relaxed)) {
+                return;
+            }
+
+            const auto index =
+                next_crc_section.fetch_add(
+                    1,
+                    std::memory_order_relaxed);
+
+            if (index >= layout.size())
+                return;
+
+            auto& value = layout[index];
+            std::uint64_t byte_count = 0;
+            if (!multiply_u64(
+                    value.count,
+                    value.record_size,
+                    byte_count) ||
+                byte_count >
+                    (std::numeric_limits<std::size_t>::max)()) {
+                crc_failed.store(
+                    true,
+                    std::memory_order_relaxed);
+                return;
+            }
+
+            value.crc64 = persistence_crc64(std::span<const std::byte>{
+                base + static_cast<std::size_t>(value.offset),
+                static_cast<std::size_t>(byte_count)});
+
+        }
+    };
+
+    if (parallel_crc_worker_count == 1) {
+        crc_worker();
+    }
+    else {
+        try {
+            std::vector<std::jthread> crc_workers;
+            crc_workers.reserve(
+                parallel_crc_worker_count);
+
+            for (std::size_t worker = 0;
+                 worker < parallel_crc_worker_count;
+                 ++worker) {
+
+                crc_workers.emplace_back(
+                    [&]() noexcept {
+                        crc_worker();
+                    });
+            }
+        }
+        catch (const std::bad_alloc&) {
             output.clear();
             return {status_code::not_available};
         }
+        catch (const std::length_error&) {
+            output.clear();
+            return {status_code::not_available};
+        }
+        catch (const std::system_error&) {
+            output.clear();
+            return {status_code::not_available};
+        }
+    }
 
-        value.crc64 = crc64(std::span<const std::byte>{
-            base + static_cast<std::size_t>(value.offset),
-            static_cast<std::size_t>(byte_count)});
+    if (crc_failed.load(
+            std::memory_order_relaxed)) {
+        output.clear();
+        return {status_code::not_available};
     }
 
     std::copy(image_magic.begin(), image_magic.end(), base);
@@ -2974,7 +3149,7 @@ status encode_build_cache_image(
 
     write_u64(
         base + header_directory_crc_offset,
-        crc64(std::span<const std::byte>{
+        persistence_crc64(std::span<const std::byte>{
             base + directory_offset,
             directory_bytes}));
 
@@ -2983,7 +3158,7 @@ status encode_build_cache_image(
     write_u64(header.data() + header_crc_offset, 0);
     write_u64(
         base + header_crc_offset,
-        crc64(header));
+        persistence_crc64(header));
 
     build_cache_image_view validation;
     auto result = validation.bind(output);
@@ -2992,7 +3167,10 @@ status encode_build_cache_image(
         return result;
     }
 
-    result = validation.verify_contents();
+    result = // Section CRCs were computed from these exact completed bytes above.
+    // Recomputing them here is a duplicate full-image scan; keep every
+    // structural/range/index/statistics check but skip CRC recomputation.
+    validation.verify_contents(false);
     if (!result.ok()) {
         output.clear();
         return result;

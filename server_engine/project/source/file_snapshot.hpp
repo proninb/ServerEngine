@@ -29,13 +29,26 @@ enum class file_snapshot_result : std::uint8_t {
     allocation_failed,
 };
 
+// Native identity observed from the same stable file handle used for content
+// acquisition. It is transient acquisition metadata and is never persisted.
+struct file_snapshot_identity final {
+    std::uint64_t volume_serial = 0;
+    std::uint64_t file_reference = 0;
+
+    [[nodiscard]] constexpr explicit operator bool() const noexcept {
+        return volume_serial != 0 && file_reference != 0;
+    }
+};
+
 // Owns one stable filesystem read before Source Manager turns it into an immutable
 // project Source snapshot. changed_during_read is reported rather than published.
 struct file_snapshot final {
     file_snapshot_observation observation{};
     source_content_hash hash{};
     std::string bytes;
+    file_snapshot_identity identity{};
 };
+
 
 [[nodiscard]] file_snapshot_result acquire_file_snapshot(
     const std::filesystem::path& path,

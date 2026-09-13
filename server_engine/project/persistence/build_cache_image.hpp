@@ -246,7 +246,8 @@ public:
 
     // Cold full-image audit. This validates section CRCs and all internal ranges,
     // sentinels, hash-table occupancy, dependency chains, and live statistics.
-    [[nodiscard]] status verify_contents() const noexcept;
+    [[nodiscard]] status verify_contents(
+        bool verify_section_crc = true) const noexcept;
 
     // Cross-artifact audit used by SAVE/maintenance tests. Fast LOAD does not
     // require this pass.
@@ -285,7 +286,8 @@ private:
     bool contributions_complete_value = false;
 };
 
-// Deterministic field-wise little-endian staging encoder for build_cache.bin v2.
+// Deterministic field-wise little-endian staging encoder for the persisted
+// Build Cache v2 image.
 // It walks dense source_id and existing append-arena order only; no sort or
 // runtime hash-table traversal is used.
 [[nodiscard]] status encode_build_cache_image(

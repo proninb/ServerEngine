@@ -1,4 +1,5 @@
 #include "compiled_image.hpp"
+#include "crc64_ecma.hpp"
 
 #include "../project_context.hpp"
 
@@ -125,24 +126,6 @@ void write_u64(std::byte* target, std::uint64_t value) noexcept {
     for (std::size_t index = 0; index < 8; ++index)
         value |= static_cast<std::uint64_t>(source[index]) << (index * 8);
     return value;
-}
-
-constexpr std::uint64_t crc64_polynomial =
-    0x42f0e1eba9ea3693ULL;
-
-[[nodiscard]] std::uint64_t crc64(
-    std::span<const std::byte> bytes) noexcept {
-
-    std::uint64_t crc = 0;
-    for (const auto byte : bytes) {
-        crc ^= static_cast<std::uint64_t>(byte) << 56;
-        for (unsigned bit = 0; bit < 8; ++bit) {
-            crc = (crc & (std::uint64_t{1} << 63)) != 0
-                ? (crc << 1) ^ crc64_polynomial
-                : crc << 1;
-        }
-    }
-    return crc;
 }
 
 [[nodiscard]] constexpr std::uint64_t mix64(std::uint64_t value) noexcept {
@@ -346,12 +329,12 @@ status compiled_image_view::bind(
     const auto stored_header_crc =
         read_u64(header.data() + header_crc_offset);
     write_u64(header.data() + header_crc_offset, 0);
-    if (crc64(header) != stored_header_crc)
+    if (persistence_crc64(header) != stored_header_crc)
         return {status_code::artifact_corrupt};
 
     const auto directory_span =
         image.subspan(directory_offset, directory_bytes);
-    if (crc64(directory_span) !=
+    if (persistence_crc64(directory_span) !=
         read_u64(image.data() + header_directory_crc_offset)) {
         return {status_code::artifact_corrupt};
     }
@@ -1418,7 +1401,7 @@ status compiled_image_view::verify_contents() const noexcept {
             return {status_code::artifact_corrupt};
         }
 
-        if (crc64(std::span<const std::byte>{
+        if (persistence_crc64(std::span<const std::byte>{
                 value.data,
                 static_cast<std::size_t>(byte_count)}) != value.crc64) {
             return {status_code::artifact_corrupt};
@@ -2396,7 +2379,7 @@ status encode_compiled_image(
             return {status_code::not_available};
         }
 
-        value.crc64 = crc64(std::span<const std::byte>{
+        value.crc64 = persistence_crc64(std::span<const std::byte>{
             base + static_cast<std::size_t>(value.offset),
             static_cast<std::size_t>(byte_count)});
     }
@@ -2442,7 +2425,7 @@ status encode_compiled_image(
         write_u64(entry + 24, value.crc64);
     }
 
-    const auto directory_crc = crc64(std::span<const std::byte>{
+    const auto directory_crc = persistence_crc64(std::span<const std::byte>{
         base + directory_offset,
         directory_bytes});
     write_u64(
@@ -2454,7 +2437,7 @@ status encode_compiled_image(
     write_u64(header.data() + header_crc_offset, 0);
     write_u64(
         base + header_crc_offset,
-        crc64(header));
+        persistence_crc64(header));
 
     compiled_image_view validation;
     const auto bind_result = validation.bind(output);

@@ -441,6 +441,7 @@ private:
     std::unique_ptr<baseline_snapshot> baseline;
     compiled_image_view mapped_compiled;
     mutable source_manager_image_view mapped_sources;
+    mutable std::atomic<bool> source_mapping_ready{false};
     mutable std::mutex source_mapping_mutex;
     mutable status source_mapping_status{};
     mutable bool source_mapping_attempted = false;

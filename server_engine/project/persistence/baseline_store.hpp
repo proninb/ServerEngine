@@ -138,8 +138,8 @@ private:
 
     read_only_file_mapping build_cache;
 
-    // New SAVE transactions may physically append build_cache.bin bytes to
-    // source_manager.bin. Logical artifact spans remain independent.
+    // New SAVE transactions may physically append the logical Build Cache
+    // image to source_manager.bin. Logical artifact spans remain independent.
     std::uint64_t source_manager_size_value = 0;
     std::uint64_t build_cache_size_value = 0;
     bool packed_build_state = false;
@@ -170,6 +170,13 @@ public:
         baseline_snapshot& output,
         baseline_open_telemetry* telemetry = nullptr) const noexcept;
 
+    // LOAD fast path: reads only the CURRENT selector header + embedded
+    // manifest and maps compiled.bin. Source Manager remains lazy.
+    [[nodiscard]] status open_current_ready(
+        baseline_probe& probe,
+        baseline_snapshot& output,
+        baseline_open_telemetry* telemetry = nullptr) const noexcept;
+
 
     // BUILD/SAVE boundary: maps all three artifacts.
     [[nodiscard]] status open(
@@ -177,7 +184,8 @@ public:
         baseline_snapshot& output) const noexcept;
 
     // Fast LOAD boundary: maps compiled.bin and source_manager.bin only.
-    // build_cache.bin is not opened and therefore cannot fault on READY LOAD.
+    // The logical Build Cache artifact is not opened and therefore cannot
+    // fault on READY LOAD.
     [[nodiscard]] status open_ready(
         const baseline_fingerprint& expected,
         baseline_snapshot& output) const noexcept;

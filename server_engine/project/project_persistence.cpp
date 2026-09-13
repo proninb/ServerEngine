@@ -193,7 +193,9 @@ status encode_project_baseline(
         return result;
 
     result =
-        encode_compiled_image(project, output.compiled);
+        encode_compiled_image(
+            project,
+            output.compiled);
     if (!result.ok())
         return result;
 
@@ -203,24 +205,33 @@ status encode_project_baseline(
 
         for (const auto& item : configuration.project) {
             std::string normalized;
-            result = normalize_source_path(item.path, normalized);
+            result = normalize_source_path(
+                item.path,
+                normalized);
             if (!result.ok())
                 return result;
 
             source_id source;
-            result = project.sources().find(normalized, source);
+            result = project.sources().find(
+                normalized,
+                source);
             if (!result.ok())
-                return status{status_code::initialization_failed};
+                return {status_code::initialization_failed};
 
-            roots.push_back({source, item.role});
+            roots.push_back(
+                {source, item.role});
         }
 
         source_manager_image_options options;
         options.generation = 1;
-        options.roots = std::span<const source_manager_image_root>{roots};
-        options.change_checkpoint = change_capture.checkpoint;
-        options.file_identity_index = change_capture.file_index;
-        options.directory_identity_index = change_capture.directory_index;
+        options.roots =
+            std::span<const source_manager_image_root>{roots};
+        options.change_checkpoint =
+            change_capture.checkpoint;
+        options.file_identity_index =
+            change_capture.file_index;
+        options.directory_identity_index =
+            change_capture.directory_index;
 
         result = encode_source_manager_image(
             project.sources(),
@@ -236,7 +247,6 @@ status encode_project_baseline(
             output.change_state);
         if (!result.ok())
             return result;
-
     }
     catch (const std::bad_alloc&) {
         return {status_code::not_available};
@@ -260,30 +270,29 @@ status encode_project_baseline(
     result = compiled.bind(output.compiled);
     if (!result.ok())
         return result;
+
     result = sources.bind(output.source_manager);
     if (!result.ok())
         return result;
+
     result = change_state.bind(output.change_state);
     if (!result.ok())
         return result;
+
     result = build_cache.bind(output.build_cache);
     if (!result.ok())
         return result;
 
-    result = compiled.verify_contents();
-    if (!result.ok())
-        return result;
-    result = sources.verify_contents();
-    if (!result.ok())
-        return result;
+    // Encoder-local validation is the integrity boundary for compiled,
+    // source-manager, and build-cache images. Change-state has no equivalent
+    // encoder-local full audit, so keep its validation here.
     result = change_state.verify_contents();
     if (!result.ok())
         return result;
-    result = build_cache.verify_contents();
-    if (!result.ok())
-        return result;
 
-    return build_cache.verify_against(compiled, sources);
+    return build_cache.verify_against(
+        compiled,
+        sources);
 }
 
 status encode_project_baseline(

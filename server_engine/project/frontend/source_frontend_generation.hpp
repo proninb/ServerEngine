@@ -30,6 +30,22 @@ struct source_frontend_summary final {
     std::size_t source_graph_visited = 0;
     std::size_t worker_limit = 0;
     std::size_t max_active_workers = 0;
+    std::size_t acquisition_worker_limit = 0;
+    std::uint64_t parallel_dispatches = 0;
+    std::size_t worker_threads_created = 0;
+
+    // Wall-clock phase telemetry for full REBUILD. Parallel phases report
+    // elapsed phase time, not the sum of per-worker CPU time.
+    std::uint64_t root_resolve_ns = 0;
+    std::uint64_t wave_setup_ns = 0;
+    std::uint64_t acquire_prepare_ns = 0;
+    std::uint64_t acquire_execute_ns = 0;
+    std::uint64_t acquire_apply_ns = 0;
+    std::uint64_t lex_discovery_ns = 0;
+    std::uint64_t dependency_publish_ns = 0;
+    std::uint64_t graph_schedule_ns = 0;
+    std::uint64_t parse_ns = 0;
+    std::uint64_t result_materialize_ns = 0;
 };
 
 struct source_frontend_entry final {
@@ -68,30 +84,35 @@ public:
     source_frontend_generation(
         project_semantic_services semantic_value,
         source_manager_update& source_update,
-        std::size_t worker_limit = 0) noexcept;
+        std::size_t worker_limit = 0,
+        std::size_t acquisition_worker_limit = 0) noexcept;
 
     source_frontend_generation(
         project_context& project_value,
         source_manager_update& source_update,
-        std::size_t worker_limit = 0) noexcept;
+        std::size_t worker_limit = 0,
+        std::size_t acquisition_worker_limit = 0) noexcept;
 
     source_frontend_generation(
         project_semantic_services semantic_value,
         source_manager_update& source_update,
         const source_frontend_cache& cache_value,
-        std::size_t worker_limit = 0) noexcept;
+        std::size_t worker_limit = 0,
+        std::size_t acquisition_worker_limit = 0) noexcept;
 
     source_frontend_generation(
         project_context& project_value,
         source_manager_update& source_update,
         const source_frontend_cache& cache_value,
-        std::size_t worker_limit = 0) noexcept;
+        std::size_t worker_limit = 0,
+        std::size_t acquisition_worker_limit = 0) noexcept;
 
     [[nodiscard]] status build(
         std::span<const std::filesystem::path> roots,
         operation_id operation,
         diagnostic_buffer& diagnostics,
-        source_frontend_result& output) noexcept;
+        source_frontend_result& output,
+        bool roots_are_canonical = false) noexcept;
 
     [[nodiscard]] status build_incremental(
         std::span<const source_id> dirty_sources,
@@ -104,6 +125,7 @@ private:
     source_manager_update& sources;
     const source_frontend_cache* cache = nullptr;
     std::size_t worker_limit = 1;
+    std::size_t acquisition_worker_limit = 1;
 };
 
 } // namespace cw::server

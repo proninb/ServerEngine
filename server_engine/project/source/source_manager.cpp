@@ -838,6 +838,103 @@ status source_manager_update::resolve(
     return resolve_normalized(normalized, output);
 }
 
+status source_manager_update::resolve_canonical(
+    const std::filesystem::path& path_value,
+    source_id& output) noexcept {
+
+    output = {};
+    if (owner == nullptr || committed ||
+        path_value.empty() || !path_value.is_absolute()) {
+        return {status_code::invalid_argument};
+    }
+
+    try {
+        auto normalized = path_value.generic_string();
+#ifdef _WIN32
+        if (normalized.size() >= 2 &&
+            normalized[1] == ':' &&
+            normalized[0] >= 'A' &&
+            normalized[0] <= 'Z') {
+            normalized[0] =
+                static_cast<char>(
+                    normalized[0] - 'A' + 'a');
+        }
+#endif
+        if (normalized.empty())
+            return {status_code::invalid_argument};
+
+        return resolve_normalized(
+            normalized,
+            output);
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+}
+
+status source_manager_update::reserve_sources(
+    std::size_t additional) noexcept {
+
+    if (owner == nullptr || committed)
+        return {status_code::invalid_argument};
+
+    if (additional == 0)
+        return {};
+
+    if (new_sources.size() >
+        (std::numeric_limits<std::size_t>::max)() -
+            additional) {
+        return {status_code::not_available};
+    }
+
+    const auto required =
+        new_sources.size() + additional;
+
+    if (owner->records.size() >
+        static_cast<std::size_t>(
+            (std::numeric_limits<std::uint32_t>::max)()) -
+            required) {
+        return {status_code::not_available};
+    }
+
+    if (candidates.size() >
+            (std::numeric_limits<std::size_t>::max)() -
+                additional ||
+        semantic_changes.size() >
+            (std::numeric_limits<std::size_t>::max)() -
+                additional) {
+        return {status_code::not_available};
+    }
+
+    const auto candidate_required =
+        candidates.size() + additional;
+    const auto semantic_required =
+        semantic_changes.size() + additional;
+
+    try {
+        new_sources.reserve(required);
+        candidates.reserve(candidate_required);
+        semantic_changes.reserve(semantic_required);
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+
+    auto result =
+        ensure_local_path_capacity(required);
+    if (!result.ok())
+        return result;
+
+    return ensure_id_index_capacity(
+        candidate_required);
+}
+
 status source_manager_update::resolve_normalized(
     std::string_view normalized,
     source_id& output) noexcept {
@@ -1003,7 +1100,11 @@ status source_manager_update::execute_acquire(
         return {status_code::invalid_argument};
 
     file_snapshot snapshot_value;
-    const auto result = acquire_file_snapshot(job.path, job.baseline, snapshot_value);
+    const auto result =
+        acquire_file_snapshot(
+            job.path,
+            job.baseline,
+            snapshot_value);
     output = {};
     output.source = job.source;
 

@@ -59,8 +59,9 @@ struct source_manager_update_telemetry final {
 
 class source_manager_update;
 
-// Owns stable Source identity. Persisted Sources remain in source_manager.bin /
-// build_cache.bin and are decoded only when an affected BUILD path touches them.
+// Owns stable Source identity. Persisted Sources remain in the logical Source
+// Manager / Build Cache images and are decoded only when an affected BUILD path
+// touches them.
 class source_manager final {
 public:
     source_manager() = default;
@@ -171,6 +172,17 @@ public:
     [[nodiscard]] status resolve(
         const std::filesystem::path& path,
         source_id& output) noexcept;
+
+    // Fast root path for configuration entries already resolved to an absolute,
+    // lexically-normal path by the validated project configuration loader.
+    [[nodiscard]] status resolve_canonical(
+        const std::filesystem::path& path,
+        source_id& output) noexcept;
+
+    // Prepares fresh Source identity storage for a known root batch. This changes
+    // capacity only; source_id allocation order remains first-resolution order.
+    [[nodiscard]] status reserve_sources(
+        std::size_t additional) noexcept;
 
     [[nodiscard]] status resolve_normalized(
         std::string_view normalized_path,

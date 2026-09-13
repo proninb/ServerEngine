@@ -200,21 +200,24 @@ public:
         operation_id operation,
         diagnostic_buffer& diagnostics,
         project_build_result& output,
-        std::size_t worker_limit = 0) noexcept;
+        std::size_t worker_limit = 0,
+        std::size_t acquisition_worker_limit = 0) noexcept;
 
     [[nodiscard]] status rebuild(
         const std::filesystem::path& configuration_path,
         operation_id operation,
         diagnostic_buffer& diagnostics,
         project_build_result& output,
-        std::size_t worker_limit = 0) noexcept;
+        std::size_t worker_limit = 0,
+        std::size_t acquisition_worker_limit = 0) noexcept;
 
     [[nodiscard]] status rebuild(
         project_configuration configuration,
         operation_id operation,
         diagnostic_buffer& diagnostics,
         project_build_result& output,
-        std::size_t worker_limit = 0) noexcept;
+        std::size_t worker_limit = 0,
+        std::size_t acquisition_worker_limit = 0) noexcept;
 
     [[nodiscard]] status save(
         baseline_commit_result& output) noexcept;
@@ -243,6 +246,7 @@ private:
         diagnostic_buffer& diagnostics,
         project_build_result& output,
         std::size_t worker_limit,
+        std::size_t acquisition_worker_limit,
         bool mark_rebuild) noexcept;
 
     [[nodiscard]] status activate_baseline_reserved(

@@ -70,8 +70,8 @@ public:
         identity_view identities,
         std::span<const source_interface* const> imports = {}) noexcept;
 
-    // Restores one immutable Parser interface from build_cache.bin without
-    // reparsing its Source. Import pointers are rebound process-locally.
+    // Restores one immutable Parser interface from the persisted Build Cache
+    // image without reparsing its Source. Import pointers are rebound process-locally.
     [[nodiscard]] status initialize_persisted(
         const build_cache_image_view& cache,
         source_id source,

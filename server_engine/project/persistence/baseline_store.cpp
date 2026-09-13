@@ -1,4 +1,5 @@
 #include "baseline_store.hpp"
+#include "crc64_ecma.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -79,24 +80,6 @@ std::atomic<std::uint64_t> transaction_counter{0};
     return static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             end - begin).count());
-}
-
-[[nodiscard]] constexpr std::uint64_t crc64_update(
-    std::uint64_t crc,
-    std::byte input) noexcept {
-
-    constexpr std::uint64_t polynomial = 0x42F0E1EBA9EA3693ULL;
-    crc ^= static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(input)) << 56;
-    for (int bit = 0; bit < 8; ++bit)
-        crc = (crc & 0x8000000000000000ULL) != 0 ? (crc << 1) ^ polynomial : crc << 1;
-    return crc;
-}
-
-[[nodiscard]] std::uint64_t crc64(std::span<const std::byte> bytes) noexcept {
-    std::uint64_t crc = 0;
-    for (const auto value : bytes)
-        crc = crc64_update(crc, value);
-    return crc;
 }
 
 void write_u32(std::array<std::byte, manifest_size>& output, std::size_t offset, std::uint32_t value) noexcept {
@@ -471,7 +454,7 @@ void write_u64(std::array<std::byte, manifest_size>& output, std::size_t offset,
         }
     }
 
-    write_u64(output, manifest_crc_offset, crc64(std::span<const std::byte>{output}.first(manifest_crc_offset)));
+    write_u64(output, manifest_crc_offset, persistence_crc64(std::span<const std::byte>{output}.first(manifest_crc_offset)));
     return {};
 }
 
@@ -499,7 +482,7 @@ struct parsed_manifest final {
         read_u32(input, 20) != 0) {
         return {status_code::artifact_corrupt};
     }
-    if (read_u64(input, manifest_crc_offset) != crc64(input.first(manifest_crc_offset)))
+    if (read_u64(input, manifest_crc_offset) != persistence_crc64(input.first(manifest_crc_offset)))
         return {status_code::artifact_corrupt};
 
     for (std::size_t index = 0; index < output.fingerprint.bytes.size(); ++index)
@@ -923,6 +906,374 @@ struct parsed_manifest final {
         : status{status_code::artifact_corrupt};
 }
 
+
+[[nodiscard]] status read_file_prefix(
+    const std::filesystem::path& path,
+    std::size_t requested,
+    std::vector<std::byte>& output,
+    std::uint64_t& file_size) noexcept {
+
+    output.clear();
+    file_size = 0;
+
+#if defined(_WIN32)
+    const auto handle = ::CreateFileW(
+        path.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+
+    if (handle == INVALID_HANDLE_VALUE) {
+        const auto error = ::GetLastError();
+        return error == ERROR_FILE_NOT_FOUND ||
+            error == ERROR_PATH_NOT_FOUND
+            ? status{status_code::not_found}
+            : status{status_code::io_failed};
+    }
+
+    LARGE_INTEGER native_size{};
+    if (::GetFileSizeEx(handle, &native_size) == 0 ||
+        native_size.QuadPart < 0) {
+        ::CloseHandle(handle);
+        return {status_code::io_failed};
+    }
+
+    file_size =
+        static_cast<std::uint64_t>(
+            native_size.QuadPart);
+
+    const auto to_read =
+        static_cast<std::size_t>(
+            (std::min<std::uint64_t>)(
+                file_size,
+                static_cast<std::uint64_t>(requested)));
+
+    try {
+        output.resize(to_read);
+    }
+    catch (const std::bad_alloc&) {
+        ::CloseHandle(handle);
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        ::CloseHandle(handle);
+        return {status_code::not_available};
+    }
+
+    std::size_t offset = 0;
+    while (offset < output.size()) {
+        const auto remaining =
+            output.size() - offset;
+        const auto chunk =
+            static_cast<DWORD>(
+                (std::min<std::size_t>)(
+                    remaining,
+                    (std::numeric_limits<DWORD>::max)()));
+
+        DWORD read = 0;
+        if (::ReadFile(
+                handle,
+                output.data() + offset,
+                chunk,
+                &read,
+                nullptr) == 0 ||
+            read == 0) {
+            ::CloseHandle(handle);
+            output.clear();
+            return {status_code::io_failed};
+        }
+
+        offset += static_cast<std::size_t>(read);
+    }
+
+    const auto closed = ::CloseHandle(handle) != 0;
+    if (!closed) {
+        output.clear();
+        return {status_code::io_failed};
+    }
+
+    return {};
+#else
+    const auto handle =
+        ::open(path.c_str(), O_RDONLY);
+    if (handle < 0) {
+        return errno == ENOENT
+            ? status{status_code::not_found}
+            : status{status_code::io_failed};
+    }
+
+    struct stat information {};
+    if (::fstat(handle, &information) != 0 ||
+        information.st_size < 0) {
+        ::close(handle);
+        return {status_code::io_failed};
+    }
+
+    file_size =
+        static_cast<std::uint64_t>(
+            information.st_size);
+
+    const auto to_read =
+        static_cast<std::size_t>(
+            (std::min<std::uint64_t>)(
+                file_size,
+                static_cast<std::uint64_t>(requested)));
+
+    try {
+        output.resize(to_read);
+    }
+    catch (const std::bad_alloc&) {
+        ::close(handle);
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        ::close(handle);
+        return {status_code::not_available};
+    }
+
+    std::size_t offset = 0;
+    while (offset < output.size()) {
+        const auto result = ::read(
+            handle,
+            output.data() + offset,
+            output.size() - offset);
+
+        if (result < 0) {
+            if (errno == EINTR)
+                continue;
+
+            ::close(handle);
+            output.clear();
+            return {status_code::io_failed};
+        }
+
+        if (result == 0) {
+            ::close(handle);
+            output.clear();
+            return {status_code::io_failed};
+        }
+
+        offset += static_cast<std::size_t>(result);
+    }
+
+    if (::close(handle) != 0) {
+        output.clear();
+        return {status_code::io_failed};
+    }
+
+    return {};
+#endif
+}
+
+[[nodiscard]] status read_current_ready_selector(
+    const std::filesystem::path& root,
+    std::string& transaction,
+    std::array<std::byte, manifest_size>& manifest,
+    bool& embedded_manifest_available) noexcept {
+
+    transaction.clear();
+    manifest.fill(std::byte{0});
+    embedded_manifest_available = false;
+
+    std::vector<std::byte> bytes;
+    std::uint64_t file_size = 0;
+
+    auto result = read_file_prefix(
+        root / current_name,
+        current_selector_change_state_offset_v3,
+        bytes,
+        file_size);
+    if (!result.ok())
+        return result;
+
+    const auto read_transaction =
+        [&](std::size_t offset,
+            std::size_t transaction_size) -> status {
+
+            if (transaction_size == 0 ||
+                transaction_size >
+                    current_selector_transaction_capacity ||
+                offset + transaction_size >
+                    bytes.size()) {
+                return {status_code::artifact_corrupt};
+            }
+
+            try {
+                transaction.resize(transaction_size);
+            }
+            catch (const std::bad_alloc&) {
+                return {status_code::not_available};
+            }
+            catch (const std::length_error&) {
+                return {status_code::not_available};
+            }
+
+            for (std::size_t index = 0;
+                 index < transaction_size;
+                 ++index) {
+                transaction[index] =
+                    static_cast<char>(
+                        std::to_integer<unsigned char>(
+                            bytes[offset + index]));
+            }
+
+            return valid_transaction_name(transaction)
+                ? status{}
+                : status{status_code::artifact_corrupt};
+        };
+
+    if (file_size >=
+            current_selector_change_state_offset_v3 &&
+        bytes.size() >=
+            current_selector_change_state_offset_v3 &&
+        std::equal(
+            current_selector_magic_v3.begin(),
+            current_selector_magic_v3.end(),
+            bytes.begin())) {
+
+        if (read_u32(bytes, 8) !=
+                current_selector_version_v3 ||
+            read_u64(bytes, 24) != 0) {
+            return {status_code::artifact_corrupt};
+        }
+
+        const auto transaction_size =
+            read_u32(bytes, 12);
+        const auto change_state_size =
+            read_u64(bytes, 16);
+
+        if (change_state_size == 0 ||
+            change_state_size >
+                current_selector_change_state_limit ||
+            change_state_size >
+                (std::numeric_limits<std::uint64_t>::max)() -
+                    current_selector_change_state_offset_v3 ||
+            file_size !=
+                current_selector_change_state_offset_v3 +
+                    change_state_size) {
+            return {status_code::artifact_corrupt};
+        }
+
+        result = read_transaction(
+            32,
+            transaction_size);
+        if (!result.ok())
+            return result;
+
+        const auto embedded =
+            std::span<const std::byte>{bytes}.subspan(
+                current_selector_manifest_offset_v3,
+                manifest_size);
+
+        parsed_manifest validated_manifest;
+        result = parse_manifest(
+            embedded,
+            validated_manifest);
+        if (!result.ok() ||
+            validated_manifest.transaction !=
+                transaction) {
+            return {status_code::artifact_corrupt};
+        }
+
+        std::copy(
+            embedded.begin(),
+            embedded.end(),
+            manifest.begin());
+
+        embedded_manifest_available = true;
+        return {};
+    }
+
+    if (file_size == current_selector_size_v2 &&
+        bytes.size() == current_selector_size_v2 &&
+        std::equal(
+            current_selector_magic_v2.begin(),
+            current_selector_magic_v2.end(),
+            bytes.begin())) {
+
+        if (read_u32(bytes, 8) !=
+            current_selector_version_v2) {
+            return {status_code::artifact_corrupt};
+        }
+
+        result = read_transaction(
+            16,
+            read_u32(bytes, 12));
+        if (!result.ok())
+            return result;
+
+        const auto embedded =
+            std::span<const std::byte>{bytes}.subspan(
+                current_selector_header_size_v2,
+                manifest_size);
+
+        parsed_manifest validated_manifest;
+        result = parse_manifest(
+            embedded,
+            validated_manifest);
+        if (!result.ok() ||
+            validated_manifest.transaction !=
+                transaction) {
+            return {status_code::artifact_corrupt};
+        }
+
+        std::copy(
+            embedded.begin(),
+            embedded.end(),
+            manifest.begin());
+
+        embedded_manifest_available = true;
+        return {};
+    }
+
+    if (file_size == 0 || file_size > 63 ||
+        bytes.size() !=
+            static_cast<std::size_t>(file_size)) {
+        return {status_code::artifact_corrupt};
+    }
+
+    while (!bytes.empty()) {
+        const auto value =
+            static_cast<char>(
+                std::to_integer<unsigned char>(
+                    bytes.back()));
+
+        if (value != '\n' && value != '\r')
+            break;
+
+        bytes.pop_back();
+    }
+
+    if (bytes.empty() || bytes.size() > 63)
+        return {status_code::artifact_corrupt};
+
+    try {
+        transaction.resize(bytes.size());
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+
+    for (std::size_t index = 0;
+         index < bytes.size();
+         ++index) {
+        transaction[index] =
+            static_cast<char>(
+                std::to_integer<unsigned char>(
+                    bytes[index]));
+    }
+
+    return valid_transaction_name(transaction)
+        ? status{}
+        : status{status_code::artifact_corrupt};
+}
+
 [[nodiscard]] status read_current_transaction(
     const std::filesystem::path& root,
     std::string& output) noexcept {
@@ -1299,6 +1650,172 @@ status baseline_store::open_current_decision(
     }
 }
 
+
+status baseline_store::open_current_ready(
+    baseline_probe& probe,
+    baseline_snapshot& output,
+    baseline_open_telemetry* telemetry) const noexcept {
+
+    probe = {};
+    output = {};
+
+    if (telemetry != nullptr)
+        *telemetry = {};
+
+    try {
+        const auto root = root_path();
+
+        std::string transaction;
+        std::array<std::byte, manifest_size>
+            embedded_manifest{};
+        bool embedded_manifest_available = false;
+
+        const auto current_read_begin =
+            std::chrono::steady_clock::now();
+
+        auto result = read_current_ready_selector(
+            root,
+            transaction,
+            embedded_manifest,
+            embedded_manifest_available);
+
+        if (telemetry != nullptr) {
+            telemetry->current_read_ns =
+                elapsed_ns(
+                    current_read_begin,
+                    std::chrono::steady_clock::now());
+        }
+
+        if (!result.ok())
+            return result;
+
+        const auto directory =
+            root / transaction;
+
+        const auto manifest_begin =
+            std::chrono::steady_clock::now();
+
+        parsed_manifest manifest;
+
+        if (embedded_manifest_available) {
+            const auto parse_begin =
+                std::chrono::steady_clock::now();
+
+            result = parse_manifest(
+                embedded_manifest,
+                manifest);
+
+            if (telemetry != nullptr) {
+                telemetry->embedded_manifest_parse_ns =
+                    elapsed_ns(
+                        parse_begin,
+                        std::chrono::steady_clock::now());
+            }
+        }
+        else {
+            std::vector<std::byte> manifest_bytes;
+            result = read_small_file(
+                directory / manifest_name,
+                manifest_size,
+                manifest_bytes);
+
+            if (!result.ok()) {
+                return result.code ==
+                    status_code::not_found
+                    ? status{status_code::artifact_corrupt}
+                    : result;
+            }
+
+            result = parse_manifest(
+                manifest_bytes,
+                manifest);
+        }
+
+        if (!result.ok())
+            return result;
+
+        if (manifest.transaction != transaction)
+            return {status_code::artifact_corrupt};
+
+        if (telemetry != nullptr) {
+            telemetry->manifest_validation_ns =
+                elapsed_ns(
+                    manifest_begin,
+                    std::chrono::steady_clock::now());
+        }
+
+        baseline_snapshot candidate;
+        candidate.fingerprint_value =
+            manifest.fingerprint;
+        candidate.transaction_value =
+            manifest.transaction;
+        candidate.source_manager_size_value =
+            manifest.source_manager_size;
+        candidate.build_cache_size_value =
+            manifest.build_cache_size;
+
+        const auto map_begin =
+            std::chrono::steady_clock::now();
+
+        result = candidate.compiled.map(
+            directory / compiled_name);
+
+        if (telemetry != nullptr) {
+            telemetry->compiled_map_ns =
+                elapsed_ns(
+                    map_begin,
+                    std::chrono::steady_clock::now());
+        }
+
+        if (!result.ok()) {
+            return result.code ==
+                status_code::not_found
+                ? status{status_code::artifact_corrupt}
+                : result;
+        }
+
+        const auto validation_begin =
+            std::chrono::steady_clock::now();
+
+        const bool size_mismatch =
+            candidate.compiled.bytes().size() !=
+                manifest.compiled_size;
+
+        if (telemetry != nullptr) {
+            telemetry->size_validation_ns =
+                elapsed_ns(
+                    validation_begin,
+                    std::chrono::steady_clock::now());
+        }
+
+        if (size_mismatch)
+            return {status_code::artifact_corrupt};
+
+        probe.fingerprint =
+            manifest.fingerprint;
+        probe.configuration =
+            manifest.configuration;
+        probe.transaction =
+            transaction;
+        probe.source_manager_size =
+            manifest.source_manager_size;
+        probe.build_cache_size =
+            manifest.build_cache_size;
+
+        output = std::move(candidate);
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+    catch (const std::filesystem::filesystem_error&) {
+        return {status_code::io_failed};
+    }
+}
+
 status baseline_store::probe(
     baseline_probe& output) const noexcept {
 
@@ -1486,7 +2003,8 @@ status baseline_store::open_transaction_decision(
         return {status_code::invalid_argument};
 
     // BUILD decision maps compiled.bin + source_manager.bin.
-    // build_cache.bin remains deferred until dirty Sources are confirmed.
+    // The logical Build Cache artifact remains deferred until dirty Sources
+    // are confirmed.
     return open_selected(
         expected,
         transaction,
@@ -1554,12 +2072,39 @@ status baseline_store::map_source_manager(
         if (!result.ok())
             return result;
 
-        if (snapshot.source_manager.bytes().size() !=
-            manifest.source_manager_size) {
+        snapshot.source_manager_size_value =
+            manifest.source_manager_size;
+        snapshot.build_cache_size_value =
+            manifest.build_cache_size;
+
+        const auto physical_size =
+            static_cast<std::uint64_t>(
+                snapshot.source_manager.bytes().size());
+
+        const bool separate =
+            physical_size ==
+                manifest.source_manager_size;
+
+        const bool can_pack =
+            manifest.source_manager_size <=
+                (std::numeric_limits<std::uint64_t>::max)() -
+                    manifest.build_cache_size;
+
+        const bool packed =
+            can_pack &&
+            physical_size ==
+                manifest.source_manager_size +
+                    manifest.build_cache_size;
+
+        if (!separate && !packed) {
             snapshot.source_manager = {};
+            snapshot.packed_build_state = false;
+            snapshot.packed_build_cache_enabled = false;
             return {status_code::artifact_corrupt};
         }
 
+        snapshot.packed_build_state = packed;
+        snapshot.packed_build_cache_enabled = false;
         return {};
     }
     catch (const std::bad_alloc&) {
