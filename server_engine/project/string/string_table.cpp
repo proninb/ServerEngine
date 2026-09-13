@@ -19,8 +19,13 @@ namespace {
 
 } // namespace
 
+string_table::bucket_page::bucket_page() noexcept {
+    for (auto& slot : slots)
+        slot.store(nullptr, std::memory_order_relaxed);
+}
+
 string_table::string_table() noexcept {
-    initialize_indexes();
+    initialize_indexes(true);
 }
 
 string_table::string_table(
@@ -37,26 +42,134 @@ string_table::string_table(
         next_id.store(0, std::memory_order_relaxed);
     }
 
-    initialize_indexes();
+    initialize_indexes(false);
 }
 
-void string_table::initialize_indexes() noexcept {
-    buckets.reset(new (std::nothrow) std::atomic<record*>[bucket_count]);
-    pages.reset(new (std::nothrow) std::atomic<record_page*>[page_count]);
+void string_table::initialize_indexes(
+    bool dense_buckets_value) noexcept {
 
-    if (buckets != nullptr) {
-        for (std::size_t index = 0; index < bucket_count; ++index)
-            buckets[index].store(nullptr, std::memory_order_relaxed);
+    dense_bucket_mode = dense_buckets_value;
+
+    for (auto& page : bucket_pages)
+        page.store(nullptr, std::memory_order_relaxed);
+
+    if (dense_bucket_mode) {
+        dense_buckets.reset(
+            new (std::nothrow)
+                std::atomic<record*>[bucket_count]);
+
+        if (dense_buckets != nullptr) {
+            for (std::size_t index = 0;
+                 index < bucket_count;
+                 ++index) {
+                dense_buckets[index].store(
+                    nullptr,
+                    std::memory_order_relaxed);
+            }
+        }
     }
+    else {
+        dense_buckets.reset();
+    }
+
+    pages.reset(
+        new (std::nothrow)
+            std::atomic<record_page*>[page_count]);
+
     if (pages != nullptr) {
-        for (std::size_t index = 0; index < page_count; ++index)
-            pages[index].store(nullptr, std::memory_order_relaxed);
+        for (std::size_t index = 0;
+             index < page_count;
+             ++index) {
+            pages[index].store(
+                nullptr,
+                std::memory_order_relaxed);
+        }
     }
+}
+
+std::atomic<string_table::record*>*
+string_table::ensure_bucket_slot(
+    std::size_t bucket_index) noexcept {
+
+    if (bucket_index >= bucket_count)
+        return nullptr;
+
+    if (dense_bucket_mode) {
+        return dense_buckets != nullptr
+            ? &dense_buckets[bucket_index]
+            : nullptr;
+    }
+
+    const auto directory_index =
+        bucket_index >> bucket_page_shift;
+    const auto slot_index =
+        bucket_index & bucket_page_mask;
+
+    auto* page =
+        bucket_pages[directory_index].load(
+            std::memory_order_acquire);
+
+    if (page == nullptr) {
+        auto* candidate =
+            new (std::nothrow) bucket_page;
+        if (candidate == nullptr)
+            return nullptr;
+
+        bucket_page* expected = nullptr;
+        if (bucket_pages[directory_index].
+                compare_exchange_strong(
+                    expected,
+                    candidate,
+                    std::memory_order_release,
+                    std::memory_order_acquire)) {
+            page = candidate;
+            bucket_page_bytes.fetch_add(
+                sizeof(bucket_page),
+                std::memory_order_relaxed);
+        }
+        else {
+            delete candidate;
+            page = expected;
+        }
+    }
+
+    return &page->slots[slot_index];
+}
+
+const std::atomic<string_table::record*>*
+string_table::bucket_slot(
+    std::size_t bucket_index) const noexcept {
+
+    if (bucket_index >= bucket_count)
+        return nullptr;
+
+    if (dense_bucket_mode) {
+        return dense_buckets != nullptr
+            ? &dense_buckets[bucket_index]
+            : nullptr;
+    }
+
+    const auto directory_index =
+        bucket_index >> bucket_page_shift;
+    const auto slot_index =
+        bucket_index & bucket_page_mask;
+
+    auto* page =
+        bucket_pages[directory_index].load(
+            std::memory_order_acquire);
+
+    return page == nullptr
+        ? nullptr
+        : &page->slots[slot_index];
 }
 
 string_table::~string_table() noexcept {
+    for (auto& page_slot : bucket_pages)
+        delete page_slot.load(std::memory_order_relaxed);
+
     if (pages == nullptr)
         return;
+
     for (std::size_t index = 0; index < page_count; ++index)
         delete pages[index].load(std::memory_order_relaxed);
 }
@@ -75,11 +188,15 @@ string_table::record* string_table::find_record(
     std::string_view value,
     std::uint64_t hash) const noexcept {
 
-    if (buckets == nullptr)
+    const auto* bucket = bucket_slot(
+        static_cast<std::size_t>(hash) &
+            bucket_mask);
+
+    if (bucket == nullptr)
         return nullptr;
 
-    auto* item = buckets[static_cast<std::size_t>(hash) & bucket_mask].load(
-        std::memory_order_acquire);
+    auto* item =
+        bucket->load(std::memory_order_acquire);
     while (item != nullptr) {
         if (item->hash == hash && item->length == value.size() &&
             (value.empty() || std::memcmp(item->bytes(), value.data(), value.size()) == 0)) {
@@ -133,7 +250,7 @@ status string_table::intern(std::string_view value, string_id& output) noexcept 
     output = {};
     if (value.empty())
         return {status_code::invalid_argument};
-    if (buckets == nullptr || pages == nullptr)
+    if (pages == nullptr)
         return {status_code::not_available};
     if (value.size() > (std::numeric_limits<std::uint32_t>::max)())
         return {status_code::not_available};
@@ -146,6 +263,12 @@ status string_table::intern(std::string_view value, string_id& output) noexcept 
     }
 
     const auto hash = hash_text(value);
+    auto* bucket = ensure_bucket_slot(
+        static_cast<std::size_t>(hash) &
+            bucket_mask);
+    if (bucket == nullptr)
+        return {status_code::not_available};
+
     void* memory = nullptr;
     auto result = storage.allocate(sizeof(record) + value.size(), alignof(record), memory);
     if (!result.ok())
@@ -167,8 +290,8 @@ status string_table::intern(std::string_view value, string_id& output) noexcept 
     const auto slot_index = static_cast<std::size_t>(raw_id - 1) & page_mask;
     direct_page->slots[slot_index].store(candidate, std::memory_order_release);
 
-    auto& bucket = buckets[static_cast<std::size_t>(hash) & bucket_mask];
-    auto* head = bucket.load(std::memory_order_acquire);
+    auto* head =
+        bucket->load(std::memory_order_acquire);
     for (;;) {
         for (auto* item = head; item != nullptr; item = item->next) {
             if (item->hash == hash && item->length == value.size() &&
@@ -180,7 +303,7 @@ status string_table::intern(std::string_view value, string_id& output) noexcept 
         }
 
         candidate->next = head;
-        if (bucket.compare_exchange_weak(
+        if (bucket->compare_exchange_weak(
                 head,
                 candidate,
                 std::memory_order_release,
@@ -250,27 +373,61 @@ string_id string_table::at_slot(std::size_t index) const noexcept {
 string_table_statistics string_table::statistics() const noexcept {
     string_table_statistics output;
     output.strings = size();
-    output.bytes_reserved = storage.bytes_reserved() +
-        bucket_count * sizeof(std::atomic<record*>) +
-        page_count * sizeof(std::atomic<record_page*>) +
+    output.bytes_reserved =
+        storage.bytes_reserved() +
+        (dense_bucket_mode
+            ? bucket_count *
+                sizeof(std::atomic<record*>)
+            : sizeof(bucket_pages) +
+                bucket_page_bytes.load(
+                    std::memory_order_relaxed)) +
+        page_count *
+            sizeof(std::atomic<record_page*>) +
         page_bytes.load(std::memory_order_relaxed);
 
-    if (buckets == nullptr)
-        return output;
-    for (std::size_t index = 0; index < bucket_count; ++index) {
-        const auto* item = buckets[index].load(std::memory_order_acquire);
-        if (item == nullptr)
-            continue;
-        ++output.occupied_buckets;
-        std::size_t chain = 0;
-        while (item != nullptr) {
-            ++chain;
-            item = item->next;
+    const auto account_chain =
+        [&](const record* item) noexcept {
+            if (item == nullptr)
+                return;
+
+            ++output.occupied_buckets;
+            std::size_t chain = 0;
+            while (item != nullptr) {
+                ++chain;
+                item = item->next;
+            }
+
+            if (chain > 1)
+                output.collision_entries += chain - 1;
+            if (chain > output.max_chain_length)
+                output.max_chain_length = chain;
+        };
+
+    if (dense_bucket_mode) {
+        if (dense_buckets != nullptr) {
+            for (std::size_t index = 0;
+                 index < bucket_count;
+                 ++index) {
+                account_chain(
+                    dense_buckets[index].load(
+                        std::memory_order_acquire));
+            }
         }
-        if (chain > 1)
-            output.collision_entries += chain - 1;
-        if (chain > output.max_chain_length)
-            output.max_chain_length = chain;
+    }
+    else {
+        for (const auto& page_slot : bucket_pages) {
+            const auto* page =
+                page_slot.load(
+                    std::memory_order_acquire);
+            if (page == nullptr)
+                continue;
+
+            for (const auto& bucket : page->slots) {
+                account_chain(
+                    bucket.load(
+                        std::memory_order_acquire));
+            }
+        }
     }
     return output;
 }

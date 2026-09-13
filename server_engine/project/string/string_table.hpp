@@ -4,6 +4,7 @@
 #include "../../string_id.hpp"
 #include "../storage/byte_arena.hpp"
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -63,6 +64,19 @@ private:
 
     static constexpr std::size_t bucket_count = std::size_t{1} << 20;
     static constexpr std::size_t bucket_mask = bucket_count - 1;
+    static constexpr std::size_t bucket_page_shift = 10;
+    static constexpr std::size_t bucket_page_size =
+        std::size_t{1} << bucket_page_shift;
+    static constexpr std::size_t bucket_page_mask =
+        bucket_page_size - 1;
+    static constexpr std::size_t bucket_directory_count =
+        bucket_count / bucket_page_size;
+
+    struct bucket_page final {
+        bucket_page() noexcept;
+        std::atomic<record*> slots[bucket_page_size]{};
+    };
+
     static constexpr std::size_t page_shift = 12;
     static constexpr std::size_t page_size = std::size_t{1} << page_shift;
     static constexpr std::size_t page_mask = page_size - 1;
@@ -74,7 +88,12 @@ private:
         std::atomic<record*> slots[page_size]{};
     };
 
-    void initialize_indexes() noexcept;
+    void initialize_indexes(bool dense_buckets) noexcept;
+
+    [[nodiscard]] std::atomic<record*>* ensure_bucket_slot(
+        std::size_t bucket_index) noexcept;
+    [[nodiscard]] const std::atomic<record*>* bucket_slot(
+        std::size_t bucket_index) const noexcept;
 
     [[nodiscard]] static std::uint64_t hash_text(std::string_view value) noexcept;
     [[nodiscard]] record* find_record(std::string_view value, std::uint64_t hash) const noexcept;
@@ -86,11 +105,15 @@ private:
     std::size_t baseline_live_count = 0;
 
     byte_arena storage;
-    std::unique_ptr<std::atomic<record*>[]> buckets;
+    std::unique_ptr<std::atomic<record*>[]> dense_buckets;
+    std::array<std::atomic<bucket_page*>, bucket_directory_count>
+        bucket_pages{};
     std::unique_ptr<std::atomic<record_page*>[]> pages;
     std::atomic<std::uint32_t> next_id{1};
     std::atomic<std::size_t> live_count{0};
+    std::atomic<std::size_t> bucket_page_bytes{0};
     std::atomic<std::size_t> page_bytes{0};
+    bool dense_bucket_mode = true;
 };
 
 } // namespace cw::server

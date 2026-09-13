@@ -94,9 +94,18 @@ public:
     [[nodiscard]] identity_ref at_slot(std::size_t index) const noexcept;
 
     [[nodiscard]] std::size_t bytes_reserved() const noexcept {
-        return semantic_bucket_bytes + sizeof(directories) +
-            allocated_directory_bytes.load(std::memory_order_relaxed) +
-            allocated_page_bytes.load(std::memory_order_relaxed);
+        return
+            (dense_semantic_bucket_mode
+                ? semantic_bucket_count *
+                    sizeof(std::atomic<std::uint32_t>)
+                : sizeof(semantic_bucket_pages) +
+                    allocated_semantic_bucket_bytes.load(
+                        std::memory_order_relaxed)) +
+            sizeof(directories) +
+            allocated_directory_bytes.load(
+                std::memory_order_relaxed) +
+            allocated_page_bytes.load(
+                std::memory_order_relaxed);
     }
 
     [[nodiscard]] std::size_t pages_reserved() const noexcept {
@@ -120,10 +129,24 @@ private:
 
     static_assert(sizeof(record) == 16);
 
-    static constexpr std::size_t semantic_bucket_count = std::size_t{1} << 21;
-    static constexpr std::size_t semantic_bucket_mask = semantic_bucket_count - 1;
-    static constexpr std::size_t semantic_bucket_bytes =
-        semantic_bucket_count * sizeof(std::atomic<std::uint32_t>);
+    static constexpr std::size_t semantic_bucket_count =
+        std::size_t{1} << 21;
+    static constexpr std::size_t semantic_bucket_mask =
+        semantic_bucket_count - 1;
+    static constexpr std::size_t semantic_bucket_page_shift = 11;
+    static constexpr std::size_t semantic_bucket_page_size =
+        std::size_t{1} << semantic_bucket_page_shift;
+    static constexpr std::size_t semantic_bucket_page_mask =
+        semantic_bucket_page_size - 1;
+    static constexpr std::size_t semantic_bucket_directory_count =
+        semantic_bucket_count /
+        semantic_bucket_page_size;
+
+    struct semantic_bucket_page final {
+        semantic_bucket_page() noexcept;
+        std::atomic<std::uint32_t>
+            slots[semantic_bucket_page_size]{};
+    };
 
     static constexpr std::size_t page_shift = 12;
     static constexpr std::size_t page_size = std::size_t{1} << page_shift;
@@ -164,6 +187,14 @@ private:
             (static_cast<std::uint32_t>(kind) << identity_ref::kind_shift);
     }
 
+    [[nodiscard]] std::atomic<std::uint32_t>*
+    ensure_semantic_bucket(
+        std::size_t bucket_index) noexcept;
+
+    [[nodiscard]] const std::atomic<std::uint32_t>*
+    semantic_bucket(
+        std::size_t bucket_index) const noexcept;
+
     [[nodiscard]] page_directory* ensure_directory(
         std::size_t directory_index) noexcept;
 
@@ -194,13 +225,20 @@ private:
     std::size_t baseline_identity_count = 0;
 
     record root_record{};
-    std::unique_ptr<std::atomic<std::uint32_t>[]> buckets;
+    std::unique_ptr<std::atomic<std::uint32_t>[]>
+        dense_semantic_buckets;
+    std::array<
+        std::atomic<semantic_bucket_page*>,
+        semantic_bucket_directory_count>
+        semantic_bucket_pages{};
     std::array<std::atomic<page_directory*>, directory_count> directories{};
     std::atomic<std::uint32_t> next_slot{2};
     std::atomic<std::size_t> identity_count{1};
     std::atomic<std::size_t> allocated_pages{0};
+    std::atomic<std::size_t> allocated_semantic_bucket_bytes{0};
     std::atomic<std::size_t> allocated_directory_bytes{0};
     std::atomic<std::size_t> allocated_page_bytes{0};
+    bool dense_semantic_bucket_mode = true;
 
     friend class identity_view;
 };

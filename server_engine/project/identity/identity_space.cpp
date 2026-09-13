@@ -42,58 +42,83 @@ namespace {
 
 } // namespace
 
+identity_space::semantic_bucket_page::
+semantic_bucket_page() noexcept {
+    for (auto& slot : slots)
+        slot.store(0, std::memory_order_relaxed);
+}
+
 identity_space::page_directory::page_directory() noexcept {
     for (auto& page : pages)
         page.store(nullptr, std::memory_order_relaxed);
 }
 
-identity_space::identity_space() noexcept
-    : buckets(new (std::nothrow) std::atomic<std::uint32_t>[semantic_bucket_count]) {
-
+identity_space::identity_space() noexcept {
     root_record.identity = identity_node{
         identity_node::construction_token{}, identity_ref{}, string_id{}};
     root_record.fingerprint = 1;
 
+    dense_semantic_bucket_mode = true;
+    dense_semantic_buckets.reset(
+        new (std::nothrow)
+            std::atomic<std::uint32_t>[
+                semantic_bucket_count]);
+
+    if (dense_semantic_buckets != nullptr) {
+        for (std::size_t index = 0;
+             index < semantic_bucket_count;
+             ++index) {
+            dense_semantic_buckets[index].store(
+                0,
+                std::memory_order_relaxed);
+        }
+    }
+
+    for (auto& page : semantic_bucket_pages)
+        page.store(nullptr, std::memory_order_relaxed);
+
     for (auto& directory : directories)
         directory.store(nullptr, std::memory_order_relaxed);
-
-    if (buckets == nullptr)
-        return;
-
-    for (std::size_t index = 0; index < semantic_bucket_count; ++index)
-        buckets[index].store(0, std::memory_order_relaxed);
 }
 
 identity_space::identity_space(
     const compiled_image_view& baseline_value) noexcept
     : baseline(&baseline_value),
-      baseline_slot_count(baseline_value.identity_slot_count()),
-      baseline_identity_count(baseline_value.identity_count()),
-      buckets(new (std::nothrow) std::atomic<std::uint32_t>[semantic_bucket_count]) {
+      baseline_slot_count(
+          baseline_value.identity_slot_count()),
+      baseline_identity_count(
+          baseline_value.identity_count()) {
 
     root_record.identity = identity_node{
         identity_node::construction_token{}, identity_ref{}, string_id{}};
     root_record.fingerprint = 1;
+
+    dense_semantic_bucket_mode = false;
+    dense_semantic_buckets.reset();
+
+    for (auto& page : semantic_bucket_pages)
+        page.store(nullptr, std::memory_order_relaxed);
 
     for (auto& directory : directories)
         directory.store(nullptr, std::memory_order_relaxed);
 
     if (baseline_slot_count < identity_ref::maximum_slot) {
         next_slot.store(
-            static_cast<std::uint32_t>(baseline_slot_count + 1),
+            static_cast<std::uint32_t>(
+                baseline_slot_count + 1),
             std::memory_order_relaxed);
-    } else {
+    }
+    else {
         next_slot.store(0, std::memory_order_relaxed);
     }
-    identity_count.store(0, std::memory_order_relaxed);
 
-    if (buckets == nullptr)
-        return;
-    for (std::size_t index = 0; index < semantic_bucket_count; ++index)
-        buckets[index].store(0, std::memory_order_relaxed);
+    identity_count.store(0, std::memory_order_relaxed);
 }
 
 identity_space::~identity_space() noexcept {
+    for (auto& page_slot : semantic_bucket_pages)
+        delete page_slot.load(std::memory_order_relaxed);
+
     for (auto& directory_slot : directories) {
         auto* directory = directory_slot.load(std::memory_order_relaxed);
         if (directory == nullptr)
@@ -132,6 +157,82 @@ std::uint32_t identity_space::semantic_fingerprint(std::uint64_t hash) noexcept 
         static_cast<std::uint32_t>(hash ^ (hash >> 32)) &
         identity_ref::slot_mask;
     return result == 0 ? 1u : result;
+}
+
+std::atomic<std::uint32_t>*
+identity_space::ensure_semantic_bucket(
+    std::size_t bucket_index) noexcept {
+
+    if (bucket_index >= semantic_bucket_count)
+        return nullptr;
+
+    if (dense_semantic_bucket_mode) {
+        return dense_semantic_buckets != nullptr
+            ? &dense_semantic_buckets[bucket_index]
+            : nullptr;
+    }
+
+    const auto directory_index =
+        bucket_index >> semantic_bucket_page_shift;
+    const auto slot_index =
+        bucket_index & semantic_bucket_page_mask;
+
+    auto* page =
+        semantic_bucket_pages[directory_index].load(
+            std::memory_order_acquire);
+
+    if (page == nullptr) {
+        auto* candidate =
+            new (std::nothrow) semantic_bucket_page;
+        if (candidate == nullptr)
+            return nullptr;
+
+        semantic_bucket_page* expected = nullptr;
+        if (semantic_bucket_pages[directory_index].
+                compare_exchange_strong(
+                    expected,
+                    candidate,
+                    std::memory_order_release,
+                    std::memory_order_acquire)) {
+            page = candidate;
+            allocated_semantic_bucket_bytes.fetch_add(
+                sizeof(semantic_bucket_page),
+                std::memory_order_relaxed);
+        }
+        else {
+            delete candidate;
+            page = expected;
+        }
+    }
+
+    return &page->slots[slot_index];
+}
+
+const std::atomic<std::uint32_t>*
+identity_space::semantic_bucket(
+    std::size_t bucket_index) const noexcept {
+
+    if (bucket_index >= semantic_bucket_count)
+        return nullptr;
+
+    if (dense_semantic_bucket_mode) {
+        return dense_semantic_buckets != nullptr
+            ? &dense_semantic_buckets[bucket_index]
+            : nullptr;
+    }
+
+    const auto directory_index =
+        bucket_index >> semantic_bucket_page_shift;
+    const auto slot_index =
+        bucket_index & semantic_bucket_page_mask;
+
+    auto* page =
+        semantic_bucket_pages[directory_index].load(
+            std::memory_order_acquire);
+
+    return page == nullptr
+        ? nullptr
+        : &page->slots[slot_index];
 }
 
 identity_space::page_directory* identity_space::ensure_directory(
@@ -311,12 +412,15 @@ identity_ref identity_space::find_record(
     std::uint64_t hash,
     std::uint32_t fingerprint) const noexcept {
 
-    if (buckets == nullptr)
+    const auto* bucket = semantic_bucket(
+        static_cast<std::size_t>(hash) &
+            semantic_bucket_mask);
+
+    if (bucket == nullptr)
         return {};
 
     auto current_value =
-        buckets[static_cast<std::size_t>(hash) & semantic_bucket_mask].load(
-            std::memory_order_acquire);
+        bucket->load(std::memory_order_acquire);
 
     while (current_value != 0) {
         const auto slot = current_value & identity_ref::slot_mask;
@@ -397,13 +501,10 @@ status identity_space::resolve_declaration(
         return {status_code::invalid_argument};
     }
 
-    if (buckets == nullptr)
-        return {status_code::not_available};
-
-    const auto hash = semantic_hash_value(parent, local_name);
-    const auto fingerprint = semantic_fingerprint(hash);
-    auto& bucket =
-        buckets[static_cast<std::size_t>(hash) & semantic_bucket_mask];
+    const auto hash =
+        semantic_hash_value(parent, local_name);
+    const auto fingerprint =
+        semantic_fingerprint(hash);
 
     if (const auto existing =
             find_record(parent, local_name, hash, fingerprint);
@@ -433,6 +534,12 @@ status identity_space::resolve_declaration(
         }
     }
 
+    auto* bucket = ensure_semantic_bucket(
+        static_cast<std::size_t>(hash) &
+            semantic_bucket_mask);
+    if (bucket == nullptr)
+        return {status_code::not_available};
+
     identity_ref candidate_ref;
     record* candidate = nullptr;
     const auto result = make_candidate(
@@ -445,7 +552,8 @@ status identity_space::resolve_declaration(
     if (!result.ok())
         return result;
 
-    auto head = bucket.load(std::memory_order_acquire);
+    auto head =
+        bucket->load(std::memory_order_acquire);
 
     for (;;) {
         auto current_value = head;
@@ -480,7 +588,7 @@ status identity_space::resolve_declaration(
 
         candidate->next_bucket = head;
 
-        if (bucket.compare_exchange_weak(
+        if (bucket->compare_exchange_weak(
                 head,
                 candidate_ref.value(),
                 std::memory_order_release,
@@ -518,50 +626,88 @@ identity_ref identity_space::find(
 
 identity_index_statistics identity_space::index_statistics() const noexcept {
     identity_index_statistics output;
-    if (buckets == nullptr)
-        return output;
 
-    std::array<std::size_t, 256> comparison_histogram{};
+    std::array<std::size_t, 256>
+        comparison_histogram{};
     std::uint64_t total_comparisons = 0;
 
-    for (std::size_t bucket_index = 0;
-         bucket_index < semantic_bucket_count;
-         ++bucket_index) {
+    const auto account_bucket =
+        [&](std::uint32_t current_value) noexcept {
+            if (current_value == 0)
+                return;
 
-        auto current_value =
-            buckets[bucket_index].load(std::memory_order_acquire);
-        if (current_value == 0)
-            continue;
+            ++output.occupied_buckets;
+            std::size_t chain_length = 0;
 
-        ++output.occupied_buckets;
-        std::size_t chain_length = 0;
+            while (current_value != 0) {
+                const auto slot =
+                    current_value &
+                    identity_ref::slot_mask;
+                const auto kind =
+                    static_cast<identity_kind>(
+                        current_value >>
+                        identity_ref::kind_shift);
+                const auto current =
+                    identity_ref::make(slot, kind);
+                const auto* item =
+                    published_record(current);
+                if (item == nullptr)
+                    break;
 
-        while (current_value != 0) {
-            const auto slot = current_value & identity_ref::slot_mask;
-            const auto kind = static_cast<identity_kind>(
-                current_value >> identity_ref::kind_shift);
-            const auto current = identity_ref::make(slot, kind);
-            const auto* item = published_record(current);
-            if (item == nullptr)
-                break;
+                ++chain_length;
+                ++output.entry_count;
+                total_comparisons += chain_length;
 
-            ++chain_length;
-            ++output.entry_count;
-            total_comparisons += chain_length;
+                const auto histogram_index =
+                    chain_length <
+                            comparison_histogram.size()
+                        ? chain_length
+                        : comparison_histogram.size() - 1;
+                ++comparison_histogram[
+                    histogram_index];
 
-            const auto histogram_index =
-                chain_length < comparison_histogram.size()
-                    ? chain_length
-                    : comparison_histogram.size() - 1;
-            ++comparison_histogram[histogram_index];
+                current_value = item->next_bucket;
+            }
 
-            current_value = item->next_bucket;
+            if (chain_length > 1) {
+                output.collision_entries +=
+                    chain_length - 1;
+            }
+
+            if (chain_length >
+                output.max_chain_length) {
+                output.max_chain_length =
+                    chain_length;
+            }
+        };
+
+    if (dense_semantic_bucket_mode) {
+        if (dense_semantic_buckets != nullptr) {
+            for (std::size_t index = 0;
+                 index < semantic_bucket_count;
+                 ++index) {
+                account_bucket(
+                    dense_semantic_buckets[index].load(
+                        std::memory_order_acquire));
+            }
         }
+    }
+    else {
+        for (const auto& page_slot :
+             semantic_bucket_pages) {
 
-        if (chain_length > 1)
-            output.collision_entries += chain_length - 1;
-        if (chain_length > output.max_chain_length)
-            output.max_chain_length = chain_length;
+            const auto* page =
+                page_slot.load(
+                    std::memory_order_acquire);
+            if (page == nullptr)
+                continue;
+
+            for (const auto& bucket : page->slots) {
+                account_bucket(
+                    bucket.load(
+                        std::memory_order_acquire));
+            }
+        }
     }
 
     if (output.occupied_buckets != 0) {
