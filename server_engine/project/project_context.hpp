@@ -6,13 +6,16 @@
 #include "persistence/compiled_image.hpp"
 #include "persistence/source_manager_image.hpp"
 #include "project_configuration.hpp"
+#include "project_generation.hpp"
 
 #include <atomic>
 #include <cstddef>
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <string_view>
+#include <utility>
 
 namespace cw::server {
 
@@ -117,6 +120,32 @@ public:
         return baseline != nullptr ? baseline->transaction() : std::string_view{};
     }
 
+    // Identifies the transaction known to contain the exact active Project
+    // state. Pure READY baselines derive it from their immutable mapping;
+    // construction-backed states acquire it only after a successful SAVE.
+    [[nodiscard]] std::string_view persisted_transaction() const noexcept {
+        if (!persisted_transaction_value.empty())
+            return persisted_transaction_value;
+        if (compiled == nullptr && baseline != nullptr)
+            return baseline->transaction();
+        return {};
+    }
+
+    // Performance metadata only. Failure to cache this identity must never turn
+    // a successful durable SAVE into a failed Project operation.
+    void remember_persisted_transaction(std::string_view transaction) noexcept {
+        try {
+            persisted_transaction_value.assign(transaction);
+        }
+        catch (...) {
+            persisted_transaction_value.clear();
+        }
+    }
+
+    void forget_persisted_transaction() noexcept {
+        persisted_transaction_value.clear();
+    }
+
     [[nodiscard]] const baseline_fingerprint* baseline_fingerprint_value() const noexcept {
         return baseline != nullptr
             ? &baseline->fingerprint()
@@ -129,6 +158,16 @@ public:
         return build_fingerprint_available
             ? &build_fingerprint_value
             : nullptr;
+    }
+
+    [[nodiscard]] const project_generation_provenance&
+    generation_provenance() const noexcept {
+        return generation_provenance_value;
+    }
+
+    [[nodiscard]] const project_generation_native_segments&
+    generation_native_segments() const noexcept {
+        return generation_native_segments_value;
     }
 
     [[nodiscard]] identity_ref identity_root() const noexcept {
@@ -427,6 +466,48 @@ private:
         build_fingerprint_available = true;
     }
 
+    void publish_generation_source_change(
+        source_change_capture&& capture) noexcept {
+        generation_provenance_value.publish_source_change(
+            std::move(capture));
+    }
+
+    void clear_generation_source_change() noexcept {
+        generation_provenance_value.clear_source_change();
+    }
+
+    void publish_generation_change_segment(
+        std::vector<std::byte>&& segment) noexcept {
+        generation_native_segments_value.publish_change(
+            std::move(segment));
+    }
+
+    void clear_generation_change_segment() noexcept {
+        generation_native_segments_value.clear_change();
+    }
+
+    [[nodiscard]] project_generation_provenance
+    release_generation_provenance() noexcept {
+        return std::move(generation_provenance_value);
+    }
+
+    void replace_generation_provenance(
+        project_generation_provenance&& replacement) noexcept {
+        generation_provenance_value =
+            std::move(replacement);
+    }
+
+    [[nodiscard]] project_generation_native_segments
+    release_generation_native_segments() noexcept {
+        return std::move(generation_native_segments_value);
+    }
+
+    void replace_generation_native_segments(
+        project_generation_native_segments&& replacement) noexcept {
+        generation_native_segments_value =
+            std::move(replacement);
+    }
+
     [[nodiscard]] status activate_ready_baseline(
         baseline_snapshot&& snapshot) noexcept;
 
@@ -446,8 +527,11 @@ private:
     mutable status source_mapping_status{};
     mutable bool source_mapping_attempted = false;
     build_cache_image_view mapped_build_cache;
+    std::string persisted_transaction_value;
     baseline_fingerprint build_fingerprint_value{};
     bool build_fingerprint_available = false;
+    project_generation_provenance generation_provenance_value;
+    project_generation_native_segments generation_native_segments_value;
 
     friend class project_build_orchestrator;
     friend class project_manager;

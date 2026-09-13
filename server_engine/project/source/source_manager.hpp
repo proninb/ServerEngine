@@ -1,6 +1,7 @@
 #pragma once
 
 #include "source_snapshot.hpp"
+#include "source_generation_storage.hpp"
 #include "../../diagnostics/diagnostic_buffer.hpp"
 #include "../../operation.hpp"
 #include "../../status.hpp"
@@ -108,6 +109,11 @@ public:
         return baseline_sources != nullptr;
     }
 
+    [[nodiscard]] const source_generation_storage&
+    generation_storage() const noexcept {
+        return generation_storage_value;
+    }
+
     [[nodiscard]] status publish_memory(
         std::string_view normalized_path,
         std::string_view text,
@@ -117,8 +123,11 @@ public:
 private:
     struct committed_source final {
         source_snapshot snapshot;
-        std::vector<source_id> includes;
-        std::vector<source_id> dependents;
+
+        // Compatibility cache for mmap baseline edges only. Fresh G0 and all
+        // published replacements live in source_generation_storage arenas.
+        std::vector<source_id> baseline_includes;
+        std::vector<source_id> baseline_dependents;
     };
 
     struct path_slot final {
@@ -156,6 +165,7 @@ private:
     mapped_vector<source_record> records;
     std::vector<char> path_storage;
     mapped_vector<committed_source> states;
+    source_generation_storage generation_storage_value;
     std::vector<path_slot> path_index;
 };
 

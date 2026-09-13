@@ -174,23 +174,32 @@ status make_project_baseline_fingerprint(
     }
 }
 
-status encode_project_baseline(
+status freeze_project_generation(
     const project_context& project,
     const project_configuration& configuration,
-    project_baseline_images& output) noexcept {
+    project_generation_storage& output) noexcept {
 
     output = {};
 
     if (!project.construction_backed())
         return {status_code::invalid_state};
 
-    source_change_capture change_capture;
-    auto result =
-        prepare_source_change_capture(
-            project.sources(),
-            change_capture);
-    if (!result.ok())
-        return result;
+    source_change_capture fallback_change_capture;
+    const source_change_capture* change_capture =
+        project.generation_provenance().source_change();
+
+    auto result = status{};
+    if (change_capture == nullptr) {
+        result =
+            prepare_source_change_capture(
+                project.sources(),
+                fallback_change_capture);
+        if (!result.ok())
+            return result;
+
+        change_capture =
+            &fallback_change_capture;
+    }
 
     result =
         encode_compiled_image(
@@ -227,26 +236,34 @@ status encode_project_baseline(
         options.roots =
             std::span<const source_manager_image_root>{roots};
         options.change_checkpoint =
-            change_capture.checkpoint;
+            change_capture->checkpoint;
         options.file_identity_index =
-            change_capture.file_index;
+            change_capture->file_index;
         options.directory_identity_index =
-            change_capture.directory_index;
+            change_capture->directory_index;
 
         result = encode_source_manager_image(
             project.sources(),
             options,
-            output.source_manager);
+            output.sources);
         if (!result.ok())
             return result;
 
-        result = encode_change_state_image(
-            project.sources().source_count(),
-            change_capture.journal_anchor_path,
-            change_capture,
-            output.change_state);
-        if (!result.ok())
-            return result;
+        const auto native_change =
+            project.generation_native_segments().change();
+
+        if (!native_change.empty()) {
+            output.native_change = native_change;
+        }
+        else {
+            result = encode_change_state_image(
+                project.sources().source_count(),
+                change_capture->journal_anchor_path,
+                *change_capture,
+                output.change_fallback);
+            if (!result.ok())
+                return result;
+        }
     }
     catch (const std::bad_alloc&) {
         return {status_code::not_available};
@@ -257,8 +274,8 @@ status encode_project_baseline(
 
     result = encode_build_cache_image(
         project,
-        change_capture,
-        output.build_cache);
+        *change_capture,
+        output.build);
     if (!result.ok())
         return result;
 
@@ -271,15 +288,15 @@ status encode_project_baseline(
     if (!result.ok())
         return result;
 
-    result = sources.bind(output.source_manager);
+    result = sources.bind(output.sources);
     if (!result.ok())
         return result;
 
-    result = change_state.bind(output.change_state);
+    result = change_state.bind(output.segments().change());
     if (!result.ok())
         return result;
 
-    result = build_cache.bind(output.build_cache);
+    result = build_cache.bind(output.build);
     if (!result.ok())
         return result;
 
@@ -295,13 +312,34 @@ status encode_project_baseline(
         sources);
 }
 
+status freeze_project_generation(
+    const project_context& project,
+    project_generation_storage& output) noexcept {
+
+    return freeze_project_generation(
+        project,
+        project.configuration(),
+        output);
+}
+
+
+status encode_project_baseline(
+    const project_context& project,
+    const project_configuration& configuration,
+    project_baseline_images& output) noexcept {
+
+    return freeze_project_generation(
+        project,
+        configuration,
+        output);
+}
+
 status encode_project_baseline(
     const project_context& project,
     project_baseline_images& output) noexcept {
 
-    return encode_project_baseline(
+    return freeze_project_generation(
         project,
-        project.configuration(),
         output);
 }
 

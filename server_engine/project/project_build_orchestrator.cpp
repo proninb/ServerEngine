@@ -1,4 +1,5 @@
 #include "project_build_orchestrator.hpp"
+#include "generation/project_generation_freeze.hpp"
 
 #include <chrono>
 #include <new>
@@ -79,6 +80,8 @@ using build_clock = std::chrono::steady_clock;
 }
 
 
+
+
 } // namespace
 
 status project_build_orchestrator::construct(
@@ -102,6 +105,10 @@ status project_build_orchestrator::rebuild(
         if (!result.ok())
             return result;
         project.replace_compiled(candidate.release_compiled());
+        project.replace_generation_provenance(
+            candidate.release_generation_provenance());
+        project.replace_generation_native_segments(
+            candidate.release_generation_native_segments());
         return {};
     }
     catch (const std::bad_alloc&) {
@@ -132,7 +139,38 @@ status project_build_orchestrator::rebuild_current(
             return result;
 
         auto& state = project.mutable_compiled();
-        auto semantic = project.parser_services();
+
+        source_change_checkpoint generation_checkpoint;
+        std::string generation_anchor;
+
+        try {
+            if (normalize_source_path(
+                    roots.front(),
+                    generation_anchor).ok()) {
+                const auto checkpoint_result =
+                    capture_source_change_checkpoint(
+                        std::filesystem::path{
+                            generation_anchor},
+                        generation_checkpoint);
+
+                if (!checkpoint_result.ok())
+                    generation_checkpoint = {};
+            }
+        }
+        catch (const std::bad_alloc&) {
+            generation_checkpoint = {};
+            generation_anchor.clear();
+        }
+        catch (const std::length_error&) {
+            generation_checkpoint = {};
+            generation_anchor.clear();
+        }
+        catch (const std::system_error&) {
+            generation_checkpoint = {};
+            generation_anchor.clear();
+        }
+
+auto semantic = project.parser_services();
         auto source_update = state.sources.begin_update();
         source_frontend_generation frontend_builder{
             semantic,
@@ -203,6 +241,38 @@ status project_build_orchestrator::rebuild_current(
         builder.publish_prepared();
         publish_end = build_clock::now();
         cache_update.publish_prepared();
+        source_change_capture generation_change;
+        const auto provenance_result =
+            prepare_generation_source_change_capture(
+                state.sources,
+                generation_checkpoint,
+                generation_anchor,
+                generation_change);
+
+        if (provenance_result.ok()) {
+            std::vector<std::byte> change_segment;
+            const auto segment_result =
+                freeze_generation_change_segment(
+                    state.sources.source_count(),
+                    generation_change,
+                    change_segment);
+
+            project.publish_generation_source_change(
+                std::move(generation_change));
+
+            if (segment_result.ok()) {
+                project.publish_generation_change_segment(
+                    std::move(change_segment));
+            }
+            else {
+                project.clear_generation_change_segment();
+            }
+        }
+        else {
+            project.clear_generation_source_change();
+            project.clear_generation_change_segment();
+        }
+
         interface_publish_end = build_clock::now();
         output.telemetry.publication_ns = elapsed_ns(publish_begin, publish_end);
         output.telemetry.interface_publish_ns =
@@ -338,6 +408,8 @@ status project_build_orchestrator::update(
         output.telemetry.total_ns = elapsed_ns(total_begin, interface_publish_end);
         output.telemetry.sources = source_update.telemetry();
         output.telemetry.storage_after = project.storage_pressure();
+        project.clear_generation_source_change();
+        project.clear_generation_change_segment();
         output.changed = true;
         return {};
     }

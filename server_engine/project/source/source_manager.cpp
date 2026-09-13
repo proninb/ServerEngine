@@ -304,7 +304,10 @@ source_manager::source_manager(
         this,
         baseline_source_count,
         &source_manager::read_baseline_state);
+    generation_storage_value.bind_baseline(
+        baseline_source_count);
 }
+
 
 status source_manager::read_baseline_record(
     const void* context,
@@ -361,15 +364,18 @@ status source_manager::read_baseline_state(
                 physical.hash};
         }
 
-        const auto includes = owner->baseline_sources->includes(source);
-        output.includes.reserve(includes.size());
-        for (std::size_t edge = 0; edge < includes.size(); ++edge)
-            output.includes.push_back(includes[edge]);
 
-        const auto dependents = owner->baseline_sources->dependents(source);
-        output.dependents.reserve(dependents.size());
+        const auto includes =
+            owner->baseline_sources->includes(source);
+        output.baseline_includes.reserve(includes.size());
+        for (std::size_t edge = 0; edge < includes.size(); ++edge)
+            output.baseline_includes.push_back(includes[edge]);
+
+        const auto dependents =
+            owner->baseline_sources->dependents(source);
+        output.baseline_dependents.reserve(dependents.size());
         for (std::size_t edge = 0; edge < dependents.size(); ++edge)
-            output.dependents.push_back(dependents[edge]);
+            output.baseline_dependents.push_back(dependents[edge]);
 
         return {};
     }
@@ -529,37 +535,66 @@ source_snapshot source_manager::current(source_id source) const noexcept {
         physical.hash};
 }
 
-std::span<const source_id> source_manager::includes(source_id source) const noexcept {
+std::span<const source_id> source_manager::includes(
+    source_id source) const noexcept {
+
     if (!source)
         return {};
-    const auto index = static_cast<std::size_t>(source.value() - 1);
-    return index < states.size()
-        ? std::span<const source_id>{states[index].includes}
-        : std::span<const source_id>{};
+
+    if (generation_storage_value.has_includes(source))
+        return generation_storage_value.includes(source);
+
+    const auto index =
+        static_cast<std::size_t>(source.value() - 1);
+
+    if (baseline_sources == nullptr ||
+        index >= baseline_source_count ||
+        index >= states.size()) {
+        return {};
+    }
+
+    // Only baseline compatibility paths materialize this cache. Fresh G0 and
+    // sparse replacements remain in generation_storage_value.
+    return states[index].baseline_includes;
 }
 
-std::span<const source_id> source_manager::dependents(source_id source) const noexcept {
+std::span<const source_id> source_manager::dependents(
+    source_id source) const noexcept {
+
     if (!source)
         return {};
-    const auto index = static_cast<std::size_t>(source.value() - 1);
-    return index < states.size()
-        ? std::span<const source_id>{states[index].dependents}
-        : std::span<const source_id>{};
+
+    if (generation_storage_value.has_dependents(source))
+        return generation_storage_value.dependents(source);
+
+    const auto index =
+        static_cast<std::size_t>(source.value() - 1);
+
+    if (baseline_sources == nullptr ||
+        index >= baseline_source_count ||
+        index >= states.size()) {
+        return {};
+    }
+
+    return states[index].baseline_dependents;
 }
 
-std::size_t source_manager::include_count(source_id source) const noexcept {
+std::size_t source_manager::include_count(
+    source_id source) const noexcept {
+
     if (!source)
         return 0;
-    const auto index = static_cast<std::size_t>(source.value() - 1);
-    if (index >= states.size())
-        return 0;
 
-    if (const auto* state = states.materialized(index); state != nullptr)
-        return state->includes.size();
+    if (generation_storage_value.has_includes(source))
+        return generation_storage_value.includes(source).size();
 
-    if (baseline_sources != nullptr && index < baseline_source_count)
-        return baseline_sources->includes(source).size();
-    return 0;
+    const auto index =
+        static_cast<std::size_t>(source.value() - 1);
+
+    return baseline_sources != nullptr &&
+        index < baseline_source_count
+        ? baseline_sources->includes(source).size()
+        : 0;
 }
 
 source_id source_manager::include_at(
@@ -568,33 +603,46 @@ source_id source_manager::include_at(
 
     if (!source)
         return {};
-    const auto index = static_cast<std::size_t>(source.value() - 1);
-    if (index >= states.size())
-        return {};
 
-    if (const auto* state = states.materialized(index); state != nullptr)
-        return edge < state->includes.size() ? state->includes[edge] : source_id{};
-
-    if (baseline_sources != nullptr && index < baseline_source_count) {
-        const auto values = baseline_sources->includes(source);
-        return edge < values.size() ? values[edge] : source_id{};
+    if (generation_storage_value.has_includes(source)) {
+        const auto values =
+            generation_storage_value.includes(source);
+        return edge < values.size()
+            ? values[edge]
+            : source_id{};
     }
+
+    const auto index =
+        static_cast<std::size_t>(source.value() - 1);
+
+    if (baseline_sources != nullptr &&
+        index < baseline_source_count) {
+        const auto values =
+            baseline_sources->includes(source);
+        return edge < values.size()
+            ? values[edge]
+            : source_id{};
+    }
+
     return {};
 }
 
-std::size_t source_manager::dependent_count(source_id source) const noexcept {
+std::size_t source_manager::dependent_count(
+    source_id source) const noexcept {
+
     if (!source)
         return 0;
-    const auto index = static_cast<std::size_t>(source.value() - 1);
-    if (index >= states.size())
-        return 0;
 
-    if (const auto* state = states.materialized(index); state != nullptr)
-        return state->dependents.size();
+    if (generation_storage_value.has_dependents(source))
+        return generation_storage_value.dependents(source).size();
 
-    if (baseline_sources != nullptr && index < baseline_source_count)
-        return baseline_sources->dependents(source).size();
-    return 0;
+    const auto index =
+        static_cast<std::size_t>(source.value() - 1);
+
+    return baseline_sources != nullptr &&
+        index < baseline_source_count
+        ? baseline_sources->dependents(source).size()
+        : 0;
 }
 
 source_id source_manager::dependent_at(
@@ -603,17 +651,27 @@ source_id source_manager::dependent_at(
 
     if (!source)
         return {};
-    const auto index = static_cast<std::size_t>(source.value() - 1);
-    if (index >= states.size())
-        return {};
 
-    if (const auto* state = states.materialized(index); state != nullptr)
-        return edge < state->dependents.size() ? state->dependents[edge] : source_id{};
-
-    if (baseline_sources != nullptr && index < baseline_source_count) {
-        const auto values = baseline_sources->dependents(source);
-        return edge < values.size() ? values[edge] : source_id{};
+    if (generation_storage_value.has_dependents(source)) {
+        const auto values =
+            generation_storage_value.dependents(source);
+        return edge < values.size()
+            ? values[edge]
+            : source_id{};
     }
+
+    const auto index =
+        static_cast<std::size_t>(source.value() - 1);
+
+    if (baseline_sources != nullptr &&
+        index < baseline_source_count) {
+        const auto values =
+            baseline_sources->dependents(source);
+        return edge < values.size()
+            ? values[edge]
+            : source_id{};
+    }
+
     return {};
 }
 
@@ -1160,8 +1218,9 @@ status source_manager_update::apply_acquire(source_acquire_result&& result) noex
         storage->text = std::move(result.snapshot.bytes);
         storage->observation = result.snapshot.observation;
         storage->hash = result.snapshot.hash;
-
-        const bool semantic_change = !previous || previous.hash() != storage->hash;
+        storage->identity =
+            result.snapshot.identity;
+const bool semantic_change = !previous || previous.hash() != storage->hash;
         item->snapshot = source_snapshot{std::move(storage)};
         item->has_snapshot = true;
         if (semantic_change)
@@ -1596,6 +1655,51 @@ status source_manager_update::prepare_publish() noexcept {
         }
     }
 
+    std::size_t additional_forward_edges = 0;
+    std::size_t additional_reverse_edges = 0;
+
+    for (const auto& item : candidates) {
+        if (item.has_includes) {
+            if (additional_forward_edges >
+                (std::numeric_limits<std::size_t>::max)() -
+                    item.includes.size()) {
+                return {status_code::not_available};
+            }
+            additional_forward_edges += item.includes.size();
+        }
+
+        if (item.has_dependents) {
+            if (additional_reverse_edges >
+                (std::numeric_limits<std::size_t>::max)() -
+                    item.dependents.size()) {
+                return {status_code::not_available};
+            }
+            additional_reverse_edges += item.dependents.size();
+        }
+    }
+
+    result = owner->generation_storage_value.prepare_publish(
+        new_sources.size(),
+        additional_forward_edges,
+        additional_reverse_edges);
+    if (!result.ok())
+        return result;
+
+    for (const auto& item : candidates) {
+        if (!item.has_includes && !item.has_dependents)
+            continue;
+
+        if (static_cast<std::size_t>(item.source.value()) <=
+            owner->generation_storage_value.source_count()) {
+
+            result =
+                owner->generation_storage_value.prepare_source(
+                    item.source);
+            if (!result.ok())
+                return result;
+        }
+    }
+
     prepared = true;
     return {};
 }
@@ -1613,6 +1717,7 @@ void source_manager_update::publish_prepared() noexcept {
             item.normalized_path.end());
         owner->records.push_back(source_record{offset, length});
         owner->states.emplace_back();
+        owner->generation_storage_value.publish_source();
     }
 
     for (auto& item : candidates) {
@@ -1621,10 +1726,16 @@ void source_manager_update::publish_prepared() noexcept {
             continue;
         if (item.has_snapshot)
             owner->states[index].snapshot = std::move(item.snapshot);
-        if (item.has_includes)
-            owner->states[index].includes = std::move(item.includes);
-        if (item.has_dependents)
-            owner->states[index].dependents = std::move(item.dependents);
+        if (item.has_includes) {
+            owner->generation_storage_value.publish_includes(
+                item.source,
+                item.includes);
+        }
+        if (item.has_dependents) {
+            owner->generation_storage_value.publish_dependents(
+                item.source,
+                item.dependents);
+        }
     }
 
     if (!prepared_path_index.empty()) {

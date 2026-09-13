@@ -292,55 +292,143 @@ void write_u64(std::array<std::byte, manifest_size>& output, std::size_t offset,
 
 [[nodiscard]] status durable_write_file(
     const std::filesystem::path& path,
-    std::span<const std::byte> bytes) noexcept {
+    const project_generation_segment& first,
+    const project_generation_segment& second =
+        project_generation_segment{}) noexcept {
 #if defined(_WIN32)
     const auto handle = ::CreateFileW(
-        path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL, nullptr);
+        path.c_str(),
+        GENERIC_WRITE,
+        0,
+        nullptr,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+
     if (handle == INVALID_HANDLE_VALUE)
         return {status_code::io_failed};
 
-    std::size_t offset = 0;
-    while (offset < bytes.size()) {
-        const auto remaining = bytes.size() - offset;
-        const auto chunk = static_cast<DWORD>(std::min<std::size_t>(
-            remaining, (std::numeric_limits<DWORD>::max)()));
-        DWORD written = 0;
-        if (!::WriteFile(handle, bytes.data() + offset, chunk, &written, nullptr) || written != chunk) {
-            ::CloseHandle(handle);
-            return {status_code::io_failed};
+    const project_generation_segment* segments[]{
+        &first,
+        &second,
+    };
+
+    for (const auto* segment : segments) {
+        for (std::size_t extent_index = 0;
+             extent_index < segment->extent_count();
+             ++extent_index) {
+
+            const auto bytes =
+                segment->extent(extent_index);
+
+            std::size_t offset = 0;
+            while (offset < bytes.size()) {
+                const auto remaining =
+                    bytes.size() - offset;
+
+                const auto chunk =
+                    static_cast<DWORD>(
+                        (std::min)(
+                            remaining,
+                            static_cast<std::size_t>(
+                                (std::numeric_limits<DWORD>::max)())));
+
+                DWORD written = 0;
+                if (::WriteFile(
+                        handle,
+                        bytes.data() + offset,
+                        chunk,
+                        &written,
+                        nullptr) == 0 ||
+                    written != chunk) {
+
+                    ::CloseHandle(handle);
+                    return {status_code::io_failed};
+                }
+
+                offset += static_cast<std::size_t>(written);
+            }
         }
-        offset += written;
     }
 
-    const auto flushed = ::FlushFileBuffers(handle) != 0;
-    const auto closed = ::CloseHandle(handle) != 0;
-    return flushed && closed ? status{} : status{status_code::io_failed};
+    const auto flushed =
+        ::FlushFileBuffers(handle) != 0;
+    const auto closed =
+        ::CloseHandle(handle) != 0;
+
+    return flushed && closed
+        ? status{}
+        : status{status_code::io_failed};
 #else
-    const auto handle = ::open(path.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0666);
+    const auto handle =
+        ::open(
+            path.c_str(),
+            O_CREAT | O_TRUNC | O_WRONLY,
+            0666);
+
     if (handle < 0)
         return {status_code::io_failed};
 
-    std::size_t offset = 0;
-    while (offset < bytes.size()) {
-        const auto result = ::write(handle, bytes.data() + offset, bytes.size() - offset);
-        if (result < 0) {
-            if (errno == EINTR)
-                continue;
-            ::close(handle);
-            return {status_code::io_failed};
+    const project_generation_segment* segments[]{
+        &first,
+        &second,
+    };
+
+    for (const auto* segment : segments) {
+        for (std::size_t extent_index = 0;
+             extent_index < segment->extent_count();
+             ++extent_index) {
+
+            const auto bytes =
+                segment->extent(extent_index);
+
+            std::size_t offset = 0;
+            while (offset < bytes.size()) {
+                const auto result =
+                    ::write(
+                        handle,
+                        bytes.data() + offset,
+                        bytes.size() - offset);
+
+                if (result < 0) {
+                    if (errno == EINTR)
+                        continue;
+
+                    ::close(handle);
+                    return {status_code::io_failed};
+                }
+
+                if (result == 0) {
+                    ::close(handle);
+                    return {status_code::io_failed};
+                }
+
+                offset +=
+                    static_cast<std::size_t>(result);
+            }
         }
-        if (result == 0) {
-            ::close(handle);
-            return {status_code::io_failed};
-        }
-        offset += static_cast<std::size_t>(result);
     }
 
-    const auto synced = ::fsync(handle) == 0;
-    const auto closed = ::close(handle) == 0;
-    return synced && closed ? status{} : status{status_code::io_failed};
+    const auto synced =
+        ::fsync(handle) == 0;
+    const auto closed =
+        ::close(handle) == 0;
+
+    return synced && closed
+        ? status{}
+        : status{status_code::io_failed};
 #endif
+}
+
+[[nodiscard]] status durable_write_file(
+    const std::filesystem::path& path,
+    std::span<const std::byte> first,
+    std::span<const std::byte> second = {}) noexcept {
+
+    return durable_write_file(
+        path,
+        project_generation_segment{first},
+        project_generation_segment{second});
 }
 
 [[nodiscard]] status flush_directory(const std::filesystem::path& path) noexcept {
@@ -1437,6 +1525,18 @@ std::span<const std::byte> baseline_snapshot::artifact(
     return {};
 }
 
+
+project_generation_segments
+baseline_snapshot::segments() const noexcept {
+
+    return {
+        artifact(baseline_artifact_kind::compiled),
+        artifact(baseline_artifact_kind::source_manager),
+        artifact(baseline_artifact_kind::change_state),
+        artifact(baseline_artifact_kind::build_cache),
+    };
+}
+
 bool baseline_snapshot::mapped(
     baseline_artifact_kind kind) const noexcept {
 
@@ -1822,32 +1922,53 @@ status baseline_store::probe(
     output = {};
 
     try {
+        const auto root = root_path();
+
         std::string transaction;
-        auto result =
-            read_current_transaction(
-                root_path(),
-                transaction);
+        std::array<std::byte, manifest_size>
+            embedded_manifest{};
+        bool embedded_manifest_available = false;
+
+        // Identity-only callers must not read the embedded BUILD decision gate.
+        // CURRENT v3 is validated from its fixed prefix plus file size; the
+        // change-state tail remains untouched.
+        auto result = read_current_ready_selector(
+            root,
+            transaction,
+            embedded_manifest,
+            embedded_manifest_available);
         if (!result.ok())
             return result;
 
-        const auto directory =
-            root_path() / transaction;
+        parsed_manifest manifest;
 
-        std::vector<std::byte> manifest_bytes;
-        result = read_small_file(
-            directory / manifest_name,
-            manifest_size,
-            manifest_bytes);
-        if (!result.ok()) {
-            return result.code == status_code::not_found
-                ? status{status_code::artifact_corrupt}
-                : result;
+        if (embedded_manifest_available) {
+            result = parse_manifest(
+                embedded_manifest,
+                manifest);
+        }
+        else {
+            const auto directory =
+                root / transaction;
+
+            std::vector<std::byte> manifest_bytes;
+            result = read_small_file(
+                directory / manifest_name,
+                manifest_size,
+                manifest_bytes);
+            if (!result.ok()) {
+                return result.code ==
+                        status_code::not_found
+                    ? status{
+                        status_code::artifact_corrupt}
+                    : result;
+            }
+
+            result = parse_manifest(
+                manifest_bytes,
+                manifest);
         }
 
-        parsed_manifest manifest;
-        result = parse_manifest(
-            manifest_bytes,
-            manifest);
         if (!result.ok())
             return result;
 
@@ -1857,8 +1978,10 @@ status baseline_store::probe(
         output.fingerprint = manifest.fingerprint;
         output.configuration = manifest.configuration;
         output.transaction = std::move(transaction);
-        output.source_manager_size = manifest.source_manager_size;
-        output.build_cache_size = manifest.build_cache_size;
+        output.source_manager_size =
+            manifest.source_manager_size;
+        output.build_cache_size =
+            manifest.build_cache_size;
         return {};
     }
     catch (const std::bad_alloc&) {
@@ -2672,11 +2795,22 @@ status baseline_store::open_selected(
 status baseline_store::commit(
     const baseline_fingerprint& fingerprint,
     const baseline_configuration_state& configuration,
-    std::span<const std::byte> compiled,
-    std::span<const std::byte> source_manager,
-    std::span<const std::byte> change_state,
-    std::span<const std::byte> build_cache,
+    project_generation_segments generation,
     baseline_commit_result& output) const noexcept {
+    const auto& compiled =
+        generation.compiled_segment();
+    const auto& source_manager =
+        generation.sources_segment();
+    const auto& change_state =
+        generation.change_segment();
+    const auto& build_cache =
+        generation.build_segment();
+
+    if (!change_state.empty() &&
+        !change_state.is_contiguous()) {
+        return {status_code::invalid_argument};
+    }
+
 
     output = {};
     try {
@@ -2722,40 +2856,22 @@ status baseline_store::commit(
             !source_manager.empty() &&
             !build_cache.empty();
 
-        std::vector<std::byte> packed_source_manager;
-        std::span<const std::byte> persisted_source_manager =
-            source_manager;
-
-        if (pack_build_state) {
-            if (source_manager.size() >
+        if (pack_build_state &&
+            source_manager.size() >
                 (std::numeric_limits<std::size_t>::max)() -
                     build_cache.size()) {
-                cleanup_failed_transaction();
-                return {status_code::not_available};
-            }
-
-            packed_source_manager.reserve(
-                source_manager.size() +
-                build_cache.size());
-
-            packed_source_manager.insert(
-                packed_source_manager.end(),
-                source_manager.begin(),
-                source_manager.end());
-
-            packed_source_manager.insert(
-                packed_source_manager.end(),
-                build_cache.begin(),
-                build_cache.end());
-
-            persisted_source_manager = {
-                packed_source_manager.data(),
-                packed_source_manager.size()};
+            cleanup_failed_transaction();
+            return {status_code::not_available};
         }
 
-        result = durable_write_file(
-            directory / source_manager_name,
-            persisted_source_manager);
+        result = pack_build_state
+            ? durable_write_file(
+                directory / source_manager_name,
+                source_manager,
+                build_cache)
+            : durable_write_file(
+                directory / source_manager_name,
+                source_manager);
 
         if (!result.ok()) {
             cleanup_failed_transaction();
@@ -2817,7 +2933,7 @@ status baseline_store::commit(
         result = create_current_selector(
             transaction,
             manifest,
-            change_state,
+            change_state.contiguous(),
             selector_bytes);
         if (!result.ok()) {
             cleanup_failed_transaction();
@@ -2864,6 +2980,27 @@ status baseline_store::commit(
     catch (const std::filesystem::filesystem_error&) {
         return {status_code::persistence_failed};
     }
+}
+
+
+status baseline_store::commit(
+    const baseline_fingerprint& fingerprint,
+    const baseline_configuration_state& configuration,
+    std::span<const std::byte> compiled,
+    std::span<const std::byte> source_manager,
+    std::span<const std::byte> change_state,
+    std::span<const std::byte> build_cache,
+    baseline_commit_result& output) const noexcept {
+
+    return commit(
+        fingerprint,
+        configuration,
+        project_generation_segments{
+            compiled,
+            source_manager,
+            change_state,
+            build_cache},
+        output);
 }
 
 
