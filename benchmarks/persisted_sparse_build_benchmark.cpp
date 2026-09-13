@@ -613,7 +613,9 @@ void print_result(
 [[nodiscard]] int run_fast_modify_gate() {
 #ifdef _WIN32
     constexpr std::size_t source_count = 100'000;
-    constexpr double dirty_limit_ms = 100.0;
+    constexpr double dirty_limit_ms = 10.0;
+    constexpr double manager_limit_ms = 8.0;
+    constexpr double baseline_open_limit_ms = 4.0;
 
     temporary_tree tree;
     std::filesystem::path configuration_path;
@@ -680,7 +682,8 @@ void print_result(
         build.telemetry.configuration_ns == 0 &&
         build.telemetry.fingerprint_ns == 0 &&
         build.telemetry.baseline_open_ns != 0 &&
-        build.telemetry.baseline_build_cache_map_ns != 0 &&
+        build.telemetry.baseline_source_manager_map_ns != 0 &&
+        build.telemetry.baseline_build_cache_map_ns == 0 &&
         build.telemetry.dirty_detection_ns != 0 &&
         build.telemetry.baseline_activation_ns == 0 &&
         build.telemetry.build_activation_ns != 0 &&
@@ -718,7 +721,15 @@ void print_result(
         !build.telemetry.dirty_detection_fallback &&
         build.telemetry.dirty_sources == 1 &&
         build.telemetry.journal_matched_sources == 1 &&
-        dirty_ms <= dirty_limit_ms;
+        build.telemetry.baseline_source_manager_map_ns != 0 &&
+        build.telemetry.baseline_build_cache_map_ns == 0 &&
+        dirty_ms <= dirty_limit_ms &&
+        static_cast<double>(
+            build.telemetry.manager_total_ns) / 1'000'000.0 <=
+                manager_limit_ms &&
+        static_cast<double>(
+            build.telemetry.baseline_open_ns) / 1'000'000.0 <=
+                baseline_open_limit_ms;
 
     const auto accounted_ns =
         build.telemetry.configuration_identity_ns +
@@ -738,7 +749,22 @@ void print_result(
         << "D3D_FAST_MODIFY_GATE,"
         << (pass ? "PASS" : "FAIL")
         << ",dirty_ms=" << dirty_ms
-        << ",limit_ms=" << dirty_limit_ms
+        << ",dirty_limit_ms=" << dirty_limit_ms
+        << ",manager_ms="
+        << static_cast<double>(
+            build.telemetry.manager_total_ns) / 1'000'000.0
+        << ",manager_limit_ms=" << manager_limit_ms
+        << ",baseline_open_ms="
+        << static_cast<double>(
+            build.telemetry.baseline_open_ns) / 1'000'000.0
+        << ",baseline_open_limit_ms=" << baseline_open_limit_ms
+        << ",source_manager_map_ms="
+        << static_cast<double>(
+            build.telemetry.baseline_source_manager_map_ns) / 1'000'000.0
+        << ",build_cache_map_ms="
+        << static_cast<double>(
+            build.telemetry.baseline_build_cache_map_ns) / 1'000'000.0
+        << ",packed_build_state=1"
         << ",journal_records="
         << build.telemetry.journal_records
         << ",journal_matched="

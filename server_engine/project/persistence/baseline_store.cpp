@@ -1037,18 +1037,52 @@ status read_only_file_mapping::map(const std::filesystem::path& path) noexcept {
     }
 }
 
-std::span<const std::byte> baseline_snapshot::artifact(baseline_artifact_kind kind) const noexcept {
+std::span<const std::byte> baseline_snapshot::artifact(
+    baseline_artifact_kind kind) const noexcept {
+
     switch (kind) {
-        case baseline_artifact_kind::compiled: return compiled.bytes();
-        case baseline_artifact_kind::source_manager: return source_manager.bytes();
-        case baseline_artifact_kind::change_state:
-            return !embedded_change_state.empty()
-                ? std::span<const std::byte>{
-                    embedded_change_state.data(),
-                    embedded_change_state.size()}
-                : change_state.bytes();
-        case baseline_artifact_kind::build_cache: return build_cache.bytes();
+    case baseline_artifact_kind::compiled:
+        return compiled.bytes();
+
+    case baseline_artifact_kind::source_manager: {
+        const auto mapped_bytes = source_manager.bytes();
+        if (source_manager_size_value == 0 ||
+            source_manager_size_value > mapped_bytes.size()) {
+            return mapped_bytes;
+        }
+
+        return mapped_bytes.first(
+            static_cast<std::size_t>(
+                source_manager_size_value));
     }
+
+    case baseline_artifact_kind::change_state:
+        return !embedded_change_state.empty()
+            ? std::span<const std::byte>{
+                embedded_change_state.data(),
+                embedded_change_state.size()}
+            : change_state.bytes();
+
+    case baseline_artifact_kind::build_cache:
+        if (packed_build_state &&
+            packed_build_cache_enabled &&
+            source_manager.open() &&
+            source_manager_size_value <=
+                source_manager.bytes().size() &&
+            build_cache_size_value <=
+                source_manager.bytes().size() -
+                    source_manager_size_value) {
+
+            return source_manager.bytes().subspan(
+                static_cast<std::size_t>(
+                    source_manager_size_value),
+                static_cast<std::size_t>(
+                    build_cache_size_value));
+        }
+
+        return build_cache.bytes();
+    }
+
     return {};
 }
 
@@ -1064,7 +1098,11 @@ bool baseline_snapshot::mapped(
         return !embedded_change_state.empty() ||
             change_state.open();
     case baseline_artifact_kind::build_cache:
-        return build_cache.open();
+        return
+            (packed_build_state &&
+             packed_build_cache_enabled &&
+             source_manager.open()) ||
+            build_cache.open();
     }
     return false;
 }
@@ -1173,6 +1211,10 @@ status baseline_store::open_current_decision(
             manifest.fingerprint;
         candidate.transaction_value =
             manifest.transaction;
+        candidate.source_manager_size_value =
+            manifest.source_manager_size;
+        candidate.build_cache_size_value =
+            manifest.build_cache_size;
 
         const auto compiled_map_begin =
             std::chrono::steady_clock::now();
@@ -1561,14 +1603,56 @@ status baseline_store::map_source_manager_cached(
         if (!result.ok())
             return result.code == status_code::not_found ? status{status_code::artifact_corrupt} : result;
 
-        const auto validation_begin = std::chrono::steady_clock::now();
-        const bool mismatch = snapshot.source_manager.bytes().size() != expected_source_manager_size;
-        if (telemetry != nullptr)
-            telemetry->size_validation_ns = elapsed_ns(validation_begin, std::chrono::steady_clock::now());
+        const auto validation_begin =
+            std::chrono::steady_clock::now();
+
+        if (snapshot.source_manager_size_value == 0)
+            snapshot.source_manager_size_value =
+                expected_source_manager_size;
+
+        const auto physical_size =
+            static_cast<std::uint64_t>(
+                snapshot.source_manager.bytes().size());
+
+        const bool expected_matches =
+            snapshot.source_manager_size_value ==
+                expected_source_manager_size;
+
+        const bool separate =
+            physical_size ==
+                expected_source_manager_size;
+
+        const bool can_pack =
+            expected_source_manager_size <=
+                (std::numeric_limits<std::uint64_t>::max)() -
+                    snapshot.build_cache_size_value;
+
+        const bool packed =
+            can_pack &&
+            physical_size ==
+                expected_source_manager_size +
+                    snapshot.build_cache_size_value;
+
+        const bool mismatch =
+            !expected_matches ||
+            (!separate && !packed);
+
+        if (telemetry != nullptr) {
+            telemetry->size_validation_ns =
+                elapsed_ns(
+                    validation_begin,
+                    std::chrono::steady_clock::now());
+        }
+
         if (mismatch) {
             snapshot.source_manager = {};
+            snapshot.packed_build_state = false;
+            snapshot.packed_build_cache_enabled = false;
             return {status_code::artifact_corrupt};
         }
+
+        snapshot.packed_build_state = packed;
+        snapshot.packed_build_cache_enabled = false;
         return {};
     }
     catch (const std::bad_alloc&) { return {status_code::not_available}; }
@@ -1701,6 +1785,40 @@ status baseline_store::map_build_cache_cached(
     }
 
     try {
+        if (snapshot.packed_build_state &&
+            snapshot.source_manager.open()) {
+
+            const auto validation_begin =
+                std::chrono::steady_clock::now();
+
+            const auto mapped_size =
+                static_cast<std::uint64_t>(
+                    snapshot.source_manager.bytes().size());
+
+            const bool size_ok =
+                expected_build_cache_size ==
+                    snapshot.build_cache_size_value &&
+                snapshot.source_manager_size_value <=
+                    (std::numeric_limits<std::uint64_t>::max)() -
+                        snapshot.build_cache_size_value &&
+                mapped_size ==
+                    snapshot.source_manager_size_value +
+                        snapshot.build_cache_size_value;
+
+            if (telemetry != nullptr) {
+                telemetry->size_validation_ns =
+                    elapsed_ns(
+                        validation_begin,
+                        std::chrono::steady_clock::now());
+            }
+
+            if (!size_ok)
+                return {status_code::artifact_corrupt};
+
+            snapshot.packed_build_cache_enabled = true;
+            return {};
+        }
+
         const auto directory =
             root_path() / std::string{transaction};
 
@@ -1737,9 +1855,11 @@ status baseline_store::map_build_cache_cached(
                     std::chrono::steady_clock::now());
         }
 
-        return mismatch
-            ? status{status_code::artifact_corrupt}
-            : status{};
+        if (mismatch)
+            return {status_code::artifact_corrupt};
+
+        snapshot.packed_build_cache_enabled = false;
+        return {};
     }
     catch (const std::bad_alloc&) {
         return {status_code::not_available};
@@ -1814,6 +1934,10 @@ status baseline_store::open_selected(
             manifest.fingerprint;
         candidate.transaction_value =
             manifest.transaction;
+        candidate.source_manager_size_value =
+            manifest.source_manager_size;
+        candidate.build_cache_size_value =
+            manifest.build_cache_size;
 
         const auto compiled_map_begin =
             std::chrono::steady_clock::now();
@@ -1834,19 +1958,46 @@ status baseline_store::open_selected(
         if (include_source_manager) {
             const auto source_manager_map_begin =
                 std::chrono::steady_clock::now();
+
             result = candidate.source_manager.map(
                 directory / source_manager_name);
+
             if (telemetry != nullptr) {
                 telemetry->source_manager_map_ns =
                     elapsed_ns(
                         source_manager_map_begin,
                         std::chrono::steady_clock::now());
             }
+
             if (!result.ok()) {
                 return result.code == status_code::not_found
                     ? status{status_code::artifact_corrupt}
                     : result;
             }
+
+            const auto physical_size =
+                static_cast<std::uint64_t>(
+                    candidate.source_manager.bytes().size());
+
+            const bool separate =
+                physical_size ==
+                    manifest.source_manager_size;
+
+            const bool can_pack =
+                manifest.source_manager_size <=
+                    (std::numeric_limits<std::uint64_t>::max)() -
+                        manifest.build_cache_size;
+
+            const bool packed =
+                can_pack &&
+                physical_size ==
+                    manifest.source_manager_size +
+                        manifest.build_cache_size;
+
+            if (!separate && !packed)
+                return {status_code::artifact_corrupt};
+
+            candidate.packed_build_state = packed;
         }
 
         if (include_change_state) {
@@ -1872,20 +2023,29 @@ status baseline_store::open_selected(
         }
 
         if (include_build_cache) {
-            const auto build_cache_map_begin =
-                std::chrono::steady_clock::now();
-            result = candidate.build_cache.map(
-                directory / build_cache_name);
-            if (telemetry != nullptr) {
-                telemetry->build_cache_map_ns =
-                    elapsed_ns(
-                        build_cache_map_begin,
-                        std::chrono::steady_clock::now());
+            if (candidate.packed_build_state &&
+                candidate.source_manager.open()) {
+                candidate.packed_build_cache_enabled = true;
             }
-            if (!result.ok()) {
-                return result.code == status_code::not_found
-                    ? status{status_code::artifact_corrupt}
-                    : result;
+            else {
+                const auto build_cache_map_begin =
+                    std::chrono::steady_clock::now();
+
+                result = candidate.build_cache.map(
+                    directory / build_cache_name);
+
+                if (telemetry != nullptr) {
+                    telemetry->build_cache_map_ns =
+                        elapsed_ns(
+                            build_cache_map_begin,
+                            std::chrono::steady_clock::now());
+                }
+
+                if (!result.ok()) {
+                    return result.code == status_code::not_found
+                        ? status{status_code::artifact_corrupt}
+                        : result;
+                }
             }
         }
 
@@ -1896,10 +2056,12 @@ status baseline_store::open_selected(
             candidate.compiled.bytes().size() !=
                 manifest.compiled_size ||
             (include_source_manager &&
-             candidate.source_manager.bytes().size() !=
+             candidate.artifact(
+                 baseline_artifact_kind::source_manager).size() !=
                 manifest.source_manager_size) ||
             (include_build_cache &&
-             candidate.build_cache.bytes().size() !=
+             candidate.artifact(
+                 baseline_artifact_kind::build_cache).size() !=
                 manifest.build_cache_size);
 
         if (telemetry != nullptr) {
@@ -1965,12 +2127,55 @@ status baseline_store::commit(
             std::filesystem::remove_all(directory, cleanup_error);
         };
 
-        auto result = durable_write_file(directory / compiled_name, compiled);
+        auto result =
+            durable_write_file(
+                directory / compiled_name,
+                compiled);
         if (!result.ok()) {
             cleanup_failed_transaction();
             return {status_code::persistence_failed};
         }
-        result = durable_write_file(directory / source_manager_name, source_manager);
+
+        const bool pack_build_state =
+            !change_state.empty() &&
+            !source_manager.empty() &&
+            !build_cache.empty();
+
+        std::vector<std::byte> packed_source_manager;
+        std::span<const std::byte> persisted_source_manager =
+            source_manager;
+
+        if (pack_build_state) {
+            if (source_manager.size() >
+                (std::numeric_limits<std::size_t>::max)() -
+                    build_cache.size()) {
+                cleanup_failed_transaction();
+                return {status_code::not_available};
+            }
+
+            packed_source_manager.reserve(
+                source_manager.size() +
+                build_cache.size());
+
+            packed_source_manager.insert(
+                packed_source_manager.end(),
+                source_manager.begin(),
+                source_manager.end());
+
+            packed_source_manager.insert(
+                packed_source_manager.end(),
+                build_cache.begin(),
+                build_cache.end());
+
+            persisted_source_manager = {
+                packed_source_manager.data(),
+                packed_source_manager.size()};
+        }
+
+        result = durable_write_file(
+            directory / source_manager_name,
+            persisted_source_manager);
+
         if (!result.ok()) {
             cleanup_failed_transaction();
             return {status_code::persistence_failed};

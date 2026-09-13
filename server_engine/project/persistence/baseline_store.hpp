@@ -138,6 +138,13 @@ private:
 
     read_only_file_mapping build_cache;
 
+    // New SAVE transactions may physically append build_cache.bin bytes to
+    // source_manager.bin. Logical artifact spans remain independent.
+    std::uint64_t source_manager_size_value = 0;
+    std::uint64_t build_cache_size_value = 0;
+    bool packed_build_state = false;
+    bool packed_build_cache_enabled = false;
+
     friend class baseline_store;
 };
 
