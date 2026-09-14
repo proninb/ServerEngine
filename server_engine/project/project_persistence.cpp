@@ -184,21 +184,26 @@ status freeze_project_generation(
     if (!project.construction_backed())
         return {status_code::invalid_state};
 
-    source_change_capture fallback_change_capture;
     const source_change_capture* change_capture =
         project.generation_provenance().source_change();
 
+    if (change_capture == nullptr)
+        return {status_code::invalid_state};
+
     auto result = status{};
-    if (change_capture == nullptr) {
+    source_change_capture materialized_change_capture;
+
+    if (change_capture->baseline_overlay()) {
         result =
-            prepare_source_change_capture(
+            materialize_generation_source_change_capture(
                 project.sources(),
-                fallback_change_capture);
+                *change_capture,
+                materialized_change_capture);
         if (!result.ok())
             return result;
 
         change_capture =
-            &fallback_change_capture;
+            &materialized_change_capture;
     }
 
     result =

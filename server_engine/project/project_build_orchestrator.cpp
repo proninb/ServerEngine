@@ -243,34 +243,40 @@ auto semantic = project.parser_services();
         publish_end = build_clock::now();
         cache_update.publish_prepared();
         source_change_capture generation_change;
-        const auto provenance_result =
+        auto provenance_result =
             prepare_generation_source_change_capture(
                 state.sources,
                 generation_checkpoint,
                 generation_anchor,
                 generation_change);
 
-        if (provenance_result.ok()) {
-            std::vector<std::byte> change_segment;
-            const auto segment_result =
-                freeze_generation_change_segment(
-                    state.sources.source_count(),
-                    generation_change,
-                    change_segment);
+        if (!provenance_result.ok() &&
+            provenance_result.code ==
+                status_code::not_found) {
+            provenance_result =
+                prepare_disabled_generation_source_change_capture(
+                    generation_anchor,
+                    generation_change);
+        }
 
-            project.publish_generation_source_change(
-                std::move(generation_change));
+        if (!provenance_result.ok())
+            return provenance_result;
 
-            if (segment_result.ok()) {
-                project.publish_generation_change_segment(
-                    std::move(change_segment));
-            }
-            else {
-                project.clear_generation_change_segment();
-            }
+        std::vector<std::byte> change_segment;
+        const auto segment_result =
+            freeze_generation_change_segment(
+                state.sources.source_count(),
+                generation_change,
+                change_segment);
+
+        project.publish_generation_source_change(
+            std::move(generation_change));
+
+        if (segment_result.ok()) {
+            project.publish_generation_change_segment(
+                std::move(change_segment));
         }
         else {
-            project.clear_generation_source_change();
             project.clear_generation_change_segment();
         }
 
@@ -296,7 +302,9 @@ status project_build_orchestrator::update(
     std::span<const source_id> dirty_sources,
     operation_id operation,
     diagnostic_buffer& diagnostics,
-    project_build_result& output) noexcept {
+    project_build_result& output,
+    source_change_checkpoint generation_checkpoint,
+    std::string_view generation_anchor) noexcept {
 
     output = {};
     output.telemetry.storage_before = project.storage_pressure();
@@ -419,6 +427,32 @@ status project_build_orchestrator::update(
             return result;
         }
 
+        source_change_capture generation_change;
+        bool generation_change_ready = false;
+
+        if (!generation_anchor.empty()) {
+            auto provenance_result =
+                prepare_incremental_generation_source_change_capture(
+                    source_update,
+                    generation_checkpoint,
+                    generation_anchor,
+                    generation_change);
+
+            if (!provenance_result.ok() &&
+                provenance_result.code ==
+                    status_code::not_found) {
+                provenance_result =
+                    prepare_disabled_generation_source_change_capture(
+                        generation_anchor,
+                        generation_change);
+            }
+
+            if (!provenance_result.ok())
+                return provenance_result;
+
+            generation_change_ready = true;
+        }
+
         const auto publish_begin = build_clock::now();
         const auto interface_publish_begin = build_clock::now();
         build_clock::time_point publish_end;
@@ -434,8 +468,20 @@ status project_build_orchestrator::update(
         output.telemetry.total_ns = elapsed_ns(total_begin, interface_publish_end);
         output.telemetry.sources = source_update.telemetry();
         output.telemetry.storage_after = project.storage_pressure();
-        project.clear_generation_source_change();
+
+        if (generation_change_ready) {
+            project.publish_generation_source_change(
+                std::move(generation_change));
+        }
+        else {
+            project.clear_generation_source_change();
+        }
+
+        // Sparse provenance borrows the exact unchanged identity set from the
+        // baseline. Its compact change-state segment is frozen only after the
+        // cold SAVE merge; BUILD performs no O(N) identity serialization.
         project.clear_generation_change_segment();
+
         output.changed = true;
         return {};
     }

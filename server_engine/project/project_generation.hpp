@@ -62,9 +62,10 @@ public:
     void publish_source_change(
         source_change_capture&& capture) noexcept {
         source_change_value = std::move(capture);
-        source_change_available =
-            static_cast<bool>(
-                source_change_value.checkpoint);
+        // Availability means the Generation owns a prepared persistence
+        // boundary. An empty checkpoint is a valid fail-closed state: SAVE
+        // persists it and the next BUILD falls back to a full Source scan.
+        source_change_available = true;
     }
 
     void clear_source_change() noexcept {

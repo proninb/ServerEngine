@@ -1645,6 +1645,491 @@ status prepare_generation_source_change_capture(
 #endif
 }
 
+status prepare_disabled_generation_source_change_capture(
+    std::string_view journal_anchor_path,
+    source_change_capture& output) noexcept {
+
+    output.reset();
+
+    try {
+        output.journal_anchor_path.assign(
+            journal_anchor_path);
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        output.reset();
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        output.reset();
+        return {status_code::not_available};
+    }
+}
+
+
+status prepare_incremental_generation_source_change_capture(
+    const source_manager_update& sources,
+    source_change_checkpoint checkpoint,
+    std::string_view journal_anchor_path,
+    source_change_capture& output) noexcept {
+
+    output.reset();
+
+    if (!checkpoint ||
+        journal_anchor_path.empty()) {
+        return prepare_disabled_generation_source_change_capture(
+            journal_anchor_path,
+            output);
+    }
+
+#ifndef _WIN32
+    (void)sources;
+    return prepare_disabled_generation_source_change_capture(
+        journal_anchor_path,
+        output);
+#else
+    if (sources.source_count() >
+        (std::numeric_limits<std::uint32_t>::max)()) {
+        return {status_code::not_available};
+    }
+
+    try {
+        output.kind =
+            source_change_capture_kind::baseline_overlay;
+        output.checkpoint = checkpoint;
+        output.journal_anchor_path.assign(
+            journal_anchor_path);
+
+        const auto changed =
+            sources.physical_changes();
+
+        output.file_updates.reserve(
+            changed.size());
+
+        unique_path_set directories;
+
+        for (const auto source : changed) {
+            if (!source ||
+                static_cast<std::size_t>(
+                    source.value()) >
+                    sources.source_count()) {
+                output.reset();
+                return {status_code::invalid_argument};
+            }
+
+            const auto path_text =
+                sources.path(source);
+
+            if (path_text.empty()) {
+                output.reset();
+                return {status_code::invalid_state};
+            }
+
+            const auto snapshot =
+                sources.snapshot(source);
+
+            source_change_file_identity_update update;
+            update.source = source;
+
+            if (snapshot) {
+                const auto identity =
+                    snapshot.identity();
+
+                if (!identity ||
+                    identity.volume_serial !=
+                        checkpoint.volume_serial) {
+                    return prepare_disabled_generation_source_change_capture(
+                        journal_anchor_path,
+                        output);
+                }
+
+                update.file_reference =
+                    identity.file_reference;
+            }
+
+            output.file_updates.push_back(
+                update);
+
+            auto parent =
+                std::filesystem::path{
+                    path_text}.parent_path();
+            const auto root =
+                parent.root_path();
+            bool first_parent = true;
+
+            while (!parent.empty()) {
+                auto flags =
+                    source_change_directory_watch_topology;
+
+                if (first_parent &&
+                    !snapshot) {
+                    flags |=
+                        source_change_directory_watch_arrival;
+                }
+
+                bool inserted = false;
+                const auto directory_result =
+                    directories.insert(
+                        parent,
+                        flags,
+                        &inserted);
+
+                if (!directory_result.ok()) {
+                    output.reset();
+                    return directory_result;
+                }
+
+                first_parent = false;
+
+                if (!inserted ||
+                    parent == root) {
+                    break;
+                }
+
+                const auto next =
+                    parent.parent_path();
+
+                if (next == parent)
+                    break;
+
+                parent = next;
+            }
+        }
+
+        output.directory_updates.reserve(
+            directories.values().size());
+
+        for (const auto& directory :
+             directories.values()) {
+
+            observed_file_identity identity;
+
+            if (!query_file_identity(
+                    std::filesystem::path{
+                        directory.path},
+                    identity) ||
+                identity.volume_serial !=
+                    checkpoint.volume_serial) {
+                return prepare_disabled_generation_source_change_capture(
+                    journal_anchor_path,
+                    output);
+            }
+
+            output.directory_updates.push_back(
+                source_change_directory_index_slot{
+                    identity.file_reference,
+                    directory.flags,
+                    0});
+        }
+
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        output.reset();
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        output.reset();
+        return {status_code::not_available};
+    }
+    catch (const std::system_error&) {
+        return prepare_disabled_generation_source_change_capture(
+            journal_anchor_path,
+            output);
+    }
+#endif
+}
+
+
+status materialize_generation_source_change_capture(
+    const source_manager& sources,
+    const source_change_capture& prepared,
+    source_change_capture& output) noexcept {
+
+    output.reset();
+
+    if (!prepared.baseline_overlay())
+        return {status_code::invalid_argument};
+
+    if (!prepared.checkpoint) {
+        return prepare_disabled_generation_source_change_capture(
+            prepared.journal_anchor_path,
+            output);
+    }
+
+    const auto* baseline =
+        sources.baseline_source_image();
+
+    if (baseline == nullptr ||
+        !baseline->valid()) {
+        return {status_code::invalid_state};
+    }
+
+    const auto baseline_checkpoint =
+        baseline->change_checkpoint();
+
+    if (!baseline_checkpoint ||
+        baseline_checkpoint.volume_serial !=
+            prepared.checkpoint.volume_serial) {
+        return {status_code::artifact_corrupt};
+    }
+
+    const auto source_count =
+        sources.source_count();
+
+    if (source_count >
+        (std::numeric_limits<std::uint32_t>::max)()) {
+        return {status_code::not_available};
+    }
+
+    try {
+        std::vector<std::uint32_t>
+            update_index(
+                source_count + 1,
+                0);
+
+        for (std::size_t index = 0;
+             index < prepared.file_updates.size();
+             ++index) {
+
+            const auto& update =
+                prepared.file_updates[index];
+
+            if (!update.source ||
+                static_cast<std::size_t>(
+                    update.source.value()) >
+                    source_count ||
+                update.reserved != 0 ||
+                index >=
+                    (std::numeric_limits<
+                        std::uint32_t>::max)()) {
+                return {status_code::invalid_argument};
+            }
+
+            auto& slot =
+                update_index[
+                    update.source.value()];
+
+            if (slot != 0)
+                return {status_code::invalid_argument};
+
+            slot =
+                static_cast<std::uint32_t>(
+                    index + 1);
+        }
+
+        std::size_t baseline_identity_count = 0;
+
+        for (std::size_t index = 0;
+             index <
+                 baseline->
+                     source_file_identity_slot_count();
+             ++index) {
+
+            source_change_file_index_slot slot;
+            const auto slot_result =
+                baseline->
+                    source_file_identity_slot(
+                        index,
+                        slot);
+
+            if (!slot_result.ok())
+                return slot_result;
+
+            if (slot.file_reference != 0)
+                ++baseline_identity_count;
+        }
+
+        if (baseline_identity_count >
+            (std::numeric_limits<std::size_t>::max)() -
+                prepared.file_updates.size()) {
+            return {status_code::not_available};
+        }
+
+        const auto identity_upper_bound =
+            baseline_identity_count +
+            prepared.file_updates.size();
+
+        if (identity_upper_bound != 0) {
+            const auto capacity =
+                next_capacity(
+                    identity_upper_bound);
+
+            if (capacity == 0)
+                return {status_code::not_available};
+
+            output.file_index.assign(
+                capacity,
+                source_change_file_index_slot{});
+        }
+
+        std::size_t materialized_identity_count = 0;
+
+        for (std::size_t index = 0;
+             index <
+                 baseline->
+                     source_file_identity_slot_count();
+             ++index) {
+
+            source_change_file_index_slot slot;
+            const auto slot_result =
+                baseline->
+                    source_file_identity_slot(
+                        index,
+                        slot);
+
+            if (!slot_result.ok())
+                return slot_result;
+
+            if (slot.file_reference == 0)
+                continue;
+
+            if (update_index[
+                    slot.source.value()] != 0) {
+                continue;
+            }
+
+            if (!insert_file_identity(
+                    output.file_index,
+                    slot.file_reference,
+                    slot.source)) {
+                return {status_code::artifact_corrupt};
+            }
+
+            ++materialized_identity_count;
+        }
+
+        for (const auto& update :
+             prepared.file_updates) {
+
+            if (update.file_reference == 0)
+                continue;
+
+            if (!insert_file_identity(
+                    output.file_index,
+                    update.file_reference,
+                    update.source)) {
+                return {status_code::artifact_corrupt};
+            }
+
+            ++materialized_identity_count;
+        }
+
+        if (source_count != 0 &&
+            materialized_identity_count == 0) {
+            return prepare_disabled_generation_source_change_capture(
+                prepared.journal_anchor_path,
+                output);
+        }
+
+        std::size_t baseline_directory_count = 0;
+
+        for (std::size_t index = 0;
+             index <
+                 baseline->
+                     tracked_directory_identity_slot_count();
+             ++index) {
+
+            source_change_directory_index_slot slot;
+            const auto slot_result =
+                baseline->
+                    tracked_directory_identity_slot(
+                        index,
+                        slot);
+
+            if (!slot_result.ok())
+                return slot_result;
+
+            if (slot.file_reference != 0)
+                ++baseline_directory_count;
+        }
+
+        if (baseline_directory_count >
+            (std::numeric_limits<std::size_t>::max)() -
+                prepared.directory_updates.size()) {
+            return {status_code::not_available};
+        }
+
+        const auto directory_upper_bound =
+            baseline_directory_count +
+            prepared.directory_updates.size();
+
+        if (directory_upper_bound != 0) {
+            const auto capacity =
+                next_capacity(
+                    directory_upper_bound);
+
+            if (capacity == 0)
+                return {status_code::not_available};
+
+            output.directory_index.assign(
+                capacity,
+                source_change_directory_index_slot{});
+        }
+
+        for (std::size_t index = 0;
+             index <
+                 baseline->
+                     tracked_directory_identity_slot_count();
+             ++index) {
+
+            source_change_directory_index_slot slot;
+            const auto slot_result =
+                baseline->
+                    tracked_directory_identity_slot(
+                        index,
+                        slot);
+
+            if (!slot_result.ok())
+                return slot_result;
+
+            if (slot.file_reference == 0)
+                continue;
+
+            if (!insert_directory_identity(
+                    output.directory_index,
+                    slot.file_reference,
+                    slot.flags)) {
+                return {status_code::artifact_corrupt};
+            }
+        }
+
+        for (const auto& slot :
+             prepared.directory_updates) {
+
+            if (slot.file_reference == 0 ||
+                slot.reserved != 0 ||
+                slot.flags == 0 ||
+                (slot.flags &
+                 ~source_change_directory_watch_known) != 0) {
+                return {status_code::invalid_argument};
+            }
+
+            if (!insert_directory_identity(
+                    output.directory_index,
+                    slot.file_reference,
+                    slot.flags)) {
+                return {status_code::artifact_corrupt};
+            }
+        }
+
+        output.checkpoint =
+            prepared.checkpoint;
+        output.journal_anchor_path =
+            prepared.journal_anchor_path;
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        output.reset();
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        output.reset();
+        return {status_code::not_available};
+    }
+}
+
+
 status prepare_source_change_capture(
     const source_manager& sources,
     source_change_capture& output) noexcept {

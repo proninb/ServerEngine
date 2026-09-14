@@ -17,11 +17,6 @@ namespace cw::server {
 
     output.clear();
 
-    if (!capture.checkpoint ||
-        capture.journal_anchor_path.empty()) {
-        return {status_code::not_found};
-    }
-
     return encode_change_state_image(
         source_count,
         capture.journal_anchor_path,

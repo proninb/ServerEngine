@@ -889,6 +889,95 @@ source_id source_manager_image_view::find_source_file(
     return {};
 }
 
+std::size_t
+source_manager_image_view::source_file_identity_slot_count() const noexcept {
+    return static_cast<std::size_t>(
+        section(
+            source_manager_image_section::
+                source_file_identity_index).count);
+}
+
+status source_manager_image_view::source_file_identity_slot(
+    std::size_t index,
+    source_change_file_index_slot& output) const noexcept {
+
+    output = {};
+
+    const auto& values =
+        section(
+            source_manager_image_section::
+                source_file_identity_index);
+
+    if (index >= values.count)
+        return {status_code::invalid_argument};
+
+    const auto* slot =
+        values.data +
+        index * source_file_identity_index_record_size;
+
+    output.file_reference = read_u64(slot);
+    output.source = source_id{read_u32(slot + 8)};
+    output.reserved = read_u32(slot + 12);
+
+    if (output.file_reference == 0) {
+        return !output.source && output.reserved == 0
+            ? status{}
+            : status{status_code::artifact_corrupt};
+    }
+
+    return valid_source(output.source) &&
+        output.reserved == 0
+        ? status{}
+        : status{status_code::artifact_corrupt};
+}
+
+std::size_t
+source_manager_image_view::tracked_directory_identity_slot_count()
+    const noexcept {
+
+    return static_cast<std::size_t>(
+        section(
+            source_manager_image_section::
+                tracked_directory_identity_index).count);
+}
+
+status source_manager_image_view::tracked_directory_identity_slot(
+    std::size_t index,
+    source_change_directory_index_slot& output) const noexcept {
+
+    output = {};
+
+    const auto& values =
+        section(
+            source_manager_image_section::
+                tracked_directory_identity_index);
+
+    if (index >= values.count)
+        return {status_code::invalid_argument};
+
+    const auto* slot =
+        values.data +
+        index * tracked_directory_identity_index_record_size;
+
+    output.file_reference = read_u64(slot);
+    output.flags = read_u32(slot + 8);
+    output.reserved = read_u32(slot + 12);
+
+    if (output.file_reference == 0) {
+        return output.flags == 0 &&
+            output.reserved == 0
+            ? status{}
+            : status{status_code::artifact_corrupt};
+    }
+
+    return output.reserved == 0 &&
+        output.flags != 0 &&
+        (output.flags &
+         ~source_change_directory_watch_known) == 0
+        ? status{}
+        : status{status_code::artifact_corrupt};
+}
+
 std::uint32_t source_manager_image_view::directory_watch_flags(
     std::uint64_t file_reference) const noexcept {
 

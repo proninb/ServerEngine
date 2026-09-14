@@ -1003,6 +1003,9 @@ status source_manager_update::reserve_sources(
                 additional ||
         semantic_changes.size() >
             (std::numeric_limits<std::size_t>::max)() -
+                additional ||
+        physical_changes_value.size() >
+            (std::numeric_limits<std::size_t>::max)() -
                 additional) {
         return {status_code::not_available};
     }
@@ -1011,11 +1014,14 @@ status source_manager_update::reserve_sources(
         candidates.size() + additional;
     const auto semantic_required =
         semantic_changes.size() + additional;
+    const auto physical_required =
+        physical_changes_value.size() + additional;
 
     try {
         new_sources.reserve(required);
         candidates.reserve(candidate_required);
         semantic_changes.reserve(semantic_required);
+        physical_changes_value.reserve(physical_required);
     }
     catch (const std::bad_alloc&) {
         return {status_code::not_available};
@@ -1241,14 +1247,28 @@ status source_manager_update::apply_acquire(source_acquire_result&& result) noex
     if (!touch_result.ok())
         return touch_result;
 
+    const bool first_physical_change =
+        !item->has_snapshot;
+
     if (result.kind == source_acquire_result_kind::missing) {
         if (is_new_source || !previous)
             return {status_code::not_found};
-        item->snapshot = {};
-        item->has_snapshot = true;
-        semantic_changes.push_back(result.source);
-        prepared = false;
-        return {};
+
+        try {
+            item->snapshot = {};
+            item->has_snapshot = true;
+            semantic_changes.push_back(result.source);
+            if (first_physical_change)
+                physical_changes_value.push_back(result.source);
+            prepared = false;
+            return {};
+        }
+        catch (const std::bad_alloc&) {
+            return {status_code::not_available};
+        }
+        catch (const std::length_error&) {
+            return {status_code::not_available};
+        }
     }
 
     try {
@@ -1265,6 +1285,8 @@ const bool semantic_change = !previous || previous.hash() != storage->hash;
         item->has_snapshot = true;
         if (semantic_change)
             semantic_changes.push_back(result.source);
+        if (first_physical_change)
+            physical_changes_value.push_back(result.source);
         prepared = false;
         return {};
     }

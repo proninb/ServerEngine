@@ -5790,6 +5790,158 @@ bool test_project_build_link_tombstone_handle_restore() {
     return pass;
 }
 
+bool test_project_save_preserves_generation_checkpoint_epoch() {
+    persistent_lifecycle_fixture fixture;
+    if (!prepare_persistent_lifecycle_fixture(
+            "server_engine_v3_generation_checkpoint_epoch",
+            fixture)) {
+        return false;
+    }
+
+    const auto cleanup = [&]() noexcept {
+        std::error_code error;
+        std::filesystem::remove_all(
+            fixture.directory,
+            error);
+    };
+
+    const auto write_model =
+        [&](std::string_view text) -> bool {
+            std::ofstream file(
+                fixture.model_path,
+                std::ios::trunc);
+            file << text;
+            return static_cast<bool>(file);
+        };
+
+    project_manager manager;
+
+    diagnostic_buffer rebuild_diagnostics;
+    project_build_result rebuild;
+    if (!manager.rebuild(
+            fixture.configuration_path,
+            operation_id{1430},
+            rebuild_diagnostics,
+            rebuild,
+            1).ok() ||
+        rebuild_diagnostics.has_errors() ||
+        !rebuild.changed ||
+        !rebuild.rebuilt) {
+        if (manager.ready())
+            (void)manager.unload();
+        cleanup();
+        return false;
+    }
+
+    // The active Generation is still Graph(A). This write must not make SAVE
+    // fail and must not be hidden by a checkpoint captured by SAVE.
+    if (!write_model(
+            "struct IO { int IN; int OUT; int BUILD1; }; "
+            "IO A; IO B; B.IN = A.OUT;")) {
+        (void)manager.unload();
+        cleanup();
+        return false;
+    }
+
+    baseline_commit_result rebuild_commit;
+    if (!manager.save(rebuild_commit).ok() ||
+        rebuild_commit.transaction.empty() ||
+        rebuild_commit.bytes_written == 0 ||
+        !manager.unload().ok()) {
+        if (manager.ready())
+            (void)manager.unload();
+        cleanup();
+        return false;
+    }
+
+    diagnostic_buffer build1_diagnostics;
+    project_build_result build1;
+    if (!manager.build(
+            fixture.configuration_path,
+            operation_id{1431},
+            build1_diagnostics,
+            build1,
+            1).ok() ||
+        build1_diagnostics.has_errors() ||
+        !build1.changed ||
+        build1.rebuilt) {
+        if (manager.ready())
+            (void)manager.unload();
+        cleanup();
+        return false;
+    }
+
+    project_access build1_access;
+    object_endpoint build1_endpoint;
+    if (!manager.acquire(build1_access).ok() ||
+        !build1_access ||
+        !build1_access->find_endpoint(
+            "A.BUILD1",
+            build1_endpoint).ok()) {
+        build1_access.reset();
+        if (manager.ready())
+            (void)manager.unload();
+        cleanup();
+        return false;
+    }
+    build1_access.reset();
+
+    // The active Generation is Graph(BUILD1). Again, mutate the file before
+    // SAVE. SAVE must persist Graph(BUILD1) with the BUILD-start checkpoint.
+    if (!write_model(
+            "struct IO { int IN; int OUT; int BUILD1; int BUILD2; }; "
+            "IO A; IO B; B.IN = A.OUT;")) {
+        (void)manager.unload();
+        cleanup();
+        return false;
+    }
+
+    baseline_commit_result build1_commit;
+    if (!manager.save(build1_commit).ok() ||
+        build1_commit.transaction.empty() ||
+        build1_commit.transaction ==
+            rebuild_commit.transaction ||
+        !manager.unload().ok()) {
+        if (manager.ready())
+            (void)manager.unload();
+        cleanup();
+        return false;
+    }
+
+    diagnostic_buffer build2_diagnostics;
+    project_build_result build2;
+    const auto build2_result =
+        manager.build(
+            fixture.configuration_path,
+            operation_id{1432},
+            build2_diagnostics,
+            build2,
+            1);
+
+    project_access build2_access;
+    object_endpoint build2_endpoint;
+
+    const bool pass =
+        build2_result.ok() &&
+        !build2_diagnostics.has_errors() &&
+        build2.changed &&
+        !build2.rebuilt &&
+        manager.acquire(build2_access).ok() &&
+        build2_access &&
+        build2_access->find_endpoint(
+            "A.BUILD2",
+            build2_endpoint).ok();
+
+    build2_access.reset();
+
+    if (manager.ready())
+        (void)manager.unload();
+
+    cleanup();
+    return pass;
+}
+
+
 bool test_project_build_without_baseline_full_no_save() {
     persistent_lifecycle_fixture fixture;
     if (!prepare_persistent_lifecycle_fixture(
@@ -5945,6 +6097,7 @@ constexpr std::array tests{
     test_case{"debug_sparse_native_source_persistence", &test_debug_sparse_native_source_persistence},
     test_case{"project_build_changed_baseline_sparse_save_load", &test_project_build_changed_baseline_sparse_save_load},
     test_case{"project_build_link_tombstone_handle_restore", &test_project_build_link_tombstone_handle_restore},
+    test_case{"project_save_preserves_generation_checkpoint_epoch", &test_project_save_preserves_generation_checkpoint_epoch},
     test_case{"project_build_without_baseline_full_no_save", &test_project_build_without_baseline_full_no_save},
 };
 

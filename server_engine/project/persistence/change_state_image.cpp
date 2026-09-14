@@ -991,7 +991,8 @@ status encode_change_state_image(
 
     if (source_count >
             (std::numeric_limits<std::uint32_t>::max)() ||
-        journal_anchor_path.empty()) {
+        (capture.checkpoint &&
+         journal_anchor_path.empty())) {
         return {status_code::invalid_argument};
     }
 

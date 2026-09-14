@@ -167,6 +167,23 @@ public:
     [[nodiscard]] source_id find_source_file(
         std::uint64_t file_reference) const noexcept;
 
+    // Cold persistence enumeration. These expose the already-mapped exact
+    // identity tables without filesystem access so SAVE can merge a sparse
+    // Generation overlay into a new durable baseline.
+    [[nodiscard]] std::size_t
+    source_file_identity_slot_count() const noexcept;
+
+    [[nodiscard]] status source_file_identity_slot(
+        std::size_t index,
+        source_change_file_index_slot& output) const noexcept;
+
+    [[nodiscard]] std::size_t
+    tracked_directory_identity_slot_count() const noexcept;
+
+    [[nodiscard]] status tracked_directory_identity_slot(
+        std::size_t index,
+        source_change_directory_index_slot& output) const noexcept;
+
     [[nodiscard]] std::uint32_t directory_watch_flags(
         std::uint64_t file_reference) const noexcept;
 

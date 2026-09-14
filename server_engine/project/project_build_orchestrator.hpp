@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string_view>
 
 namespace cw::server {
 
@@ -92,7 +93,9 @@ public:
         std::span<const source_id> dirty_sources,
         operation_id operation,
         diagnostic_buffer& diagnostics,
-        project_build_result& output) noexcept;
+        project_build_result& output,
+        source_change_checkpoint generation_checkpoint = {},
+        std::string_view generation_anchor = {}) noexcept;
 
 private:
     [[nodiscard]] status rebuild_current(

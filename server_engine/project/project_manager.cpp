@@ -6,6 +6,7 @@
 #include <new>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -420,6 +421,47 @@ status project_manager::build(
         return result;
     }
 
+    // This is the Generation epoch, not a SAVE epoch. Capture it before dirty
+    // detection can read Source contents so every later filesystem event remains
+    // visible to the next BUILD even if SAVE happens much later.
+    source_change_checkpoint generation_checkpoint;
+    std::string generation_anchor;
+
+    try {
+        const auto anchor =
+            changes.path(source_id{1});
+
+        if (!anchor.empty()) {
+            generation_anchor.assign(anchor);
+
+            if (changes.change_checkpoint()) {
+                const auto checkpoint_result =
+                    capture_source_change_checkpoint(
+                        std::filesystem::path{
+                            generation_anchor},
+                        generation_checkpoint);
+
+                if (!checkpoint_result.ok() &&
+                    checkpoint_result.code !=
+                        status_code::not_found) {
+                    abandon_construction();
+                    return checkpoint_result;
+                }
+            }
+        }
+    }
+    catch (const std::bad_alloc&) {
+        abandon_construction();
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        abandon_construction();
+        return {status_code::not_available};
+    }
+    catch (const std::system_error&) {
+        generation_checkpoint = {};
+    }
+
     std::vector<source_id> dirty_sources;
     project_dirty_source_telemetry dirty_telemetry;
     std::vector<source_change_journal_candidate> journal_candidates;
@@ -607,6 +649,14 @@ status project_manager::build(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             dirty_detection_end - dirty_detection_begin).count());
 
+    // A full-scan fallback can prove content equality but cannot prove that every
+    // unchanged pathname still has the persisted file identity. Do not carry
+    // exact D3D identity state across that boundary.
+    if (!dirty_telemetry.fast_path ||
+        dirty_telemetry.fallback) {
+        generation_checkpoint = {};
+    }
+
     const auto baseline_source_count =
         static_cast<std::uint64_t>(changes.source_count());
     const auto dirty_source_count =
@@ -780,6 +830,25 @@ status project_manager::build(
             return result;
         }
 
+        if (generation_anchor.empty() &&
+            !dirty_sources.empty()) {
+            try {
+                generation_anchor.assign(
+                    candidate->sources().path(
+                        dirty_sources.front()));
+            }
+            catch (const std::bad_alloc&) {
+                publish_manager_telemetry(output);
+                abandon_construction();
+                return {status_code::not_available};
+            }
+            catch (const std::length_error&) {
+                publish_manager_telemetry(output);
+                abandon_construction();
+                return {status_code::not_available};
+            }
+        }
+
         project_build_orchestrator builder{
             *candidate,
             worker_limit,
@@ -789,7 +858,9 @@ status project_manager::build(
             dirty_sources,
             operation,
             diagnostics,
-            output);
+            output,
+            generation_checkpoint,
+            generation_anchor);
         if (!result.ok()) {
             std::fprintf(
                 stderr,

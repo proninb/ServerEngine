@@ -123,6 +123,13 @@ public:
         return baseline_sources != nullptr;
     }
 
+    // Internal persistence boundary used only by cold Generation materialization.
+    // The returned view is pinned by the owning Project baseline snapshot.
+    [[nodiscard]] const source_manager_image_view*
+    baseline_source_image() const noexcept {
+        return baseline_sources;
+    }
+
     [[nodiscard]] const source_generation_storage&
     generation_storage() const noexcept {
         return generation_storage_value;
@@ -239,6 +246,13 @@ public:
     [[nodiscard]] std::span<const source_id> dependents(source_id source) const noexcept;
     [[nodiscard]] std::span<const source_id> changed_sources() const noexcept { return semantic_changes; }
 
+    // Every non-unchanged acquisition, including an identity-only replacement
+    // with identical content. Generation provenance must use this set rather
+    // than the semantic-change set.
+    [[nodiscard]] std::span<const source_id> physical_changes() const noexcept {
+        return physical_changes_value;
+    }
+
     [[nodiscard]] status collect_dependents(
         source_id source,
         std::vector<source_id>& output) const noexcept;
@@ -319,6 +333,7 @@ private:
     std::vector<source_manager::path_slot> prepared_path_index;
     std::vector<prepared_path_insertion> prepared_path_insertions;
     std::vector<source_id> semantic_changes;
+    std::vector<source_id> physical_changes_value;
     mutable source_manager_update_telemetry telemetry_value{};
     std::size_t prepared_path_storage_size = 0;
     bool prepared = false;

@@ -14,6 +14,7 @@ class build_cache_image_view;
 class change_state_image_view;
 class source_manager;
 class source_manager_image_view;
+class source_manager_update;
 
 enum class source_change_backend : std::uint32_t {
     none = 0,
@@ -66,17 +67,48 @@ struct source_change_directory_index_slot final {
 
 static_assert(sizeof(source_change_directory_index_slot) == 16);
 
+enum class source_change_capture_kind : std::uint8_t {
+    complete = 0,
+    baseline_overlay = 1,
+};
+
+// Sparse replacement owned by one incremental Generation. file_reference == 0
+// is a tombstone for a Source that became physically absent.
+struct source_change_file_identity_update final {
+    std::uint64_t file_reference = 0;
+    source_id source{};
+    std::uint32_t reserved = 0;
+};
+
+static_assert(sizeof(source_change_file_identity_update) == 16);
+
 struct source_change_capture final {
+    source_change_capture_kind kind =
+        source_change_capture_kind::complete;
     source_change_checkpoint checkpoint{};
     std::string journal_anchor_path;
+
+    // Complete capture representation.
     std::vector<source_change_file_index_slot> file_index;
     std::vector<source_change_directory_index_slot> directory_index;
 
+    // Sparse baseline-overlay representation used only by changed BUILD.
+    std::vector<source_change_file_identity_update> file_updates;
+    std::vector<source_change_directory_index_slot> directory_updates;
+
+    [[nodiscard]] bool baseline_overlay() const noexcept {
+        return kind ==
+            source_change_capture_kind::baseline_overlay;
+    }
+
     void reset() noexcept {
+        kind = source_change_capture_kind::complete;
         checkpoint = {};
         journal_anchor_path.clear();
         file_index.clear();
         directory_index.clear();
+        file_updates.clear();
+        directory_updates.clear();
     }
 };
 
@@ -121,17 +153,38 @@ static_assert(sizeof(source_change_journal_candidate) == 24);
     const std::filesystem::path& anchor,
     source_change_checkpoint& output) noexcept;
 
-// Materializes change-tracking provenance for a completed construction
-// generation without reopening Source files. Source identities must come from
-// the same stable handles that acquired their content.
+// Materializes complete change-tracking provenance for a fresh G0 without
+// reopening Source contents. Source identities come from the snapshots that
+// acquired the bytes used to build the Generation.
 [[nodiscard]] status prepare_generation_source_change_capture(
     const source_manager& sources,
     source_change_checkpoint checkpoint,
     std::string_view journal_anchor_path,
     source_change_capture& output) noexcept;
 
-// SAVE-only preparation. The checkpoint is captured before filesystem validation;
-// any change after the checkpoint remains visible to the next BUILD journal query.
+// Produces an explicitly prepared, tracking-disabled Generation provenance.
+// SAVE may persist this state; the next BUILD must use the portable full scan.
+[[nodiscard]] status prepare_disabled_generation_source_change_capture(
+    std::string_view journal_anchor_path,
+    source_change_capture& output) noexcept;
+
+// Captures only identities changed by one sparse BUILD. The unchanged identity
+// set remains borrowed from the mmap baseline until the cold SAVE merge.
+[[nodiscard]] status prepare_incremental_generation_source_change_capture(
+    const source_manager_update& sources,
+    source_change_checkpoint checkpoint,
+    std::string_view journal_anchor_path,
+    source_change_capture& output) noexcept;
+
+// Cold SAVE materialization. Merges an incremental Generation overlay with its
+// persisted mmap baseline using memory only; it never opens Source files and
+// never captures a new checkpoint.
+[[nodiscard]] status materialize_generation_source_change_capture(
+    const source_manager& sources,
+    const source_change_capture& prepared,
+    source_change_capture& output) noexcept;
+
+// Legacy maintenance helper. Project SAVE must not call this function.
 [[nodiscard]] status prepare_source_change_capture(
     const source_manager& sources,
     source_change_capture& output) noexcept;
