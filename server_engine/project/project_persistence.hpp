@@ -69,26 +69,43 @@ public:
     project_generation_storage& operator=(
         project_generation_storage&&) noexcept = default;
 
-        [[nodiscard]] project_generation_segments
+    [[nodiscard]] project_generation_segments
     segments() const noexcept {
         const auto change_segment =
             !native_change.empty()
-            ? native_change
-            : std::span<const std::byte>{
-                change_fallback.data(),
-                change_fallback.size()};
+            ? project_generation_segment{
+                native_change}
+            : project_generation_segment{
+                std::span<const std::byte>{
+                    change_fallback.data(),
+                    change_fallback.size()}};
+
+        const auto source_segment =
+            native_sources.valid()
+            ? native_sources.segment()
+            : project_generation_segment{
+                std::span<const std::byte>{
+                    sources.data(),
+                    sources.size()}};
 
         return {
-            compiled,
-            sources,
+            project_generation_segment{
+                std::span<const std::byte>{
+                    compiled.data(),
+                    compiled.size()}},
+            source_segment,
             change_segment,
-            build,
+            project_generation_segment{
+                std::span<const std::byte>{
+                    build.data(),
+                    build.size()}},
         };
     }
 
-        void reset() noexcept {
+    void reset() noexcept {
         compiled.clear();
         sources.clear();
+        native_sources.reset();
         change_fallback.clear();
         native_change = {};
         build.clear();
@@ -97,6 +114,7 @@ public:
 private:
     std::vector<std::byte> compiled;
     std::vector<std::byte> sources;
+    source_manager_native_image_storage native_sources;
     std::vector<std::byte> change_fallback;
     std::span<const std::byte> native_change;
     std::vector<std::byte> build;

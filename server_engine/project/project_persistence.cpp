@@ -342,10 +342,38 @@ status freeze_project_generation(
         const auto source_manager_begin =
             std::chrono::steady_clock::now();
 
-        result = encode_source_manager_image(
-            project.sources(),
-            options,
-            output.sources);
+        const auto native_sources =
+            project.sources().native_generation();
+
+        const auto* generation_change_capture =
+            project.generation_provenance().
+                source_change();
+
+        const bool native_borrow_lifetime_safe =
+            native_sources.complete &&
+            change_capture ==
+                generation_change_capture;
+
+        if (native_borrow_lifetime_safe) {
+            // GEN-02C12: use the native Source Manager image only when every
+            // borrowed extent is Generation-owned and therefore remains alive
+            // through baseline_store::commit().
+            output.sources.clear();
+
+            result =
+                freeze_source_manager_native_image(
+                    project.sources(),
+                    options,
+                    output.native_sources);
+        }
+        else {
+            output.native_sources.reset();
+
+            result = encode_source_manager_image(
+                project.sources(),
+                options,
+                output.sources);
+        }
 
         if (telemetry != nullptr) {
             telemetry->source_manager_ns =
@@ -460,6 +488,9 @@ status freeze_project_generation(
     change_state_image_view change_state;
     build_cache_image_view build_cache;
 
+    const auto frozen_segments =
+        output.segments();
+
     const auto bind_begin =
         std::chrono::steady_clock::now();
 
@@ -467,11 +498,22 @@ status freeze_project_generation(
     if (!result.ok())
         return result;
 
-    result = sources.bind(output.sources);
-    if (!result.ok())
-        return result;
+    if (!output.native_sources.valid()) {
+        const auto source_bytes =
+            frozen_segments.sources_segment().
+                contiguous();
 
-    result = change_state.bind(output.segments().change());
+        if (source_bytes.empty())
+            return {status_code::invalid_state};
+
+        result = sources.bind(source_bytes);
+        if (!result.ok())
+            return result;
+    }
+
+    result = change_state.bind(
+        frozen_segments.change_segment().
+            contiguous());
     if (!result.ok())
         return result;
 
@@ -501,9 +543,13 @@ status freeze_project_generation(
     const auto verify_build_begin =
         std::chrono::steady_clock::now();
 
-    result = build_cache.verify_against(
-        compiled,
-        sources);
+    result = output.native_sources.valid()
+        ? build_cache.verify_against(
+            compiled,
+            project.sources())
+        : build_cache.verify_against(
+            compiled,
+            sources);
 
     if (telemetry != nullptr) {
         telemetry->verify_build_cache_ns =

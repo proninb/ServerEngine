@@ -5,6 +5,7 @@
 #include "source_manager_image.hpp"
 #include "../project_context.hpp"
 #include "../source/source_hash.hpp"
+#include "../source/source_manager.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1956,9 +1957,91 @@ status build_cache_image_view::verify_contents(
     return {};
 }
 
+struct build_cache_image_view::source_validation_access final {
+    const source_manager_image_view* image = nullptr;
+    std::span<const source_generation_physical_record> native_physical;
+    std::size_t native_source_count = 0;
+
+    [[nodiscard]] bool valid() const noexcept {
+        return image != nullptr
+            ? image->valid()
+            : native_physical.size() == native_source_count;
+    }
+
+    [[nodiscard]] std::size_t source_count() const noexcept {
+        return image != nullptr
+            ? image->source_count()
+            : native_source_count;
+    }
+
+    [[nodiscard]] status physical(
+        source_id source,
+        source_manager_image_physical_state& output) const noexcept {
+
+        output = {};
+
+        if (image != nullptr)
+            return image->physical(source, output);
+
+        if (!source ||
+            static_cast<std::size_t>(source.value()) >
+                native_physical.size()) {
+            return {status_code::invalid_argument};
+        }
+
+        const auto& value =
+            native_physical[
+                static_cast<std::size_t>(
+                    source.value() - 1)];
+
+        output.present = value.present();
+        output.write_time_ticks =
+            value.write_time_ticks;
+        output.size = value.size;
+        output.hash = value.hash;
+        return {};
+    }
+};
+
 status build_cache_image_view::verify_against(
     const compiled_image_view& compiled,
     const source_manager_image_view& sources) const noexcept {
+
+    source_validation_access access;
+    access.image = &sources;
+
+    return verify_against_impl(
+        compiled,
+        access);
+}
+
+status build_cache_image_view::verify_against(
+    const compiled_image_view& compiled,
+    const source_manager& sources) const noexcept {
+
+    const auto native =
+        sources.native_generation();
+
+    if (!native.complete ||
+        native.physical.size() !=
+            sources.source_count()) {
+        return {status_code::invalid_state};
+    }
+
+    source_validation_access access;
+    access.native_physical =
+        native.physical;
+    access.native_source_count =
+        sources.source_count();
+
+    return verify_against_impl(
+        compiled,
+        access);
+}
+
+status build_cache_image_view::verify_against_impl(
+    const compiled_image_view& compiled,
+    const source_validation_access& sources) const noexcept {
 
     if (!valid() || !compiled.valid() || !sources.valid())
         return {status_code::invalid_state};

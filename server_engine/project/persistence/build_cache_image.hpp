@@ -17,6 +17,7 @@ namespace cw::server {
 
 class compiled_image_view;
 class project_context;
+class source_manager;
 class source_manager_image_view;
 
 inline constexpr std::uint32_t build_cache_image_format_version = 4;
@@ -318,7 +319,19 @@ public:
         const compiled_image_view& compiled,
         const source_manager_image_view& sources) const noexcept;
 
+    // Fresh dense Generation audit. This preserves the SAVE cross-artifact gate
+    // when source_manager.bin is exposed as native scatter/gather extents.
+    [[nodiscard]] status verify_against(
+        const compiled_image_view& compiled,
+        const source_manager& sources) const noexcept;
+
 private:
+    struct source_validation_access;
+
+    [[nodiscard]] status verify_against_impl(
+        const compiled_image_view& compiled,
+        const source_validation_access& sources) const noexcept;
+
     struct section_view final {
         const std::byte* data = nullptr;
         std::uint64_t count = 0;
