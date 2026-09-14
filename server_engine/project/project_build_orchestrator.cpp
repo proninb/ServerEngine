@@ -23,11 +23,14 @@ using build_clock = std::chrono::steady_clock;
 [[nodiscard]] status collect_roots(
     const project_configuration& configuration,
     std::vector<std::filesystem::path>& roots,
+    std::vector<project_item_role>& root_roles,
     bool& roots_are_canonical) noexcept {
 
     try {
         roots.clear();
+        root_roles.clear();
         roots.reserve(configuration.project.size());
+        root_roles.reserve(configuration.project.size());
         roots_are_canonical = true;
         for (const auto& item : configuration.project) {
             if (item.role == project_item_role::project)
@@ -36,6 +39,7 @@ using build_clock = std::chrono::steady_clock;
                 roots_are_canonical &&
                 item.canonical_path;
             roots.push_back(item.path);
+            root_roles.push_back(item.role);
         }
         return roots.empty() ? status{status_code::invalid_argument} : status{};
     }
@@ -101,6 +105,16 @@ status project_build_orchestrator::rebuild(
     output = {};
     try {
         project_context candidate{project.configuration()};
+
+        // GEN-02C19: an internal semantic rebuild uses the same in-memory
+        // configuration. Preserve its Generation proof; SAVE will still prove
+        // the file token unchanged before using it.
+        if (const auto* configuration_proof =
+                project.generation_configuration_proof()) {
+            candidate.publish_generation_configuration_proof(
+                *configuration_proof);
+        }
+
         project_build_orchestrator detached{candidate, worker_limit};
         auto result = detached.rebuild_current(operation, diagnostics, output);
         if (!result.ok())
@@ -131,10 +145,12 @@ status project_build_orchestrator::rebuild_current(
 
     try {
         std::vector<std::filesystem::path> roots;
+        std::vector<project_item_role> root_roles;
         bool roots_are_canonical = false;
         auto result = collect_roots(
             project.configuration(),
             roots,
+            root_roles,
             roots_are_canonical);
         if (!result.ok())
             return result;
@@ -280,11 +296,20 @@ auto semantic = project.parser_services();
             project.clear_generation_change_segment();
         }
 
-        // GEN-02C11: frontend already resolved every configuration root before
-        // Source acquisition. Preserve those Source identities with the
-        // Generation so SAVE never repeats path conversion/hash lookup.
+        // GEN-02C19: the Generation owns both root Source identities and
+        // roles. The Source identities are still moved directly from frontend
+        // storage; roles were collected during the existing configuration pass.
+        auto resolved_roots =
+            frontend.release_roots();
+
+        if (resolved_roots.size() !=
+            root_roles.size()) {
+            return {status_code::initialization_failed};
+        }
+
         project.publish_generation_roots(
-            frontend.release_roots());
+            std::move(resolved_roots),
+            std::move(root_roles));
 
         interface_publish_end = build_clock::now();
         output.telemetry.publication_ns = elapsed_ns(publish_begin, publish_end);

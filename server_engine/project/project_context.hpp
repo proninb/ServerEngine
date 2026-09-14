@@ -170,6 +170,55 @@ public:
         return generation_native_segments_value;
     }
 
+    [[nodiscard]] const project_generation_configuration_proof*
+    generation_configuration_proof() const noexcept {
+        return generation_provenance_value.configuration();
+    }
+
+    // Full generations own root identities/roles. Sparse baseline-backed
+    // generations borrow the immutable root records from their pinned baseline,
+    // so BUILD never performs an O(N) root copy merely to enable SAVE.
+    [[nodiscard]] std::size_t generation_root_count() const noexcept {
+        const auto owned =
+            generation_provenance_value.root_count();
+        if (owned != 0)
+            return owned;
+
+        return mapped_sources.valid()
+            ? mapped_sources.root_count()
+            : 0;
+    }
+
+    [[nodiscard]] status generation_root(
+        std::size_t index,
+        source_manager_image_root& output) const noexcept {
+
+        output = {};
+
+        const auto owned =
+            generation_provenance_value.root_count();
+
+        if (owned != 0) {
+            if (index >= owned)
+                return {status_code::not_found};
+
+            const auto root =
+                generation_provenance_value.root(index);
+            if (!root.source)
+                return {status_code::initialization_failed};
+
+            output = {
+                root.source,
+                root.role,
+            };
+            return {};
+        }
+
+        return mapped_sources.valid()
+            ? mapped_sources.root(index, output)
+            : status{status_code::not_found};
+    }
+
     [[nodiscard]] identity_ref identity_root() const noexcept {
         return compiled != nullptr
             ? compiled->identities.root()
@@ -473,9 +522,16 @@ private:
     }
 
     void publish_generation_roots(
-        std::vector<source_id>&& roots) noexcept {
+        std::vector<source_id>&& roots,
+        std::vector<project_item_role>&& roles) noexcept {
         generation_provenance_value.publish_roots(
-            std::move(roots));
+            std::move(roots),
+            std::move(roles));
+    }
+
+    void publish_generation_configuration_proof(
+        const project_generation_configuration_proof& proof) noexcept {
+        generation_provenance_value.publish_configuration(proof);
     }
 
     void clear_generation_source_change() noexcept {

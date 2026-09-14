@@ -247,6 +247,7 @@ private:
         project_build_result& output,
         std::size_t worker_limit,
         std::size_t acquisition_worker_limit,
+        const project_generation_configuration_proof* configuration_proof,
         bool mark_rebuild) noexcept;
 
     [[nodiscard]] status activate_baseline_reserved(

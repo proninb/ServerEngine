@@ -1,13 +1,13 @@
 #pragma once
 
+#include "project_root.hpp"
+#include "source/file_snapshot.hpp"
 #include "source/source_change_tracker.hpp"
 
 #include <cstddef>
 #include <span>
 #include <utility>
 #include <vector>
-
-#include <utility>
 
 namespace cw::server {
 
@@ -47,21 +47,74 @@ private:
     std::vector<std::byte> change_value;
 };
 
-// Provenance owned by one published Project generation. It records the filesystem
-// epoch from which the generation was constructed; persistence consumes it but
-// does not create or own it.
+// GEN-02C19: configuration proof belongs to the Generation that was built
+// from project.json. SAVE consumes this proof but never creates a new one.
+struct project_generation_configuration_proof final {
+    file_snapshot_observation observation{};
+    source_content_hash content_hash{};
+    file_change_token change_token{};
+    bool content_hash_available = false;
+    bool change_token_available = false;
+};
+
+struct project_generation_root final {
+    source_id source{};
+    project_item_role role = project_item_role::type;
+};
+
+// Provenance owned by one published Project generation. It records the exact
+// configuration and Source filesystem epochs used to construct that generation.
 class project_generation_provenance final {
 public:
-    // Configuration roots resolved to stable Source identities for this
-    // Generation. Order exactly matches project_configuration::project.
-    [[nodiscard]] std::span<const source_id>
-    roots() const noexcept {
-        return roots_value;
+    [[nodiscard]] std::size_t root_count() const noexcept {
+        return roots_value.size() == root_roles_value.size()
+            ? roots_value.size()
+            : 0;
     }
 
+    [[nodiscard]] project_generation_root
+    root(std::size_t index) const noexcept {
+        if (index >= root_count())
+            return {};
+
+        return {
+            roots_value[index],
+            root_roles_value[index],
+        };
+    }
+
+    // Full REBUILD moves the frontend-resolved Source identities without
+    // copying them. Roles are collected in the same configuration traversal.
     void publish_roots(
-        std::vector<source_id>&& roots) noexcept {
+        std::vector<source_id>&& roots,
+        std::vector<project_item_role>&& roles) noexcept {
+
+        if (roots.size() != roles.size()) {
+            roots_value.clear();
+            root_roles_value.clear();
+            return;
+        }
+
         roots_value = std::move(roots);
+        root_roles_value = std::move(roles);
+    }
+
+    [[nodiscard]] const project_generation_configuration_proof*
+    configuration() const noexcept {
+        return configuration_available
+            ? &configuration_value
+            : nullptr;
+    }
+
+    void publish_configuration(
+        const project_generation_configuration_proof& proof) noexcept {
+        configuration_value = proof;
+        configuration_available = true;
+    }
+
+    void clear_configuration() noexcept {
+        configuration_value = {};
+        configuration_available = false;
     }
 
     [[nodiscard]] const source_change_capture*
@@ -87,7 +140,10 @@ public:
 
 private:
     std::vector<source_id> roots_value;
+    std::vector<project_item_role> root_roles_value;
+    project_generation_configuration_proof configuration_value{};
     source_change_capture source_change_value;
+    bool configuration_available = false;
     bool source_change_available = false;
 };
 

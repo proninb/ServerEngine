@@ -13,6 +13,110 @@
 
 namespace cw::server {
 
+namespace {
+
+[[nodiscard]] project_generation_configuration_proof
+configuration_proof_from_baseline(
+    const baseline_configuration_state& state) noexcept {
+
+    project_generation_configuration_proof output;
+    output.observation = state.observation;
+    output.content_hash = state.content_hash;
+    output.change_token = state.change_token;
+    output.content_hash_available =
+        state.content_hash_available;
+    output.change_token_available =
+        state.change_token_available;
+    return output;
+}
+
+[[nodiscard]] status load_generation_configuration(
+    const std::filesystem::path& configuration_path,
+    operation_id operation,
+    diagnostic_buffer& diagnostics,
+    project_configuration& configuration,
+    project_generation_configuration_proof& proof,
+    bool& proof_available) noexcept {
+
+    configuration = {};
+    proof = {};
+    proof_available = false;
+
+    file_change_token token;
+    const auto token_result =
+        capture_file_change_token(
+            configuration_path,
+            token);
+
+    if (!token_result.ok() &&
+        token_result.code != status_code::not_found) {
+        return token_result;
+    }
+
+    file_snapshot snapshot;
+    const auto acquisition =
+        acquire_file_snapshot(
+            configuration_path,
+            std::nullopt,
+            snapshot);
+
+    if (acquisition ==
+        file_snapshot_result::allocation_failed) {
+        return {status_code::not_available};
+    }
+    if (acquisition ==
+        file_snapshot_result::missing) {
+        return {status_code::not_found};
+    }
+    if (acquisition !=
+        file_snapshot_result::acquired) {
+        return {status_code::io_failed};
+    }
+
+    auto result = load_project_configuration(
+        snapshot.bytes,
+        configuration_path,
+        operation,
+        diagnostics,
+        configuration);
+    if (!result.ok())
+        return result;
+
+    proof.observation = snapshot.observation;
+    proof.content_hash = snapshot.hash;
+    proof.content_hash_available = true;
+
+    if (token_result.ok()) {
+        bool unchanged = false;
+        const auto token_proof =
+            prove_file_unchanged(
+                configuration_path,
+                token,
+                unchanged);
+
+        if (!token_proof.ok()) {
+            if (token_proof.code !=
+                status_code::not_found) {
+                return token_proof;
+            }
+        }
+        else if (!unchanged) {
+            // The bytes parsed above no longer identify the current
+            // configuration file. Never publish a mixed Generation.
+            return {status_code::rebuild_required};
+        }
+        else {
+            proof.change_token = token;
+            proof.change_token_available = true;
+        }
+    }
+
+    proof_available = true;
+    return {};
+}
+
+} // namespace
+
 project_manager::~project_manager() noexcept {
     activity.close();
 
@@ -247,6 +351,10 @@ status project_manager::build(
         return {status_code::invalid_state};
 
     project_configuration configuration;
+    project_generation_configuration_proof
+        generation_configuration_proof;
+    bool generation_configuration_proof_available = false;
+
     std::uint64_t configuration_ns = 0;
     std::uint64_t fingerprint_ns = 0;
     std::uint64_t baseline_open_ns = 0;
@@ -330,11 +438,13 @@ status project_manager::build(
         const auto configuration_begin =
             std::chrono::steady_clock::now();
 
-        result = load_project_configuration_file(
+        result = load_generation_configuration(
             configuration_path,
             operation,
             diagnostics,
-            configuration);
+            configuration,
+            generation_configuration_proof,
+            generation_configuration_proof_available);
 
         const auto configuration_end =
             std::chrono::steady_clock::now();
@@ -397,7 +507,10 @@ status project_manager::build(
                 diagnostics,
                 output,
                 worker_limit,
-                    acquisition_worker_limit,
+                acquisition_worker_limit,
+                generation_configuration_proof_available
+                    ? &generation_configuration_proof
+                    : nullptr,
                 false);
         }
     }
@@ -574,8 +687,33 @@ status project_manager::build(
     }
 
     if (fast_configuration &&
+        configuration_proven &&
+        !configuration_changed) {
+
+        generation_configuration_proof =
+            configuration_proof_from_baseline(
+                probe.configuration);
+        generation_configuration_proof_available =
+            probe.configuration.available &&
+            probe.configuration.content_hash_available;
+    }
+
+    if (fast_configuration &&
         (!configuration_proven ||
          configuration_changed)) {
+
+        file_change_token current_configuration_token;
+        const auto current_token_result =
+            capture_file_change_token(
+                configuration_path,
+                current_configuration_token);
+
+        if (!current_token_result.ok() &&
+            current_token_result.code !=
+                status_code::not_found) {
+            abandon_construction();
+            return current_token_result;
+        }
 
         file_snapshot configuration_file;
         const auto acquisition =
@@ -598,6 +736,41 @@ status project_manager::build(
                 file_snapshot_result::acquired) {
             abandon_construction();
             return {status_code::io_failed};
+        }
+
+        generation_configuration_proof = {};
+        generation_configuration_proof.observation =
+            configuration_file.observation;
+        generation_configuration_proof.content_hash =
+            configuration_file.hash;
+        generation_configuration_proof.content_hash_available = true;
+        generation_configuration_proof_available = true;
+
+        if (current_token_result.ok()) {
+            bool current_unchanged = false;
+            const auto current_proof_result =
+                prove_file_unchanged(
+                    configuration_path,
+                    current_configuration_token,
+                    current_unchanged);
+
+            if (!current_proof_result.ok()) {
+                if (current_proof_result.code !=
+                    status_code::not_found) {
+                    abandon_construction();
+                    return current_proof_result;
+                }
+            }
+            else if (!current_unchanged) {
+                abandon_construction();
+                return {status_code::rebuild_required};
+            }
+            else {
+                generation_configuration_proof.change_token =
+                    current_configuration_token;
+                generation_configuration_proof.change_token_available =
+                    true;
+            }
         }
 
         if (configuration_file.hash !=
@@ -636,6 +809,9 @@ status project_manager::build(
                     output,
                     worker_limit,
                     acquisition_worker_limit,
+                    generation_configuration_proof_available
+                        ? &generation_configuration_proof
+                        : nullptr,
                     false);
             }
 
@@ -830,6 +1006,11 @@ status project_manager::build(
             return result;
         }
 
+        if (generation_configuration_proof_available) {
+            candidate->publish_generation_configuration_proof(
+                generation_configuration_proof);
+        }
+
         if (generation_anchor.empty() &&
             !dirty_sources.empty()) {
             try {
@@ -925,12 +1106,18 @@ status project_manager::rebuild(
         return {status_code::invalid_state};
 
     project_configuration configuration;
+    project_generation_configuration_proof
+        configuration_proof;
+    bool configuration_proof_available = false;
+
     const auto configuration_result =
-        load_project_configuration_file(
+        load_generation_configuration(
             configuration_path,
             operation,
             diagnostics,
-            configuration);
+            configuration,
+            configuration_proof,
+            configuration_proof_available);
 
     if (!configuration_result.ok()) {
         abandon_construction();
@@ -944,7 +1131,10 @@ status project_manager::rebuild(
         diagnostics,
         output,
         worker_limit,
-                    acquisition_worker_limit,
+        acquisition_worker_limit,
+        configuration_proof_available
+            ? &configuration_proof
+            : nullptr,
         true);
 }
 
@@ -967,7 +1157,8 @@ status project_manager::rebuild(
         diagnostics,
         output,
         worker_limit,
-                    acquisition_worker_limit,
+        acquisition_worker_limit,
+        nullptr,
         true);
 }
 
@@ -979,6 +1170,7 @@ status project_manager::construct_reserved(
     project_build_result& output,
     std::size_t worker_limit,
     std::size_t acquisition_worker_limit,
+    const project_generation_configuration_proof* configuration_proof,
     bool mark_rebuild) noexcept {
 
     try {
@@ -996,6 +1188,11 @@ status project_manager::construct_reserved(
             std::move(configuration),
             std::move(configuration_path));
         candidate->set_build_fingerprint(build_fingerprint);
+
+        if (configuration_proof != nullptr) {
+            candidate->publish_generation_configuration_proof(
+                *configuration_proof);
+        }
 
         project_build_orchestrator builder{
             *candidate,
@@ -1213,137 +1410,209 @@ status project_manager::save(
         // to the semantic content/fingerprint validation below.
     }
 
-    file_change_token configuration_change_token;
-    const auto configuration_token_begin =
-        std::chrono::steady_clock::now();
-    const auto token_result =
-        capture_file_change_token(
-            project->configuration_path(),
-            configuration_change_token);
-    configuration_token_ns =
-        static_cast<std::uint64_t>(
-            std::chrono::duration_cast<
-                std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() -
-                    configuration_token_begin).count());
+    // GEN-02C19: zero-read SAVE. A prepared Generation owns the exact
+    // configuration identity used to build it. SAVE proves the stored file token
+    // unchanged and consumes configuration/fingerprint/proof directly.
+    project_configuration fallback_configuration;
+    const project_configuration* save_configuration =
+        &project->configuration();
 
-    if (!token_result.ok() &&
-        token_result.code != status_code::not_found) {
-        return token_result;
-    }
-
-    file_snapshot configuration_file;
-    const auto configuration_read_begin =
-        std::chrono::steady_clock::now();
-    const auto acquisition =
-        acquire_file_snapshot(
-            project->configuration_path(),
-            std::nullopt,
-            configuration_file);
-    configuration_read_ns =
-        static_cast<std::uint64_t>(
-            std::chrono::duration_cast<
-                std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() -
-                    configuration_read_begin).count());
-
-    if (acquisition !=
-        file_snapshot_result::acquired) {
-
-        if (acquisition ==
-            file_snapshot_result::allocation_failed) {
-            return {status_code::not_available};
-        }
-
-        if (acquisition ==
-            file_snapshot_result::missing) {
-            return {status_code::not_found};
-        }
-
-        return {status_code::io_failed};
-    }
-
-    diagnostic_buffer configuration_diagnostics;
-    project_configuration configuration;
-
-    const auto configuration_parse_begin =
-        std::chrono::steady_clock::now();
-    auto result = load_project_configuration(
-        configuration_file.bytes,
-        project->configuration_path(),
-        operation_id{},
-        configuration_diagnostics,
-        configuration);
-    configuration_parse_ns =
-        static_cast<std::uint64_t>(
-            std::chrono::duration_cast<
-                std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() -
-                    configuration_parse_begin).count());
-
-    if (!result.ok())
-        return result;
-
-    baseline_fingerprint fingerprint;
-    const auto fingerprint_begin =
-        std::chrono::steady_clock::now();
-    result = make_project_baseline_fingerprint(
-        configuration,
-        fingerprint);
-    fingerprint_ns =
-        static_cast<std::uint64_t>(
-            std::chrono::duration_cast<
-                std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() -
-                    fingerprint_begin).count());
-    if (!result.ok())
-        return result;
+    baseline_fingerprint fingerprint{};
+    baseline_configuration_state configuration_state{};
+    auto result = status{};
+    bool configuration_ready = false;
 
     const auto* expected =
         project->build_fingerprint();
-    if (expected == nullptr ||
-        !(*expected == fingerprint)) {
-        return {status_code::rebuild_required};
-    }
+    if (expected == nullptr)
+        return {status_code::invalid_state};
 
-    baseline_configuration_state configuration_state;
-    configuration_state.observation =
-        configuration_file.observation;
-    configuration_state.content_hash =
-        configuration_file.hash;
-    configuration_state.content_hash_available = true;
+    const auto* generation_configuration =
+        project->generation_configuration_proof();
 
-    if (token_result.ok()) {
+    if (generation_configuration != nullptr &&
+        generation_configuration->content_hash_available &&
+        generation_configuration->change_token_available) {
+
+        const auto configuration_token_begin =
+            std::chrono::steady_clock::now();
+
         bool unchanged = false;
         const auto proof_result =
             prove_file_unchanged(
                 project->configuration_path(),
-                configuration_change_token,
+                generation_configuration->change_token,
                 unchanged);
 
-        if (!proof_result.ok()) {
-            if (proof_result.code !=
-                status_code::not_found) {
-                return proof_result;
+        configuration_token_ns +=
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<
+                    std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() -
+                        configuration_token_begin).count());
+
+        if (proof_result.ok() && unchanged) {
+            fingerprint = *expected;
+
+            configuration_state.observation =
+                generation_configuration->observation;
+            configuration_state.content_hash =
+                generation_configuration->content_hash;
+            configuration_state.content_hash_available = true;
+            configuration_state.change_token =
+                generation_configuration->change_token;
+            configuration_state.change_token_available = true;
+            configuration_state.project_version =
+                project->configuration().version;
+            configuration_state.abi_target =
+                static_cast<std::uint32_t>(
+                    project->configuration().abi.target);
+            configuration_state.abi_pack =
+                project->configuration().abi.pack;
+            configuration_state.available = true;
+
+            configuration_ready = true;
+        }
+        else if (!proof_result.ok() &&
+                 proof_result.code !=
+                    status_code::not_found) {
+            return proof_result;
+        }
+        // A changed token or unsupported proof deliberately falls through to
+        // semantic validation. This preserves the old behavior where formatting-
+        // only project.json changes may still be accepted by fingerprint.
+    }
+
+    if (!configuration_ready) {
+        file_change_token configuration_change_token;
+        const auto configuration_token_begin =
+            std::chrono::steady_clock::now();
+        const auto token_result =
+            capture_file_change_token(
+                project->configuration_path(),
+                configuration_change_token);
+        configuration_token_ns +=
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<
+                    std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() -
+                        configuration_token_begin).count());
+
+        if (!token_result.ok() &&
+            token_result.code != status_code::not_found) {
+            return token_result;
+        }
+
+        file_snapshot configuration_file;
+        const auto configuration_read_begin =
+            std::chrono::steady_clock::now();
+        const auto acquisition =
+            acquire_file_snapshot(
+                project->configuration_path(),
+                std::nullopt,
+                configuration_file);
+        configuration_read_ns =
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<
+                    std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() -
+                        configuration_read_begin).count());
+
+        if (acquisition !=
+            file_snapshot_result::acquired) {
+
+            if (acquisition ==
+                file_snapshot_result::allocation_failed) {
+                return {status_code::not_available};
+            }
+
+            if (acquisition ==
+                file_snapshot_result::missing) {
+                return {status_code::not_found};
+            }
+
+            return {status_code::io_failed};
+        }
+
+        diagnostic_buffer configuration_diagnostics;
+
+        const auto configuration_parse_begin =
+            std::chrono::steady_clock::now();
+        result = load_project_configuration(
+            configuration_file.bytes,
+            project->configuration_path(),
+            operation_id{},
+            configuration_diagnostics,
+            fallback_configuration);
+        configuration_parse_ns =
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<
+                    std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() -
+                        configuration_parse_begin).count());
+
+        if (!result.ok())
+            return result;
+
+        const auto fingerprint_begin =
+            std::chrono::steady_clock::now();
+        result = make_project_baseline_fingerprint(
+            fallback_configuration,
+            fingerprint);
+        fingerprint_ns =
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<
+                    std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() -
+                        fingerprint_begin).count());
+        if (!result.ok())
+            return result;
+
+        if (!(*expected == fingerprint))
+            return {status_code::rebuild_required};
+
+        configuration_state.observation =
+            configuration_file.observation;
+        configuration_state.content_hash =
+            configuration_file.hash;
+        configuration_state.content_hash_available = true;
+
+        if (token_result.ok()) {
+            bool unchanged = false;
+            const auto proof_result =
+                prove_file_unchanged(
+                    project->configuration_path(),
+                    configuration_change_token,
+                    unchanged);
+
+            if (!proof_result.ok()) {
+                if (proof_result.code !=
+                    status_code::not_found) {
+                    return proof_result;
+                }
+            }
+            else if (!unchanged) {
+                return {status_code::rebuild_required};
+            }
+            else {
+                configuration_state.change_token =
+                    configuration_change_token;
+                configuration_state.change_token_available = true;
             }
         }
-        else if (!unchanged) {
-            return {status_code::rebuild_required};
-        }
-        else {
-            configuration_state.change_token =
-                configuration_change_token;
-            configuration_state.change_token_available = true;
-        }
+
+        configuration_state.project_version =
+            fallback_configuration.version;
+        configuration_state.abi_target =
+            static_cast<std::uint32_t>(
+                fallback_configuration.abi.target);
+        configuration_state.abi_pack =
+            fallback_configuration.abi.pack;
+        configuration_state.available = true;
+
+        save_configuration =
+            &fallback_configuration;
     }
-    configuration_state.project_version =
-        configuration.version;
-    configuration_state.abi_target =
-        static_cast<std::uint32_t>(
-            configuration.abi.target);
-    configuration_state.abi_pack =
-        configuration.abi.pack;
-    configuration_state.available = true;
 
     baseline_store store{
         project->configuration_path()};
@@ -1386,7 +1655,7 @@ status project_manager::save(
             std::chrono::steady_clock::now();
         result = freeze_project_generation(
                 *project,
-                configuration,
+                *save_configuration,
                 generation,
                 &generation_freeze_detail);
         generation_freeze_ns =

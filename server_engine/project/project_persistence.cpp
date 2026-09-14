@@ -247,41 +247,40 @@ status freeze_project_generation(
             std::chrono::steady_clock::now();
 
         std::vector<source_manager_image_root> roots;
-        roots.reserve(configuration.project.size());
 
-        const auto generation_roots =
-            project.generation_provenance().roots();
+        const auto generation_root_count =
+            project.generation_root_count();
 
-        if (generation_roots.size() ==
-            configuration.project.size()) {
+        if (generation_root_count != 0) {
+            roots.reserve(generation_root_count);
 
-            // GEN-02C11: Generation-owned root identities were resolved by the
-            // frontend that constructed this exact state. SAVE only pairs them
-            // with immutable configuration roles; no path conversion or lookup.
             for (std::size_t index = 0;
-                 index < generation_roots.size();
+                 index < generation_root_count;
                  ++index) {
 
-                const auto source =
-                    generation_roots[index];
+                source_manager_image_root root;
+                result = project.generation_root(
+                    index,
+                    root);
+                if (!result.ok())
+                    return result;
 
-                if (!source ||
+                if (!root.source ||
                     static_cast<std::size_t>(
-                        source.value()) >
+                        root.source.value()) >
                         project.sources().source_count()) {
                     return {
                         status_code::initialization_failed};
                 }
 
-                roots.push_back({
-                    source,
-                    configuration.project[index].role,
-                });
+                roots.push_back(root);
             }
         }
         else {
-            // Compatibility fallback for construction states activated from an
-            // older persisted baseline that does not yet own Generation roots.
+            // Portable compatibility fallback for legacy construction states
+            // that own neither Generation root records nor a pinned baseline.
+            roots.reserve(configuration.project.size());
+
             for (const auto& item : configuration.project) {
                 std::string normalized;
 
