@@ -25,7 +25,6 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
-#include <iostream>
 #include <memory>
 #include <span>
 #include <string>
@@ -3524,6 +3523,53 @@ bool test_source_manager_image_integrity() {
 }
 
 
+bool test_project_generation_native_source_freeze() {
+    const auto directory =
+        std::filesystem::temp_directory_path() /
+        "server_engine_v3_native_source_freeze";
+
+    std::unique_ptr<project_context> context;
+    if (!prepare_compiled_image_fixture(
+            directory,
+            context)) {
+        return false;
+    }
+
+    project_generation_storage generation;
+    const auto result =
+        freeze_project_generation(
+            *context,
+            generation);
+
+    if (!result.ok()) {
+        std::error_code error;
+        std::filesystem::remove_all(
+            directory,
+            error);
+        return false;
+    }
+
+    const auto segments =
+        generation.segments();
+    const auto& source_segment =
+        segments.sources_segment();
+
+    const bool pass =
+        !source_segment.empty() &&
+        source_segment.extent_count() > 1 &&
+        !source_segment.is_contiguous() &&
+        segments.sources().empty() &&
+        !segments.compiled_segment().empty() &&
+        !segments.build_segment().empty();
+
+    std::error_code error;
+    std::filesystem::remove_all(
+        directory,
+        error);
+
+    return pass;
+}
+
 bool test_compiled_image_roundtrip() {
     static_assert(compiled_image_directory_count == 16);
     static_assert(
@@ -5005,335 +5051,6 @@ bool test_project_build_no_change_reuses_baseline() {
     return pass;
 }
 
-
-bool test_debug_sparse_native_source_persistence() {
-    persistent_lifecycle_fixture fixture;
-    if (!prepare_persistent_lifecycle_fixture(
-            "server_engine_v3_debug_sparse_native_source",
-            fixture)) {
-        std::cerr << "DEBUG sparse: fixture FAILED\n";
-        return false;
-    }
-
-    const auto cleanup = [&]() noexcept {
-        std::error_code error;
-        std::filesystem::remove_all(fixture.directory, error);
-    };
-
-    baseline_commit_result baseline_commit;
-    if (!create_saved_persistent_project(
-            fixture,
-            baseline_commit)) {
-        std::cerr << "DEBUG sparse: initial rebuild/save FAILED\n";
-        cleanup();
-        return false;
-    }
-
-    std::cerr
-        << "DEBUG sparse: initial save PASS transaction="
-        << baseline_commit.transaction
-        << " bytes=" << baseline_commit.bytes_written
-        << "\n";
-
-    object_handle initial_a;
-    object_handle initial_b;
-    link_handle initial_link;
-
-    {
-        project_manager manager;
-        diagnostic_buffer diagnostics;
-        project_load_result loaded;
-
-        const auto load_result =
-            manager.load(
-                fixture.configuration_path,
-                operation_id{9910},
-                diagnostics,
-                loaded);
-
-        std::cerr
-            << "DEBUG sparse: initial load status="
-            << static_cast<int>(load_result.code)
-            << " diagnostics=" << diagnostics.has_errors()
-            << " transaction_match="
-            << (loaded.transaction == baseline_commit.transaction)
-            << " build_cache_mapped="
-            << loaded.build_cache_mapped
-            << "\n";
-
-        if (!load_result.ok() ||
-            diagnostics.has_errors() ||
-            loaded.transaction != baseline_commit.transaction) {
-            cleanup();
-            return false;
-        }
-
-        project_access access;
-        const auto acquire_result =
-            manager.acquire(access);
-
-        const bool queried =
-            acquire_result.ok() &&
-            access &&
-            access->find_object("A", initial_a).ok() &&
-            access->find_object("B", initial_b).ok() &&
-            access->find_link("B.IN", initial_link).ok() &&
-            initial_a &&
-            initial_b &&
-            initial_link;
-
-        std::cerr
-            << "DEBUG sparse: initial query acquire="
-            << static_cast<int>(acquire_result.code)
-            << " queried=" << queried
-            << " A=" << initial_a.value()
-            << " B=" << initial_b.value()
-            << " link=" << initial_link.value()
-            << "\n";
-
-        access.reset();
-
-        const auto unload_result =
-            manager.unload();
-
-        std::cerr
-            << "DEBUG sparse: initial unload status="
-            << static_cast<int>(unload_result.code)
-            << "\n";
-
-        if (!queried || !unload_result.ok()) {
-            cleanup();
-            return false;
-        }
-    }
-
-    {
-        std::ofstream file(
-            fixture.model_path,
-            std::ios::trunc);
-
-        file <<
-            "struct IO { int IN; int OUT; int AUX; }; "
-            "IO A; IO B; B.IN = A.OUT;";
-
-        if (!file) {
-            std::cerr << "DEBUG sparse: model rewrite FAILED\n";
-            cleanup();
-            return false;
-        }
-    }
-
-    project_manager manager;
-    diagnostic_buffer build_diagnostics;
-    project_build_result build;
-
-    const auto build_result =
-        manager.build(
-            fixture.configuration_path,
-            operation_id{9911},
-            build_diagnostics,
-            build,
-            2);
-
-    std::cerr
-        << "DEBUG sparse: changed BUILD status="
-        << static_cast<int>(build_result.code)
-        << " diagnostics=" << build_diagnostics.has_errors()
-        << " changed=" << build.changed
-        << " rebuilt=" << build.rebuilt
-        << " manager_state="
-        << static_cast<int>(manager.state())
-        << "\n";
-
-    if (!build_result.ok() ||
-        build_diagnostics.has_errors() ||
-        !build.changed ||
-        build.rebuilt ||
-        manager.state() != project_lifecycle_state::ready) {
-
-        if (manager.ready())
-            (void)manager.unload();
-
-        cleanup();
-        return false;
-    }
-
-    project_access sparse;
-    const auto sparse_acquire =
-        manager.acquire(sparse);
-
-    object_handle sparse_a;
-    object_handle sparse_b;
-    link_handle sparse_link;
-    object_endpoint aux;
-
-    const bool sparse_state =
-        sparse_acquire.ok() &&
-        sparse &&
-        sparse->baseline_backed() &&
-        sparse->build_cache_mapped() &&
-        sparse->baseline_transaction() ==
-            baseline_commit.transaction &&
-        sparse->find_object("A", sparse_a).ok() &&
-        sparse->find_object("B", sparse_b).ok() &&
-        sparse->find_link("B.IN", sparse_link).ok() &&
-        sparse->find_endpoint("A.AUX", aux).ok();
-
-    std::cerr
-        << "DEBUG sparse: changed state acquire="
-        << static_cast<int>(sparse_acquire.code)
-        << " state_ok=" << sparse_state
-        << " baseline_backed="
-        << (sparse ? sparse->baseline_backed() : false)
-        << " build_cache_mapped="
-        << (sparse ? sparse->build_cache_mapped() : false)
-        << " transaction_match="
-        << (sparse &&
-            sparse->baseline_transaction() ==
-                baseline_commit.transaction)
-        << " A=" << sparse_a.value()
-        << " B=" << sparse_b.value()
-        << " link=" << sparse_link.value()
-        << " handles_preserved="
-        << (sparse_a == initial_a &&
-            sparse_b == initial_b &&
-            sparse_link == initial_link)
-        << "\n";
-
-    if (!sparse_state ||
-        sparse_a != initial_a ||
-        sparse_b != initial_b ||
-        sparse_link != initial_link) {
-
-        sparse.reset();
-
-        if (manager.ready())
-            (void)manager.unload();
-
-        cleanup();
-        return false;
-    }
-
-    sparse.reset();
-
-    baseline_commit_result sparse_commit;
-    const auto sparse_save_result =
-        manager.save(sparse_commit);
-
-    std::cerr
-        << "DEBUG sparse: sparse SAVE status="
-        << static_cast<int>(sparse_save_result.code)
-        << " transaction=" << sparse_commit.transaction
-        << " bytes=" << sparse_commit.bytes_written
-        << " transaction_changed="
-        << (!sparse_commit.transaction.empty() &&
-            sparse_commit.transaction !=
-                baseline_commit.transaction)
-        << "\n";
-
-    if (!sparse_save_result.ok() ||
-        sparse_commit.transaction.empty() ||
-        sparse_commit.transaction ==
-            baseline_commit.transaction) {
-
-        if (manager.ready())
-            (void)manager.unload();
-
-        cleanup();
-        return false;
-    }
-
-    const auto unload_result =
-        manager.unload();
-
-    std::cerr
-        << "DEBUG sparse: post-save unload status="
-        << static_cast<int>(unload_result.code)
-        << "\n";
-
-    if (!unload_result.ok()) {
-        cleanup();
-        return false;
-    }
-
-    diagnostic_buffer load_diagnostics;
-    project_load_result loaded;
-
-    const auto reload_result =
-        manager.load(
-            fixture.configuration_path,
-            operation_id{9912},
-            load_diagnostics,
-            loaded);
-
-    std::cerr
-        << "DEBUG sparse: reload status="
-        << static_cast<int>(reload_result.code)
-        << " diagnostics=" << load_diagnostics.has_errors()
-        << " transaction_match="
-        << (loaded.transaction ==
-            sparse_commit.transaction)
-        << " build_cache_mapped="
-        << loaded.build_cache_mapped
-        << "\n";
-
-    project_access reloaded;
-    const auto reload_acquire =
-        manager.acquire(reloaded);
-
-    object_handle reloaded_a;
-    object_handle reloaded_b;
-    link_handle reloaded_link;
-
-    const bool reload_state =
-        reload_result.ok() &&
-        !load_diagnostics.has_errors() &&
-        loaded.transaction ==
-            sparse_commit.transaction &&
-        !loaded.build_cache_mapped &&
-        reload_acquire.ok() &&
-        reloaded &&
-        reloaded->baseline_backed() &&
-        !reloaded->build_cache_mapped() &&
-        reloaded->find_object(
-            "A",
-            reloaded_a).ok() &&
-        reloaded->find_object(
-            "B",
-            reloaded_b).ok() &&
-        reloaded->find_link(
-            "B.IN",
-            reloaded_link).ok() &&
-        reloaded->find_endpoint(
-            "A.AUX",
-            aux).ok();
-
-    std::cerr
-        << "DEBUG sparse: reload query acquire="
-        << static_cast<int>(reload_acquire.code)
-        << " state_ok=" << reload_state
-        << " A=" << reloaded_a.value()
-        << " B=" << reloaded_b.value()
-        << " link=" << reloaded_link.value()
-        << " handles_preserved="
-        << (reloaded_a == initial_a &&
-            reloaded_b == initial_b &&
-            reloaded_link == initial_link)
-        << "\n";
-
-    reloaded.reset();
-
-    if (manager.ready())
-        (void)manager.unload();
-
-    cleanup();
-
-    return reload_state &&
-        reloaded_a == initial_a &&
-        reloaded_b == initial_b &&
-        reloaded_link == initial_link;
-}
-
 bool test_project_build_changed_baseline_sparse_save_load() {
     persistent_lifecycle_fixture fixture;
     if (!prepare_persistent_lifecycle_fixture(
@@ -5408,15 +5125,6 @@ bool test_project_build_changed_baseline_sparse_save_load() {
         build,
         2);
 
-    std::cerr
-        << "C1C2C DIAG 89 build code="
-        << static_cast<int>(build_result.code)
-        << " diag=" << build_diagnostics.has_errors()
-        << " changed=" << build.changed
-        << " rebuilt=" << build.rebuilt
-        << " ready=" << manager.ready()
-        << '\n';
-
     project_access sparse;
     object_handle sparse_a;
     object_handle sparse_b;
@@ -5452,14 +5160,6 @@ bool test_project_build_changed_baseline_sparse_save_load() {
     baseline_commit_result sparse_commit;
     const auto sparse_save_result =
         manager.save(sparse_commit);
-
-    std::cerr
-        << "C1C2C DIAG 89 save code="
-        << static_cast<int>(sparse_save_result.code)
-        << " txn_empty=" << sparse_commit.transaction.empty()
-        << " txn_same="
-        << (sparse_commit.transaction == baseline_commit.transaction)
-        << '\n';
 
     if (!sparse_save_result.ok() ||
         sparse_commit.transaction.empty() ||
@@ -5501,15 +5201,6 @@ bool test_project_build_changed_baseline_sparse_save_load() {
         load_diagnostics,
         loaded);
 
-    std::cerr
-        << "C1C2C DIAG 89 reload code="
-        << static_cast<int>(load_result.code)
-        << " diag=" << load_diagnostics.has_errors()
-        << " txn_match="
-        << (loaded.transaction == sparse_commit.transaction)
-        << " build_cache_mapped=" << loaded.build_cache_mapped
-        << '\n';
-
     project_access reloaded;
     object_handle reloaded_a;
     object_handle reloaded_b;
@@ -5531,46 +5222,6 @@ bool test_project_build_changed_baseline_sparse_save_load() {
         reloaded_a == initial_a &&
         reloaded_b == initial_b &&
         reloaded_link == initial_link;
-
-    {
-        bool diag_acquired = static_cast<bool>(reloaded);
-        bool diag_baseline = false;
-        bool diag_cache = false;
-        bool diag_a = false;
-        bool diag_b = false;
-        bool diag_link = false;
-        bool diag_aux = false;
-        object_handle diag_a_handle;
-        object_handle diag_b_handle;
-        link_handle diag_link_handle;
-        object_endpoint diag_aux_endpoint;
-
-        if (reloaded) {
-            diag_baseline = reloaded->baseline_backed();
-            diag_cache = reloaded->build_cache_mapped();
-            diag_a = reloaded->find_object("A", diag_a_handle).ok();
-            diag_b = reloaded->find_object("B", diag_b_handle).ok();
-            diag_link = reloaded->find_link("B.IN", diag_link_handle).ok();
-            diag_aux = reloaded->find_endpoint("A.AUX", diag_aux_endpoint).ok();
-        }
-
-        std::cerr
-            << "C1C2C DIAG 89 post"
-            << " acquired=" << diag_acquired
-            << " baseline=" << diag_baseline
-            << " cache=" << diag_cache
-            << " A=" << diag_a
-            << " B=" << diag_b
-            << " link=" << diag_link
-            << " aux=" << diag_aux
-            << " A_handle=" << diag_a_handle.value()
-            << " A_expected=" << initial_a.value()
-            << " B_handle=" << diag_b_handle.value()
-            << " B_expected=" << initial_b.value()
-            << " link_handle=" << diag_link_handle.value()
-            << " link_expected=" << initial_link.value()
-            << "\n";
-    }
 
     reloaded.reset();
     if (manager.ready())
@@ -5651,15 +5302,6 @@ bool test_project_build_link_tombstone_handle_restore() {
                 build,
                 1);
 
-        std::cerr
-            << "C1C2C DIAG 90 tombstone-build code="
-            << static_cast<int>(tombstone_build_result.code)
-            << " diag=" << diagnostics.has_errors()
-            << " changed=" << build.changed
-            << " rebuilt=" << build.rebuilt
-            << " ready=" << manager.ready()
-            << '\n';
-
         if (!tombstone_build_result.ok() ||
             diagnostics.has_errors() ||
             !build.changed ||
@@ -5687,18 +5329,7 @@ bool test_project_build_link_tombstone_handle_restore() {
         }
         access.reset();
 
-        const auto tombstone_save_result =
-            manager.save(tombstone_commit);
-
-        std::cerr
-            << "C1C2C DIAG 90 tombstone-save code="
-            << static_cast<int>(tombstone_save_result.code)
-            << " txn_empty=" << tombstone_commit.transaction.empty()
-            << " txn_same="
-            << (tombstone_commit.transaction == initial_commit.transaction)
-            << '\n';
-
-        if (!tombstone_save_result.ok() ||
+        if (!manager.save(tombstone_commit).ok() ||
             tombstone_commit.transaction.empty() ||
             tombstone_commit.transaction == initial_commit.transaction ||
             !manager.unload().ok()) {
@@ -5729,15 +5360,6 @@ bool test_project_build_link_tombstone_handle_restore() {
         build,
         1);
 
-    std::cerr
-        << "C1C2C DIAG 90 restore-build code="
-        << static_cast<int>(result.code)
-        << " diag=" << diagnostics.has_errors()
-        << " changed=" << build.changed
-        << " rebuilt=" << build.rebuilt
-        << " ready=" << manager.ready()
-        << '\n';
-
     project_access access;
     link_handle restored_link;
     const bool pass =
@@ -5752,34 +5374,6 @@ bool test_project_build_link_tombstone_handle_restore() {
         access->baseline_transaction() == tombstone_commit.transaction &&
         access->find_link("B.IN", restored_link).ok() &&
         restored_link == original_link;
-
-    {
-        bool diag_acquired = static_cast<bool>(access);
-        bool diag_baseline = false;
-        bool diag_cache = false;
-        bool diag_link = false;
-        link_handle diag_link_handle;
-
-        if (access) {
-            diag_baseline = access->baseline_backed();
-            diag_cache = access->build_cache_mapped();
-            diag_link = access->find_link("B.IN", diag_link_handle).ok();
-        }
-
-        std::cerr
-            << "C1C2C DIAG 90 post"
-            << " acquired=" << diag_acquired
-            << " baseline=" << diag_baseline
-            << " cache=" << diag_cache
-            << " txn_match="
-            << (access &&
-                access->baseline_transaction() ==
-                    tombstone_commit.transaction)
-            << " link=" << diag_link
-            << " link_handle=" << diag_link_handle.value()
-            << " link_expected=" << original_link.value()
-            << "\n";
-    }
 
     access.reset();
     if (manager.ready())
@@ -5873,6 +5467,7 @@ constexpr std::array tests{
     test_case{"source_manager_file_acquisition", &test_source_manager_file_acquisition},
     test_case{"source_manager_native_generation_storage", &test_source_manager_native_generation_storage},
     test_case{"source_manager_native_image_scatter_gather", &test_source_manager_native_image_scatter_gather},
+    test_case{"project_generation_native_source_freeze", &test_project_generation_native_source_freeze},
     test_case{"lexer_include_discovery", &test_lexer_include_discovery},
     test_case{"parser_source_facts_producer", &test_parser_source_facts_producer},
     test_case{"parser_enum_facts", &test_parser_enum_facts},
@@ -5942,7 +5537,6 @@ constexpr std::array tests{
     test_case{"project_save_idempotent_configuration_guard", &test_project_save_idempotent_configuration_guard},
     test_case{"project_save_after_load_keeps_active_baseline", &test_project_save_after_load_keeps_active_baseline},
     test_case{"project_build_no_change_reuses_baseline", &test_project_build_no_change_reuses_baseline},
-    test_case{"debug_sparse_native_source_persistence", &test_debug_sparse_native_source_persistence},
     test_case{"project_build_changed_baseline_sparse_save_load", &test_project_build_changed_baseline_sparse_save_load},
     test_case{"project_build_link_tombstone_handle_restore", &test_project_build_link_tombstone_handle_restore},
     test_case{"project_build_without_baseline_full_no_save", &test_project_build_without_baseline_full_no_save},

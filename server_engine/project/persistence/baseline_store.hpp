@@ -3,6 +3,7 @@
 #include "../../status.hpp"
 #include "../source/file_snapshot.hpp"
 #include "../source/source_change_tracker.hpp"
+#include "../project_generation_segments.hpp"
 
 #include <array>
 #include <cstddef>
@@ -113,6 +114,9 @@ public:
     [[nodiscard]] bool mapped(
         baseline_artifact_kind kind) const noexcept;
 
+    [[nodiscard]] project_generation_segments
+    segments() const noexcept;
+
     [[nodiscard]] const baseline_fingerprint& fingerprint() const noexcept {
         return fingerprint_value;
     }
@@ -158,7 +162,8 @@ public:
     baseline_store(const baseline_store&) = delete;
     baseline_store& operator=(const baseline_store&) = delete;
 
-    // Reads CURRENT + manifest only. No baseline artifact is mapped.
+    // Reads only the fixed CURRENT selector prefix and manifest identity.
+    // The embedded BUILD decision gate and baseline artifacts remain untouched.
     [[nodiscard]] status probe(
         baseline_probe& output) const noexcept;
 
@@ -240,6 +245,12 @@ public:
         std::uint64_t expected_build_cache_size,
         baseline_snapshot& snapshot,
         baseline_open_telemetry* telemetry = nullptr) const noexcept;
+
+    [[nodiscard]] status commit(
+        const baseline_fingerprint& fingerprint,
+        const baseline_configuration_state& configuration,
+        project_generation_segments generation,
+        baseline_commit_result& output) const noexcept;
 
     [[nodiscard]] status commit(
         const baseline_fingerprint& fingerprint,

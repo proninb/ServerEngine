@@ -33,6 +33,20 @@ struct source_record final {
 
 static_assert(sizeof(source_record) == 8);
 
+
+// Read-only construction Generation view. Fresh G0 exposes dense native arrays;
+// baseline-backed Gn remains sparse and therefore reports complete=false.
+struct source_manager_native_generation_view final {
+    std::span<const source_record> sources;
+    std::span<const source_generation_physical_record> physical;
+    std::span<const source_generation_record> graph;
+    std::span<const source_id> forward_edges;
+    std::span<const source_id> reverse_edges;
+    std::span<const std::byte> path_index;
+    std::span<const std::byte> path_bytes;
+    bool complete = false;
+};
+
 enum class source_acquire_result_kind : std::uint8_t {
     unchanged,
     missing,
@@ -113,6 +127,9 @@ public:
     generation_storage() const noexcept {
         return generation_storage_value;
     }
+
+    [[nodiscard]] source_manager_native_generation_view
+    native_generation() const noexcept;
 
     [[nodiscard]] status publish_memory(
         std::string_view normalized_path,

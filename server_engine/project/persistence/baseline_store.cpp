@@ -2851,9 +2851,14 @@ status baseline_store::commit(
             return {status_code::persistence_failed};
         }
 
+        // Packed Source+Build is a contiguous-image optimization. A native
+        // multi-extent Source Generation is persisted as its own immutable
+        // artifact; Build Cache remains a separate artifact so its mapping
+        // boundary never depends on scatter/gather Source extent layout.
         const bool pack_build_state =
             !change_state.empty() &&
             !source_manager.empty() &&
+            source_manager.is_contiguous() &&
             !build_cache.empty();
 
         if (pack_build_state &&

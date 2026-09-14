@@ -499,6 +499,46 @@ source_manager_update source_manager::begin_update() noexcept {
     return source_manager_update{*this};
 }
 
+source_manager_native_generation_view
+source_manager::native_generation() const noexcept {
+
+    source_manager_native_generation_view output;
+
+    if (baseline_backed())
+        return output;
+
+    const std::span<const source_record> local_sources{
+        records.local_values()};
+    const auto local_physical =
+        generation_storage_value.local_physical_records();
+    const auto local_graph =
+        generation_storage_value.local_records();
+
+    output.sources = local_sources;
+    output.physical = local_physical;
+    output.graph = local_graph;
+    output.forward_edges =
+        generation_storage_value.forward_edge_arena();
+    output.reverse_edges =
+        generation_storage_value.reverse_edge_arena();
+
+    output.path_index = {
+        reinterpret_cast<const std::byte*>(path_index.data()),
+        path_index.size() * sizeof(path_slot)};
+
+    output.path_bytes = {
+        reinterpret_cast<const std::byte*>(path_storage.data()),
+        path_storage.size()};
+
+    output.complete =
+        local_sources.size() == source_count() &&
+        local_physical.size() == source_count() &&
+        local_graph.size() == source_count() &&
+        (source_count() == 0 || !path_index.empty());
+
+    return output;
+}
+
 source_snapshot source_manager::current(source_id source) const noexcept {
     if (!source)
         return {};
@@ -1686,8 +1726,18 @@ status source_manager_update::prepare_publish() noexcept {
         return result;
 
     for (const auto& item : candidates) {
-        if (!item.has_includes && !item.has_dependents)
+        if (!item.has_snapshot &&
+            !item.has_includes &&
+            !item.has_dependents) {
             continue;
+        }
+
+        if (item.has_snapshot &&
+            item.snapshot &&
+            item.snapshot.observation().size >
+                (std::numeric_limits<std::uint64_t>::max)()) {
+            return {status_code::not_available};
+        }
 
         if (static_cast<std::size_t>(item.source.value()) <=
             owner->generation_storage_value.source_count()) {
@@ -1724,8 +1774,12 @@ void source_manager_update::publish_prepared() noexcept {
         const auto index = static_cast<std::size_t>(item.source.value() - 1);
         if (index >= owner->states.size())
             continue;
-        if (item.has_snapshot)
+        if (item.has_snapshot) {
             owner->states[index].snapshot = std::move(item.snapshot);
+            owner->generation_storage_value.publish_snapshot(
+                item.source,
+                owner->states[index].snapshot);
+        }
         if (item.has_includes) {
             owner->generation_storage_value.publish_includes(
                 item.source,

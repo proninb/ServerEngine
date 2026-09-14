@@ -1,6 +1,7 @@
 #include "project_build_orchestrator.hpp"
 #include "generation/project_generation_freeze.hpp"
 
+#include <cstdio>
 #include <chrono>
 #include <new>
 #include <stdexcept>
@@ -326,8 +327,13 @@ status project_build_orchestrator::update(
         const auto frontend_end = build_clock::now();
         output.telemetry.frontend_ns = elapsed_ns(frontend_begin, frontend_end);
         output.telemetry.frontend = frontend.summary();
-        if (!result.ok())
+        if (!result.ok()) {
+            std::fprintf(
+                stderr,
+                "[C1C2C-STAGE] frontend.build_incremental code=%u\n",
+                static_cast<unsigned>(result.code));
             return result;
+        }
 
         if (frontend.sources().empty()) {
             const auto source_prepare_begin = build_clock::now();
@@ -353,8 +359,13 @@ status project_build_orchestrator::update(
         std::vector<source_id> removals;
         result = collect_builder_inputs(
             frontend, state.contributions, replacements, removals);
-        if (!result.ok())
+        if (!result.ok()) {
+            std::fprintf(
+                stderr,
+                "[C1C2C-STAGE] collect_builder_inputs code=%u\n",
+                static_cast<unsigned>(result.code));
             return result;
+        }
 
         generation_builder builder{state.contributions, state.graph_value};
         if (!replacements.empty() || !removals.empty()) {
@@ -364,8 +375,13 @@ status project_build_orchestrator::update(
             const auto builder_end = build_clock::now();
             output.telemetry.builder_prepare_ns = elapsed_ns(builder_begin, builder_end);
             output.telemetry.builder = builder.telemetry();
-            if (!result.ok())
+            if (!result.ok()) {
+                std::fprintf(
+                    stderr,
+                    "[C1C2C-STAGE] builder.prepare_incremental code=%u\n",
+                    static_cast<unsigned>(result.code));
                 return result;
+            }
         }
 
         auto cache_update = state.frontend_cache.begin_update(false);
@@ -382,16 +398,26 @@ status project_build_orchestrator::update(
         const auto source_prepare_end = build_clock::now();
         output.telemetry.source_prepare_publish_ns =
             elapsed_ns(source_prepare_begin, source_prepare_end);
-        if (!result.ok())
+        if (!result.ok()) {
+            std::fprintf(
+                stderr,
+                "[C1C2C-STAGE] source_update.prepare_publish code=%u\n",
+                static_cast<unsigned>(result.code));
             return result;
+        }
 
         const auto cache_prepare_begin = build_clock::now();
         result = cache_update.prepare_publish(source_update.source_count());
         const auto cache_prepare_end = build_clock::now();
         output.telemetry.interface_prepare_publish_ns =
             elapsed_ns(cache_prepare_begin, cache_prepare_end);
-        if (!result.ok())
+        if (!result.ok()) {
+            std::fprintf(
+                stderr,
+                "[C1C2C-STAGE] cache_update.prepare_publish code=%u\n",
+                static_cast<unsigned>(result.code));
             return result;
+        }
 
         const auto publish_begin = build_clock::now();
         const auto interface_publish_begin = build_clock::now();

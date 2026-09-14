@@ -1,5 +1,6 @@
 #include "project_manager.hpp"
 
+#include <cstdio>
 #include <chrono>
 #include <exception>
 #include <new>
@@ -770,6 +771,10 @@ status project_manager::build(
                 build_activation_begin).count());
 
         if (!result.ok()) {
+            std::fprintf(
+                stderr,
+                "[C1C2C-STAGE] activate_build_baseline code=%u\n",
+                static_cast<unsigned>(result.code));
             publish_manager_telemetry(output);
             abandon_construction();
             return result;
@@ -786,9 +791,29 @@ status project_manager::build(
             diagnostics,
             output);
         if (!result.ok()) {
+            std::fprintf(
+                stderr,
+                "[C1C2C-STAGE] builder.update code=%u dirty=%zu "
+                "frontend_ns=%llu builder_ns=%llu source_prepare_ns=%llu "
+                "interface_prepare_ns=%llu\n",
+                static_cast<unsigned>(result.code),
+                dirty_sources.size(),
+                static_cast<unsigned long long>(
+                    output.telemetry.frontend_ns),
+                static_cast<unsigned long long>(
+                    output.telemetry.builder_prepare_ns),
+                static_cast<unsigned long long>(
+                    output.telemetry.source_prepare_publish_ns),
+                static_cast<unsigned long long>(
+                    output.telemetry.interface_prepare_publish_ns));
             publish_manager_telemetry(output);
             abandon_construction();
             return result;
+        }
+
+        if (!output.changed) {
+            candidate->remember_persisted_transaction(
+                candidate->baseline_transaction());
         }
 
         project = std::move(candidate);
@@ -954,6 +979,71 @@ status project_manager::save(
         return {status_code::invalid_state};
     }
 
+    // Idempotent SAVE decision gate. A Project state already known to be
+    // persisted may return without reading/parsing project.json when CURRENT
+    // still selects that transaction and the persisted configuration token
+    // proves the configuration file unchanged.
+    const auto fast_persisted_transaction =
+        project->persisted_transaction();
+
+    if (!fast_persisted_transaction.empty()) {
+        baseline_store fast_store{
+            project->configuration_path()};
+
+        baseline_probe current;
+        auto fast_result = fast_store.probe(current);
+        if (!fast_result.ok())
+            return fast_result;
+
+        const auto* fast_expected =
+            project->build_fingerprint();
+        if (fast_expected == nullptr)
+            return {status_code::invalid_state};
+
+        // Never republish or silently bless an older active state when another
+        // transaction has become CURRENT.
+        if (!(current.fingerprint == *fast_expected) ||
+            current.transaction !=
+                fast_persisted_transaction) {
+            return {status_code::rebuild_required};
+        }
+
+        if (current.configuration.available &&
+            current.configuration.change_token_available) {
+
+            bool unchanged = false;
+            fast_result = prove_file_unchanged(
+                project->configuration_path(),
+                current.configuration.change_token,
+                unchanged);
+
+            if (fast_result.ok() && unchanged) {
+                try {
+                    output.transaction =
+                        current.transaction;
+                }
+                catch (const std::bad_alloc&) {
+                    return {status_code::not_available};
+                }
+                catch (const std::length_error&) {
+                    return {status_code::not_available};
+                }
+
+                output.bytes_written = 0;
+                return {};
+            }
+
+            if (!fast_result.ok() &&
+                fast_result.code !=
+                    status_code::not_found) {
+                return fast_result;
+            }
+        }
+
+        // Legacy baseline, unavailable token, or a changed token: fall through
+        // to the semantic content/fingerprint validation below.
+    }
+
     file_change_token configuration_change_token;
     const auto token_result =
         capture_file_change_token(
@@ -1055,23 +1145,54 @@ status project_manager::save(
     baseline_store store{
         project->configuration_path()};
 
-    if (project->construction_backed()) {
-        project_baseline_images images;
-        result = encode_project_baseline(
-            *project,
-            configuration,
-            images);
+    const auto persisted_transaction =
+        project->persisted_transaction();
+
+    if (!persisted_transaction.empty()) {
+        baseline_probe current;
+        result = store.probe(current);
         if (!result.ok())
             return result;
 
-        return store.commit(
+        // Do not republish an older active state over a different CURRENT.
+        // A matching CURRENT proves this SAVE is already durable.
+        if (!(current.fingerprint == fingerprint) ||
+            current.transaction != persisted_transaction) {
+            return {status_code::rebuild_required};
+        }
+
+        try {
+            output.transaction = current.transaction;
+        }
+        catch (const std::bad_alloc&) {
+            return {status_code::not_available};
+        }
+        catch (const std::length_error&) {
+            return {status_code::not_available};
+        }
+
+        output.bytes_written = 0;
+        return {};
+    }
+
+    if (project->construction_backed()) {
+        project_generation_storage generation;
+        result = freeze_project_generation(
+                *project,
+                configuration,
+                generation);
+        if (!result.ok())
+            return result;
+
+        result = store.commit(
             fingerprint,
             configuration_state,
-            images.compiled,
-            images.source_manager,
-            images.change_state,
-            images.build_cache,
+            generation.segments(),
             output);
+
+        if (result.ok())
+            project->remember_persisted_transaction(output.transaction);
+        return result;
     }
 
     baseline_snapshot active;
@@ -1117,14 +1238,15 @@ status project_manager::save(
     if (!result.ok())
         return result;
 
-    return store.commit(
+    result = store.commit(
         fingerprint,
         configuration_state,
-        active.artifact(baseline_artifact_kind::compiled),
-        active.artifact(baseline_artifact_kind::source_manager),
-        active.artifact(baseline_artifact_kind::change_state),
-        active.artifact(baseline_artifact_kind::build_cache),
+        active.segments(),
         output);
+
+    if (result.ok())
+        project->remember_persisted_transaction(output.transaction);
+    return result;
 }
 
 status project_manager::acquire(

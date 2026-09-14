@@ -23,6 +23,7 @@ public:
     [[nodiscard]] std::string_view text() const noexcept;
     [[nodiscard]] file_snapshot_observation observation() const noexcept;
     [[nodiscard]] const source_content_hash& hash() const noexcept;
+    [[nodiscard]] file_snapshot_identity identity() const noexcept;
     [[nodiscard]] explicit operator bool() const noexcept {
         return state != nullptr || static_cast<bool>(borrowed_source);
     }
@@ -34,6 +35,7 @@ private:
         std::string text;
         file_snapshot_observation observation{};
         source_content_hash hash{};
+        file_snapshot_identity identity{};
     };
 
     explicit source_snapshot(std::shared_ptr<const storage> storage_value) noexcept
@@ -44,12 +46,14 @@ private:
         std::string_view path_value,
         std::string_view text_value,
         file_snapshot_observation observation_value,
-        const source_content_hash& hash_value) noexcept
+        const source_content_hash& hash_value,
+        file_snapshot_identity identity_value = {}) noexcept
         : borrowed_source(source_value),
           borrowed_path(path_value),
           borrowed_text(text_value),
           borrowed_observation(observation_value),
-          borrowed_hash(hash_value) {}
+          borrowed_hash(hash_value),
+          borrowed_identity(identity_value) {}
 
     friend class source_manager;
     friend class source_manager_update;
@@ -60,6 +64,7 @@ private:
     std::string_view borrowed_text;
     file_snapshot_observation borrowed_observation{};
     source_content_hash borrowed_hash{};
+    file_snapshot_identity borrowed_identity{};
 };
 
 inline source_id source_snapshot::source() const noexcept {
@@ -87,6 +92,12 @@ inline const source_content_hash& source_snapshot::hash() const noexcept {
     if (state != nullptr)
         return state->hash;
     return borrowed_source ? borrowed_hash : empty;
+}
+
+inline file_snapshot_identity source_snapshot::identity() const noexcept {
+    return state != nullptr
+        ? state->identity
+        : borrowed_identity;
 }
 
 } // namespace cw::server

@@ -115,6 +115,21 @@ static_assert(sizeof(source_change_journal_candidate) == 24);
     bool& unchanged,
     std::uint64_t* journal_records = nullptr) noexcept;
 
+// Captures one volume-journal position before fresh Source acquisition begins.
+// not_found means the platform/filesystem cannot support this optimization.
+[[nodiscard]] status capture_source_change_checkpoint(
+    const std::filesystem::path& anchor,
+    source_change_checkpoint& output) noexcept;
+
+// Materializes change-tracking provenance for a completed construction
+// generation without reopening Source files. Source identities must come from
+// the same stable handles that acquired their content.
+[[nodiscard]] status prepare_generation_source_change_capture(
+    const source_manager& sources,
+    source_change_checkpoint checkpoint,
+    std::string_view journal_anchor_path,
+    source_change_capture& output) noexcept;
+
 // SAVE-only preparation. The checkpoint is captured before filesystem validation;
 // any change after the checkpoint remains visible to the next BUILD journal query.
 [[nodiscard]] status prepare_source_change_capture(

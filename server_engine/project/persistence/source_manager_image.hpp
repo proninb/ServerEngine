@@ -1,10 +1,12 @@
 #pragma once
 
 #include "../project_root.hpp"
+#include "../project_generation_segments.hpp"
 #include "../source/source_change_tracker.hpp"
 #include "../source/source_manager.hpp"
 
 #include <cstddef>
+#include <array>
 #include <cstdint>
 #include <span>
 #include <string_view>
@@ -12,23 +14,29 @@
 
 namespace cw::server {
 
-inline constexpr std::uint32_t source_manager_image_format_version = 2;
+inline constexpr std::uint32_t source_manager_image_format_version = 3;
 inline constexpr std::size_t source_manager_image_header_size = 160;
-inline constexpr std::size_t source_manager_image_directory_count = 11;
+inline constexpr std::size_t source_manager_image_directory_count = 10;
 inline constexpr std::size_t source_manager_image_directory_entry_size = 32;
+
+inline constexpr std::size_t source_manager_image_prefix_size =
+    (source_manager_image_header_size +
+     source_manager_image_directory_count *
+         source_manager_image_directory_entry_size +
+     63u) &
+    ~std::size_t{63u};
 
 enum class source_manager_image_section : std::uint32_t {
     source_core = 1,
     physical_state = 2,
-    forward_offsets = 3,
+    graph_records = 3,
     forward_edges = 4,
-    reverse_offsets = 5,
-    reverse_edges = 6,
-    roots = 7,
-    path_index = 8,
-    path_bytes = 9,
-    source_file_identity_index = 10,
-    tracked_directory_identity_index = 11,
+    reverse_edges = 5,
+    roots = 6,
+    path_index = 7,
+    path_bytes = 8,
+    source_file_identity_index = 9,
+    tracked_directory_identity_index = 10,
 };
 
 struct source_manager_image_root final {
@@ -50,6 +58,53 @@ struct source_manager_image_physical_state final {
     std::uint64_t size = 0;
     source_content_hash hash{};
 };
+
+// Owns only the metadata that cannot be borrowed from the committed Source
+// Generation. The large Source arrays remain zero-copy spans into Source Manager
+// storage; segment() assembles the durable file as scatter/gather extents.
+class source_manager_native_image_storage final {
+public:
+    source_manager_native_image_storage() noexcept = default;
+
+    void reset() noexcept;
+
+    [[nodiscard]] bool valid() const noexcept {
+        return valid_value;
+    }
+
+    [[nodiscard]] std::size_t size() const noexcept {
+        return size_value;
+    }
+
+    [[nodiscard]] project_generation_segment
+    segment() const noexcept;
+
+private:
+    std::array<
+        std::byte,
+        source_manager_image_prefix_size> prefix{};
+    std::vector<std::byte> roots;
+    source_manager_native_generation_view native;
+    std::span<const source_change_file_index_slot>
+        file_identity_index;
+    std::span<const source_change_directory_index_slot>
+        directory_identity_index;
+    std::size_t size_value = 0;
+    bool valid_value = false;
+
+    friend status freeze_source_manager_native_image(
+        const source_manager&,
+        const source_manager_image_options&,
+        source_manager_native_image_storage&) noexcept;
+};
+
+// Builds only Source image metadata and CRCs. Source records, physical state,
+// graph records, edge arenas, path index/bytes, and change indexes are borrowed
+// directly from immutable Generation storage; no O(N) serialization copy occurs.
+[[nodiscard]] status freeze_source_manager_native_image(
+    const source_manager& manager,
+    const source_manager_image_options& options,
+    source_manager_native_image_storage& output) noexcept;
 
 // Read-only sequence of source_id values encoded as little-endian uint32_t.
 // It borrows the mapped source_manager.bin image and performs no allocation.
@@ -139,7 +194,7 @@ private:
     source_change_checkpoint change_checkpoint_value{};
 };
 
-// Deterministic field-wise little-endian encoder for source_manager.bin v1.
+// Deterministic field-wise little-endian encoder for source_manager.bin v3.
 // Sources are emitted strictly in dense source_id order; roots remain in caller
 // order; no sorting and no runtime hash-table traversal is used.
 [[nodiscard]] status encode_source_manager_image(

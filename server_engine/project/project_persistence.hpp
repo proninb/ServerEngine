@@ -32,7 +32,7 @@ public:
     project_generation_storage& operator=(
         project_generation_storage&&) noexcept = default;
 
-    [[nodiscard]] project_generation_segments
+        [[nodiscard]] project_generation_segments
     segments() const noexcept {
         const auto change_segment =
             !native_change.empty()
@@ -49,7 +49,7 @@ public:
         };
     }
 
-    void reset() noexcept {
+        void reset() noexcept {
         compiled.clear();
         sources.clear();
         change_fallback.clear();

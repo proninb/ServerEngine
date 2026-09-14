@@ -3,6 +3,7 @@
 #include "../../source_id.hpp"
 #include "../../status.hpp"
 #include "../storage/mapped_vector.hpp"
+#include "source_snapshot.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -20,6 +21,26 @@ struct source_edge_range final {
 };
 
 static_assert(sizeof(source_edge_range) == 16);
+
+
+inline constexpr std::uint32_t source_generation_physical_present =
+    0x00000001u;
+
+// Persistence-native physical Source state. The field order matches the
+// Source Manager image record and is populated at Source publication time.
+struct source_generation_physical_record final {
+    std::uint32_t flags = 0;
+    std::uint32_t reserved = 0;
+    std::int64_t write_time_ticks = 0;
+    std::uint64_t size = 0;
+    source_content_hash hash{};
+
+    [[nodiscard]] constexpr bool present() const noexcept {
+        return (flags & source_generation_physical_present) != 0;
+    }
+};
+
+static_assert(sizeof(source_generation_physical_record) == 56);
 
 enum class source_generation_edge_kind : std::uint8_t {
     includes,
@@ -59,6 +80,10 @@ public:
             nullptr,
             count,
             &source_generation_storage::read_baseline_record);
+        physical_records.bind_baseline(
+            nullptr,
+            count,
+            &source_generation_storage::read_baseline_physical);
     }
 
     [[nodiscard]] std::size_t source_count() const noexcept {
@@ -76,6 +101,11 @@ public:
     [[nodiscard]] std::span<const source_generation_record>
     local_records() const noexcept {
         return records.local_values();
+    }
+
+    [[nodiscard]] std::span<const source_generation_physical_record>
+    local_physical_records() const noexcept {
+        return physical_records.local_values();
     }
 
     [[nodiscard]] std::span<const source_id>
@@ -110,6 +140,8 @@ public:
         try {
             records.reserve(
                 records.size() + additional_sources);
+            physical_records.reserve(
+                physical_records.size() + additional_sources);
             forward_edges.reserve(
                 forward_edges.size() + additional_forward_edges);
             reverse_edges.reserve(
@@ -137,14 +169,48 @@ public:
             static_cast<std::size_t>(source.value() - 1);
 
         (void)records[index];
-        return records.read_status().ok()
+        (void)physical_records[index];
+
+        if (!records.read_status().ok())
+            return records.read_status();
+
+        return physical_records.read_status().ok()
             ? status{}
-            : records.read_status();
+            : physical_records.read_status();
     }
 
     // Must be preceded by prepare_publish(additional_sources >= 1).
     void publish_source() noexcept {
         records.emplace_back();
+        physical_records.emplace_back();
+    }
+
+    // Must be preceded by prepare_source() for a baseline Source. Fresh Sources
+    // already own a dense local physical record after publish_source().
+    void publish_snapshot(
+        source_id source,
+        const source_snapshot& snapshot) noexcept {
+
+        if (!source)
+            return;
+
+        const auto index =
+            static_cast<std::size_t>(source.value() - 1);
+
+        if (index >= physical_records.size())
+            return;
+
+        auto& output = physical_records[index];
+        output = {};
+
+        if (!snapshot)
+            return;
+
+        const auto observation = snapshot.observation();
+        output.flags = source_generation_physical_present;
+        output.write_time_ticks = observation.write_time_ticks;
+        output.size = static_cast<std::uint64_t>(observation.size);
+        output.hash = snapshot.hash();
     }
 
     // Must be preceded by prepare_publish() and, for a baseline source,
@@ -214,6 +280,17 @@ private:
 
         // Untouched baseline edges are read directly from the mapped Source
         // image. A sparse replacement materializes this empty overlay record.
+        output = {};
+        return {};
+    }
+
+    [[nodiscard]] static status read_baseline_physical(
+        const void*,
+        std::size_t,
+        source_generation_physical_record& output) noexcept {
+
+        // Untouched baseline physical state remains mmap-backed. This overlay is
+        // materialized only when a sparse BUILD replaces the Source snapshot.
         output = {};
         return {};
     }
@@ -305,6 +382,7 @@ private:
     }
 
     mapped_vector<source_generation_record> records;
+    mapped_vector<source_generation_physical_record> physical_records;
     std::vector<source_id> forward_edges;
     std::vector<source_id> reverse_edges;
 };

@@ -34,8 +34,10 @@ constexpr std::size_t header_crc_offset = 128;
 constexpr std::size_t header_directory_crc_offset = 136;
 constexpr std::size_t header_reserved_begin = 144;
 
-constexpr std::size_t source_core_size = 16;
+constexpr std::size_t source_core_size = 8;
 constexpr std::size_t physical_state_size = 56;
+constexpr std::size_t graph_record_size = 40;
+constexpr std::uint32_t graph_known_flags = 0x00000003u;
 constexpr std::size_t root_record_size = 8;
 constexpr std::size_t path_index_record_size = 8;
 constexpr std::size_t source_file_identity_index_record_size = 16;
@@ -302,46 +304,84 @@ void source_manager_image_view::reset() noexcept {
     change_checkpoint_value = {};
 }
 
-status source_manager_image_view::bind(std::span<const std::byte> image) noexcept {
+status source_manager_image_view::bind(
+    std::span<const std::byte> image) noexcept {
+
     reset();
 
     if (image.size() < first_section_offset)
         return {status_code::artifact_corrupt};
 
-    if (!std::equal(image_magic.begin(), image_magic.end(), image.begin()))
-        return {status_code::artifact_corrupt};
-
-    if (read_u32(image.data() + 8) != source_manager_image_format_version)
-        return {status_code::rebuild_required};
-    if (read_u32(image.data() + 12) != endian_marker)
-        return {status_code::artifact_corrupt};
-    if (read_u32(image.data() + 16) != source_manager_image_header_size ||
-        read_u32(image.data() + 20) != source_manager_image_directory_count ||
-        read_u32(image.data() + 24) != source_manager_image_directory_entry_size) {
+    if (!std::equal(
+            image_magic.begin(),
+            image_magic.end(),
+            image.begin())) {
         return {status_code::artifact_corrupt};
     }
 
-    const auto stored_directory_offset = read_u64(image.data() + 32);
-    const auto stored_file_size = read_u64(image.data() + 40);
-    if (stored_directory_offset != directory_offset || stored_file_size != image.size())
+    if (read_u32(image.data() + 8) !=
+        source_manager_image_format_version) {
+        return {status_code::rebuild_required};
+    }
+
+    if (read_u32(image.data() + 12) != endian_marker)
         return {status_code::artifact_corrupt};
 
-    std::array<std::byte, source_manager_image_header_size> header{};
-    std::memcpy(header.data(), image.data(), header.size());
+    if (read_u32(image.data() + 16) !=
+            source_manager_image_header_size ||
+        read_u32(image.data() + 20) !=
+            source_manager_image_directory_count ||
+        read_u32(image.data() + 24) !=
+            source_manager_image_directory_entry_size) {
+        return {status_code::artifact_corrupt};
+    }
+
+    const auto stored_directory_offset =
+        read_u64(image.data() + 32);
+    const auto stored_file_size =
+        read_u64(image.data() + 40);
+
+    if (stored_directory_offset != directory_offset ||
+        stored_file_size != image.size()) {
+        return {status_code::artifact_corrupt};
+    }
+
+    std::array<std::byte, source_manager_image_header_size>
+        header{};
+    std::memcpy(
+        header.data(),
+        image.data(),
+        header.size());
+
     const auto stored_header_crc =
         read_u64(header.data() + header_crc_offset);
-    write_u64(header.data() + header_crc_offset, 0);
+    write_u64(
+        header.data() + header_crc_offset,
+        0);
+
     if (persistence_crc64(header) != stored_header_crc)
         return {status_code::artifact_corrupt};
 
     const auto directory_crc =
-        read_u64(image.data() + header_directory_crc_offset);
-    const auto directory_span = image.subspan(directory_offset, directory_bytes);
-    if (persistence_crc64(directory_span) != directory_crc)
-        return {status_code::artifact_corrupt};
+        read_u64(
+            image.data() +
+            header_directory_crc_offset);
 
-    section_view candidate[source_manager_image_directory_count]{};
-    std::uint64_t previous_end = first_section_offset;
+    const auto directory_span =
+        image.subspan(
+            directory_offset,
+            directory_bytes);
+
+    if (persistence_crc64(directory_span) !=
+        directory_crc) {
+        return {status_code::artifact_corrupt};
+    }
+
+    section_view
+        candidate[source_manager_image_directory_count]{};
+
+    std::uint64_t previous_end =
+        first_section_offset;
 
     for (std::size_t index = 0;
          index < source_manager_image_directory_count;
@@ -350,14 +390,21 @@ status source_manager_image_view::bind(std::span<const std::byte> image) noexcep
         const auto* entry =
             image.data() +
             directory_offset +
-            index * source_manager_image_directory_entry_size;
+            index *
+                source_manager_image_directory_entry_size;
 
-        const auto raw_kind = read_u32(entry);
-        const auto record_size = read_u32(entry + 4);
-        const auto offset = read_u64(entry + 8);
-        const auto count = read_u64(entry + 16);
-        const auto section_crc = read_u64(entry + 24);
-        const auto expected_offset = align64(previous_end);
+        const auto raw_kind =
+            read_u32(entry);
+        const auto record_size =
+            read_u32(entry + 4);
+        const auto offset =
+            read_u64(entry + 8);
+        const auto count =
+            read_u64(entry + 16);
+        const auto section_crc =
+            read_u64(entry + 24);
+        const auto expected_offset =
+            align64(previous_end);
 
         if (raw_kind != index + 1 ||
             record_size == 0 ||
@@ -374,7 +421,8 @@ status source_manager_image_view::bind(std::span<const std::byte> image) noexcep
         if (offset > previous_end &&
             !zero_bytes(
                 image.data() +
-                    static_cast<std::size_t>(previous_end),
+                    static_cast<std::size_t>(
+                        previous_end),
                 static_cast<std::size_t>(
                     offset - previous_end))) {
             return {status_code::artifact_corrupt};
@@ -382,14 +430,22 @@ status source_manager_image_view::bind(std::span<const std::byte> image) noexcep
 
         std::uint64_t byte_count = 0;
         std::uint64_t end = 0;
-        if (!multiply_u64(count, record_size, byte_count) ||
-            !add_u64(offset, byte_count, end) ||
+
+        if (!multiply_u64(
+                count,
+                record_size,
+                byte_count) ||
+            !add_u64(
+                offset,
+                byte_count,
+                end) ||
             end > image.size()) {
             return {status_code::artifact_corrupt};
         }
 
         candidate[index] = section_view{
-            image.data() + static_cast<std::size_t>(offset),
+            image.data() +
+                static_cast<std::size_t>(offset),
             count,
             record_size,
             section_crc,
@@ -401,77 +457,149 @@ status source_manager_image_view::bind(std::span<const std::byte> image) noexcep
     if (previous_end != image.size())
         return {status_code::artifact_corrupt};
 
-    if (candidate[section_index(source_manager_image_section::source_core)].record_size !=
-            source_core_size ||
-        candidate[section_index(source_manager_image_section::physical_state)].record_size !=
-            physical_state_size ||
-        candidate[section_index(source_manager_image_section::forward_offsets)].record_size != 8 ||
-        candidate[section_index(source_manager_image_section::forward_edges)].record_size != 4 ||
-        candidate[section_index(source_manager_image_section::reverse_offsets)].record_size != 8 ||
-        candidate[section_index(source_manager_image_section::reverse_edges)].record_size != 4 ||
-        candidate[section_index(source_manager_image_section::roots)].record_size !=
-            root_record_size ||
-        candidate[section_index(source_manager_image_section::path_index)].record_size !=
-            path_index_record_size ||
-        candidate[section_index(source_manager_image_section::path_bytes)].record_size != 1 ||
-        candidate[section_index(source_manager_image_section::source_file_identity_index)].record_size !=
-            source_file_identity_index_record_size ||
-        candidate[section_index(source_manager_image_section::tracked_directory_identity_index)].record_size !=
-            tracked_directory_identity_index_record_size) {
+    if (candidate[
+            section_index(
+                source_manager_image_section::source_core)]
+                .record_size != source_core_size ||
+        candidate[
+            section_index(
+                source_manager_image_section::physical_state)]
+                .record_size != physical_state_size ||
+        candidate[
+            section_index(
+                source_manager_image_section::graph_records)]
+                .record_size != graph_record_size ||
+        candidate[
+            section_index(
+                source_manager_image_section::forward_edges)]
+                .record_size != 4 ||
+        candidate[
+            section_index(
+                source_manager_image_section::reverse_edges)]
+                .record_size != 4 ||
+        candidate[
+            section_index(
+                source_manager_image_section::roots)]
+                .record_size != root_record_size ||
+        candidate[
+            section_index(
+                source_manager_image_section::path_index)]
+                .record_size != path_index_record_size ||
+        candidate[
+            section_index(
+                source_manager_image_section::path_bytes)]
+                .record_size != 1 ||
+        candidate[
+            section_index(
+                source_manager_image_section::
+                    source_file_identity_index)]
+                .record_size !=
+                    source_file_identity_index_record_size ||
+        candidate[
+            section_index(
+                source_manager_image_section::
+                    tracked_directory_identity_index)]
+                .record_size !=
+                    tracked_directory_identity_index_record_size) {
         return {status_code::artifact_corrupt};
     }
 
-    const auto source_count = read_u64(image.data() + 56);
-    const auto root_count = read_u64(image.data() + 64);
-    const auto path_index_count = read_u64(image.data() + 72);
-    const auto forward_edge_count = read_u64(image.data() + 80);
-    const auto reverse_edge_count = read_u64(image.data() + 88);
+    const auto source_count =
+        read_u64(image.data() + 56);
+    const auto root_count =
+        read_u64(image.data() + 64);
+    const auto path_index_count =
+        read_u64(image.data() + 72);
+    const auto forward_edge_count =
+        read_u64(image.data() + 80);
+    const auto reverse_edge_count =
+        read_u64(image.data() + 88);
 
-    if (source_count > (std::numeric_limits<std::uint32_t>::max)() ||
-        source_count > (std::numeric_limits<std::size_t>::max)() ||
-        root_count > (std::numeric_limits<std::size_t>::max)()) {
+    if (source_count >
+            (std::numeric_limits<std::uint32_t>::max)() ||
+        source_count >
+            (std::numeric_limits<std::size_t>::max)() ||
+        root_count >
+            (std::numeric_limits<std::size_t>::max)()) {
         return {status_code::artifact_corrupt};
     }
 
-    const auto& source_core = candidate[section_index(source_manager_image_section::source_core)];
-    const auto& physical = candidate[section_index(source_manager_image_section::physical_state)];
-    const auto& forward_offsets =
-        candidate[section_index(source_manager_image_section::forward_offsets)];
+    const auto& source_core =
+        candidate[
+            section_index(
+                source_manager_image_section::source_core)];
+    const auto& physical =
+        candidate[
+            section_index(
+                source_manager_image_section::physical_state)];
+    const auto& graph =
+        candidate[
+            section_index(
+                source_manager_image_section::graph_records)];
     const auto& forward_edges =
-        candidate[section_index(source_manager_image_section::forward_edges)];
-    const auto& reverse_offsets =
-        candidate[section_index(source_manager_image_section::reverse_offsets)];
+        candidate[
+            section_index(
+                source_manager_image_section::forward_edges)];
     const auto& reverse_edges =
-        candidate[section_index(source_manager_image_section::reverse_edges)];
-    const auto& roots = candidate[section_index(source_manager_image_section::roots)];
-    const auto& path_index = candidate[section_index(source_manager_image_section::path_index)];
+        candidate[
+            section_index(
+                source_manager_image_section::reverse_edges)];
+    const auto& roots =
+        candidate[
+            section_index(
+                source_manager_image_section::roots)];
+    const auto& path_index =
+        candidate[
+            section_index(
+                source_manager_image_section::path_index)];
     const auto& source_file_identity_index =
-        candidate[section_index(source_manager_image_section::source_file_identity_index)];
+        candidate[
+            section_index(
+                source_manager_image_section::
+                    source_file_identity_index)];
     const auto& tracked_directory_identity_index =
-        candidate[section_index(source_manager_image_section::tracked_directory_identity_index)];
+        candidate[
+            section_index(
+                source_manager_image_section::
+                    tracked_directory_identity_index)];
 
     const auto raw_change_backend =
-        read_u32(image.data() + header_change_backend_offset);
-    if (read_u32(image.data() + header_change_backend_offset + 4) != 0 ||
+        read_u32(
+            image.data() +
+            header_change_backend_offset);
+
+    if (read_u32(
+            image.data() +
+            header_change_backend_offset + 4) != 0 ||
         raw_change_backend >
-            static_cast<std::uint32_t>(source_change_backend::windows_usn)) {
+            static_cast<std::uint32_t>(
+                source_change_backend::windows_usn)) {
         return {status_code::artifact_corrupt};
     }
 
     source_change_checkpoint change_checkpoint;
     change_checkpoint.backend =
-        static_cast<source_change_backend>(raw_change_backend);
+        static_cast<source_change_backend>(
+            raw_change_backend);
     change_checkpoint.volume_serial =
-        read_u64(image.data() + header_change_volume_offset);
+        read_u64(
+            image.data() +
+            header_change_volume_offset);
     change_checkpoint.journal_id =
-        read_u64(image.data() + header_change_journal_offset);
+        read_u64(
+            image.data() +
+            header_change_journal_offset);
     change_checkpoint.next_usn =
         static_cast<std::int64_t>(
-            read_u64(image.data() + header_change_usn_offset));
+            read_u64(
+                image.data() +
+                header_change_usn_offset));
 
-    const auto valid_optional_index = [](std::uint64_t count) noexcept {
-        return count == 0 || (count & (count - 1)) == 0;
-    };
+    const auto valid_optional_index =
+        [](std::uint64_t count) noexcept {
+            return count == 0 ||
+                (count & (count - 1)) == 0;
+        };
 
     if ((!change_checkpoint &&
          (change_checkpoint.volume_serial != 0 ||
@@ -483,9 +611,12 @@ status source_manager_image_view::bind(std::span<const std::byte> image) noexcep
          (change_checkpoint.volume_serial == 0 ||
           change_checkpoint.journal_id == 0 ||
           change_checkpoint.next_usn < 0 ||
-          (source_count != 0 && source_file_identity_index.count == 0))) ||
-        !valid_optional_index(source_file_identity_index.count) ||
-        !valid_optional_index(tracked_directory_identity_index.count)) {
+          (source_count != 0 &&
+           source_file_identity_index.count == 0))) ||
+        !valid_optional_index(
+            source_file_identity_index.count) ||
+        !valid_optional_index(
+            tracked_directory_identity_index.count)) {
         return {status_code::artifact_corrupt};
     }
 
@@ -498,51 +629,72 @@ status source_manager_image_view::bind(std::span<const std::byte> image) noexcep
 
     if (source_core.count != source_count ||
         physical.count != source_count ||
-        forward_offsets.count != source_count + 1 ||
-        reverse_offsets.count != source_count + 1 ||
+        graph.count != source_count ||
         forward_edges.count != forward_edge_count ||
         reverse_edges.count != reverse_edge_count ||
         roots.count != root_count ||
         path_index.count != path_index_count ||
         path_index_count == 0 ||
-        (path_index_count & (path_index_count - 1)) != 0) {
-        return {status_code::artifact_corrupt};
-    }
-
-    const auto read_last_offset = [](const section_view& offsets, std::uint64_t index) noexcept {
-        return read_u64(offsets.data + static_cast<std::size_t>(index) * 8);
-    };
-
-    if (read_last_offset(forward_offsets, source_count) != forward_edge_count ||
-        read_last_offset(reverse_offsets, source_count) != reverse_edge_count) {
+        (path_index_count &
+         (path_index_count - 1)) != 0) {
         return {status_code::artifact_corrupt};
     }
 
     bytes = image;
-    std::copy(std::begin(candidate), std::end(candidate), std::begin(sections));
-    generation_value = read_u64(image.data() + 48);
-    source_count_value = static_cast<std::size_t>(source_count);
-    root_count_value = static_cast<std::size_t>(root_count);
-    change_checkpoint_value = change_checkpoint;
+    std::copy(
+        std::begin(candidate),
+        std::end(candidate),
+        std::begin(sections));
+
+    generation_value =
+        read_u64(image.data() + 48);
+    source_count_value =
+        static_cast<std::size_t>(
+            source_count);
+    root_count_value =
+        static_cast<std::size_t>(
+            root_count);
+    change_checkpoint_value =
+        change_checkpoint;
+
     return {};
 }
 
-std::string_view source_manager_image_view::path(source_id source) const noexcept {
+std::string_view source_manager_image_view::path(
+    source_id source) const noexcept {
+
     if (!valid_source(source))
         return {};
 
-    const auto index = static_cast<std::size_t>(source.value() - 1);
-    const auto& core = section(source_manager_image_section::source_core);
-    const auto& paths = section(source_manager_image_section::path_bytes);
-    const auto* record = core.data + index * source_core_size;
-    const auto offset = read_u64(record);
-    const auto length = read_u32(record + 8);
+    const auto index =
+        static_cast<std::size_t>(
+            source.value() - 1);
 
-    if (offset > paths.count || length > paths.count - offset)
+    const auto& core =
+        section(
+            source_manager_image_section::source_core);
+    const auto& paths =
+        section(
+            source_manager_image_section::path_bytes);
+
+    const auto* record =
+        core.data +
+        index * source_core_size;
+
+    const auto offset =
+        read_u32(record);
+    const auto length =
+        read_u32(record + 4);
+
+    if (offset > paths.count ||
+        length > paths.count - offset) {
         return {};
+    }
 
     return {
-        reinterpret_cast<const char*>(paths.data + static_cast<std::size_t>(offset)),
+        reinterpret_cast<const char*>(
+            paths.data +
+            static_cast<std::size_t>(offset)),
         static_cast<std::size_t>(length),
     };
 }
@@ -566,41 +718,81 @@ status source_manager_image_view::physical(
     return {};
 }
 
-source_id_image_range source_manager_image_view::includes(source_id source) const noexcept {
+source_id_image_range source_manager_image_view::includes(
+    source_id source) const noexcept {
+
     if (!valid_source(source))
         return {};
 
-    const auto index = static_cast<std::size_t>(source.value() - 1);
-    const auto& offsets = section(source_manager_image_section::forward_offsets);
-    const auto& edges = section(source_manager_image_section::forward_edges);
-    const auto begin = read_u64(offsets.data + index * 8);
-    const auto end = read_u64(offsets.data + (index + 1) * 8);
+    const auto index =
+        static_cast<std::size_t>(
+            source.value() - 1);
 
-    if (begin > end || end > edges.count)
+    const auto& graph =
+        section(
+            source_manager_image_section::graph_records);
+    const auto& edges =
+        section(
+            source_manager_image_section::forward_edges);
+
+    const auto* record =
+        graph.data +
+        index * graph_record_size;
+
+    const auto offset =
+        read_u64(record);
+    const auto count =
+        read_u32(record + 8);
+
+    if (read_u32(record + 12) != 0 ||
+        offset > edges.count ||
+        count > edges.count - offset) {
         return {};
+    }
 
     return source_id_image_range{
-        edges.data + static_cast<std::size_t>(begin) * 4,
-        static_cast<std::size_t>(end - begin),
+        edges.data +
+            static_cast<std::size_t>(offset) * 4,
+        static_cast<std::size_t>(count),
     };
 }
 
-source_id_image_range source_manager_image_view::dependents(source_id source) const noexcept {
+source_id_image_range source_manager_image_view::dependents(
+    source_id source) const noexcept {
+
     if (!valid_source(source))
         return {};
 
-    const auto index = static_cast<std::size_t>(source.value() - 1);
-    const auto& offsets = section(source_manager_image_section::reverse_offsets);
-    const auto& edges = section(source_manager_image_section::reverse_edges);
-    const auto begin = read_u64(offsets.data + index * 8);
-    const auto end = read_u64(offsets.data + (index + 1) * 8);
+    const auto index =
+        static_cast<std::size_t>(
+            source.value() - 1);
 
-    if (begin > end || end > edges.count)
+    const auto& graph =
+        section(
+            source_manager_image_section::graph_records);
+    const auto& edges =
+        section(
+            source_manager_image_section::reverse_edges);
+
+    const auto* record =
+        graph.data +
+        index * graph_record_size;
+
+    const auto offset =
+        read_u64(record + 16);
+    const auto count =
+        read_u32(record + 24);
+
+    if (read_u32(record + 28) != 0 ||
+        offset > edges.count ||
+        count > edges.count - offset) {
         return {};
+    }
 
     return source_id_image_range{
-        edges.data + static_cast<std::size_t>(begin) * 4,
-        static_cast<std::size_t>(end - begin),
+        edges.data +
+            static_cast<std::size_t>(offset) * 4,
+        static_cast<std::size_t>(count),
     };
 }
 
@@ -736,44 +928,618 @@ status source_manager_image_view::verify_contents() const noexcept {
     if (!valid())
         return {status_code::invalid_state};
 
-    for (std::size_t index = 0; index < source_manager_image_directory_count; ++index) {
+    for (std::size_t index = 0;
+         index < source_manager_image_directory_count;
+         ++index) {
+
         const auto& item = sections[index];
         std::uint64_t byte_count = 0;
-        if (!multiply_u64(item.count, item.record_size, byte_count) ||
-            byte_count > (std::numeric_limits<std::size_t>::max)()) {
+
+        if (!multiply_u64(
+                item.count,
+                item.record_size,
+                byte_count) ||
+            byte_count >
+                (std::numeric_limits<std::size_t>::max)()) {
             return {status_code::artifact_corrupt};
         }
 
-        if (persistence_crc64(std::span<const std::byte>{
-                item.data, static_cast<std::size_t>(byte_count)}) != item.crc64) {
+        if (persistence_crc64(
+                std::span<const std::byte>{
+                    item.data,
+                    static_cast<std::size_t>(
+                        byte_count)}) != item.crc64) {
             return {status_code::artifact_corrupt};
         }
     }
 
-    for (std::size_t index = 0; index < source_count_value; ++index) {
-        const auto source = source_id{static_cast<std::uint32_t>(index + 1)};
-        const auto source_path = path(source);
+    const auto& graph =
+        section(
+            source_manager_image_section::graph_records);
+    const auto& forward_edges =
+        section(
+            source_manager_image_section::forward_edges);
+    const auto& reverse_edges =
+        section(
+            source_manager_image_section::reverse_edges);
+
+    for (std::size_t index = 0;
+         index < source_count_value;
+         ++index) {
+
+        const auto source =
+            source_id{
+                static_cast<std::uint32_t>(
+                    index + 1)};
+
+        const auto* record =
+            graph.data +
+            index * graph_record_size;
+
+        const auto forward_offset =
+            read_u64(record);
+        const auto forward_count =
+            read_u32(record + 8);
+        const auto reverse_offset =
+            read_u64(record + 16);
+        const auto reverse_count =
+            read_u32(record + 24);
+        const auto flags =
+            read_u32(record + 32);
+
+        if (read_u32(record + 12) != 0 ||
+            read_u32(record + 28) != 0 ||
+            (flags & ~graph_known_flags) != 0 ||
+            read_u32(record + 36) != 0 ||
+            forward_offset > forward_edges.count ||
+            forward_count >
+                forward_edges.count - forward_offset ||
+            reverse_offset > reverse_edges.count ||
+            reverse_count >
+                reverse_edges.count - reverse_offset) {
+            return {status_code::artifact_corrupt};
+        }
+
+        const auto source_path =
+            path(source);
+
         if (source_path.empty())
             return {status_code::artifact_corrupt};
 
-        for (std::size_t edge = 0; edge < includes(source).size(); ++edge) {
-            if (!valid_source(includes(source)[edge]))
+        const auto source_includes =
+            includes(source);
+
+        for (std::size_t edge = 0;
+             edge < source_includes.size();
+             ++edge) {
+            if (!valid_source(
+                    source_includes[edge])) {
                 return {status_code::artifact_corrupt};
+            }
         }
-        for (std::size_t edge = 0; edge < dependents(source).size(); ++edge) {
-            if (!valid_source(dependents(source)[edge]))
+
+        const auto source_dependents =
+            dependents(source);
+
+        for (std::size_t edge = 0;
+             edge < source_dependents.size();
+             ++edge) {
+            if (!valid_source(
+                    source_dependents[edge])) {
                 return {status_code::artifact_corrupt};
+            }
         }
 
         source_id found;
-        if (!find(source_path, found).ok() || found != source)
+        if (!find(source_path, found).ok() ||
+            found != source) {
             return {status_code::artifact_corrupt};
+        }
     }
 
-    for (std::size_t index = 0; index < root_count_value; ++index) {
+    for (std::size_t index = 0;
+         index < root_count_value;
+         ++index) {
+
         source_manager_image_root root_value;
         if (!root(index, root_value).ok())
             return {status_code::artifact_corrupt};
+    }
+
+    return {};
+}
+
+
+namespace {
+
+constexpr std::array<std::byte, 64> native_zero_padding{};
+
+[[nodiscard]] std::span<const std::byte> byte_span(
+    std::span<const source_record> values) noexcept {
+
+    return std::as_bytes(values);
+}
+
+[[nodiscard]] std::span<const std::byte> byte_span(
+    std::span<const source_generation_physical_record> values) noexcept {
+
+    return std::as_bytes(values);
+}
+
+[[nodiscard]] std::span<const std::byte> byte_span(
+    std::span<const source_generation_record> values) noexcept {
+
+    return std::as_bytes(values);
+}
+
+[[nodiscard]] std::span<const std::byte> byte_span(
+    std::span<const source_id> values) noexcept {
+
+    return std::as_bytes(values);
+}
+
+[[nodiscard]] std::span<const std::byte> byte_span(
+    std::span<const source_change_file_index_slot> values) noexcept {
+
+    return std::as_bytes(values);
+}
+
+[[nodiscard]] std::span<const std::byte> byte_span(
+    std::span<const source_change_directory_index_slot> values) noexcept {
+
+    return std::as_bytes(values);
+}
+
+} // namespace
+
+void source_manager_native_image_storage::reset() noexcept {
+    prefix.fill(std::byte{0});
+    roots.clear();
+    native = {};
+    file_identity_index = {};
+    directory_identity_index = {};
+    size_value = 0;
+    valid_value = false;
+}
+
+project_generation_segment
+source_manager_native_image_storage::segment() const noexcept {
+
+    project_generation_segment output;
+
+    if (!valid_value)
+        return output;
+
+    if (!output.append(prefix))
+        return {};
+
+    const std::array<std::span<const std::byte>, 10> sections{{
+        byte_span(native.sources),
+        byte_span(native.physical),
+        byte_span(native.graph),
+        byte_span(native.forward_edges),
+        byte_span(native.reverse_edges),
+        std::span<const std::byte>{roots.data(), roots.size()},
+        native.path_index,
+        native.path_bytes,
+        byte_span(file_identity_index),
+        byte_span(directory_identity_index),
+    }};
+
+    std::size_t cursor = prefix.size();
+
+    for (std::size_t index = 0; index < sections.size(); ++index) {
+        const auto aligned =
+            (cursor + 63u) & ~std::size_t{63u};
+        const auto padding = aligned - cursor;
+
+        if (padding != 0 &&
+            !output.append(
+                std::span<const std::byte>{
+                    native_zero_padding.data(),
+                    padding})) {
+            return {};
+        }
+
+        cursor = aligned;
+
+        if (!output.append(sections[index]))
+            return {};
+
+        cursor += sections[index].size();
+    }
+
+    return output.size() == size_value
+        ? output
+        : project_generation_segment{};
+}
+
+status freeze_source_manager_native_image(
+    const source_manager& manager,
+    const source_manager_image_options& options,
+    source_manager_native_image_storage& output) noexcept {
+
+    output.reset();
+
+    if constexpr (std::endian::native != std::endian::little)
+        return {status_code::not_available};
+
+    const auto native =
+        manager.native_generation();
+
+    if (!native.complete)
+        return {status_code::invalid_state};
+
+    const auto source_count =
+        manager.source_count();
+
+    if (source_count >
+            (std::numeric_limits<std::uint32_t>::max)() ||
+        native.sources.size() != source_count ||
+        native.physical.size() != source_count ||
+        native.graph.size() != source_count ||
+        native.path_index.empty() ||
+        native.path_index.size() %
+            path_index_record_size != 0 ||
+        native.path_bytes.size() >
+            (std::numeric_limits<std::uint32_t>::max)()) {
+        return {status_code::artifact_corrupt};
+    }
+
+    for (const auto& root : options.roots) {
+        if (!root.source ||
+            static_cast<std::size_t>(
+                root.source.value()) > source_count ||
+            !valid_role(
+                static_cast<std::uint8_t>(
+                    root.role))) {
+            return {status_code::invalid_argument};
+        }
+    }
+
+    if ((!options.change_checkpoint &&
+         (!options.file_identity_index.empty() ||
+          !options.directory_identity_index.empty())) ||
+        (options.change_checkpoint &&
+         (options.change_checkpoint.volume_serial == 0 ||
+          options.change_checkpoint.journal_id == 0 ||
+          options.change_checkpoint.next_usn < 0 ||
+          (source_count != 0 &&
+           options.file_identity_index.empty()))) ||
+        (!options.file_identity_index.empty() &&
+         (options.file_identity_index.size() &
+          (options.file_identity_index.size() - 1)) != 0) ||
+        (!options.directory_identity_index.empty() &&
+         (options.directory_identity_index.size() &
+          (options.directory_identity_index.size() - 1)) != 0)) {
+        return {status_code::invalid_argument};
+    }
+
+    for (const auto& record : native.graph) {
+        if (record.includes.reserved != 0 ||
+            record.dependents.reserved != 0 ||
+            record.reserved != 0 ||
+            (record.flags & ~graph_known_flags) != 0 ||
+            record.includes.offset >
+                native.forward_edges.size() ||
+            record.includes.count >
+                native.forward_edges.size() -
+                    record.includes.offset ||
+            record.dependents.offset >
+                native.reverse_edges.size() ||
+            record.dependents.count >
+                native.reverse_edges.size() -
+                    record.dependents.offset) {
+            return {status_code::artifact_corrupt};
+        }
+    }
+
+    for (const auto& record : native.physical) {
+        if (record.reserved != 0 ||
+            (record.flags &
+             ~source_generation_physical_present) != 0) {
+            return {status_code::artifact_corrupt};
+        }
+    }
+
+    try {
+        output.roots.assign(
+            options.roots.size() * root_record_size,
+            std::byte{0});
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+
+    for (std::size_t index = 0;
+         index < options.roots.size();
+         ++index) {
+
+        const auto& root =
+            options.roots[index];
+        auto* record =
+            output.roots.data() +
+            index * root_record_size;
+
+        write_u32(
+            record,
+            root.source.value());
+
+        record[4] =
+            static_cast<std::byte>(
+                static_cast<std::uint8_t>(
+                    root.role));
+    }
+
+    output.native = native;
+    output.file_identity_index =
+        options.file_identity_index;
+    output.directory_identity_index =
+        options.directory_identity_index;
+
+    const std::array<std::span<const std::byte>, 10> sections{{
+        byte_span(native.sources),
+        byte_span(native.physical),
+        byte_span(native.graph),
+        byte_span(native.forward_edges),
+        byte_span(native.reverse_edges),
+        std::span<const std::byte>{
+            output.roots.data(),
+            output.roots.size()},
+        native.path_index,
+        native.path_bytes,
+        byte_span(options.file_identity_index),
+        byte_span(options.directory_identity_index),
+    }};
+
+    const std::array<std::uint32_t, 10> record_sizes{{
+        source_core_size,
+        physical_state_size,
+        graph_record_size,
+        4,
+        4,
+        root_record_size,
+        path_index_record_size,
+        1,
+        source_file_identity_index_record_size,
+        tracked_directory_identity_index_record_size,
+    }};
+
+    const std::array<source_manager_image_section, 10> kinds{{
+        source_manager_image_section::source_core,
+        source_manager_image_section::physical_state,
+        source_manager_image_section::graph_records,
+        source_manager_image_section::forward_edges,
+        source_manager_image_section::reverse_edges,
+        source_manager_image_section::roots,
+        source_manager_image_section::path_index,
+        source_manager_image_section::path_bytes,
+        source_manager_image_section::source_file_identity_index,
+        source_manager_image_section::tracked_directory_identity_index,
+    }};
+
+    std::array<layout_section, 10> layout{};
+
+    std::uint64_t cursor =
+        source_manager_image_prefix_size;
+
+    for (std::size_t index = 0;
+         index < sections.size();
+         ++index) {
+
+        cursor = align64(cursor);
+
+        const auto record_size =
+            record_sizes[index];
+
+        if (record_size == 0 ||
+            sections[index].size() %
+                record_size != 0) {
+            output.reset();
+            return {status_code::artifact_corrupt};
+        }
+
+        layout[index].kind =
+            kinds[index];
+        layout[index].record_size =
+            record_size;
+        layout[index].count =
+            sections[index].size() /
+            record_size;
+        layout[index].offset =
+            cursor;
+        layout[index].crc64 =
+            persistence_crc64(
+                sections[index]);
+
+        if (!add_u64(
+                cursor,
+                sections[index].size(),
+                cursor)) {
+            output.reset();
+            return {status_code::not_available};
+        }
+    }
+
+    if (cursor >
+        (std::numeric_limits<std::size_t>::max)()) {
+        output.reset();
+        return {status_code::not_available};
+    }
+
+    if (layout[
+            section_index(
+                source_manager_image_section::source_core)]
+                .count != source_count ||
+        layout[
+            section_index(
+                source_manager_image_section::physical_state)]
+                .count != source_count ||
+        layout[
+            section_index(
+                source_manager_image_section::graph_records)]
+                .count != source_count ||
+        layout[
+            section_index(
+                source_manager_image_section::path_index)]
+                .count == 0 ||
+        (layout[
+            section_index(
+                source_manager_image_section::path_index)]
+                .count &
+         (layout[
+            section_index(
+                source_manager_image_section::path_index)]
+                .count - 1)) != 0) {
+        output.reset();
+        return {status_code::artifact_corrupt};
+    }
+
+    auto* base =
+        output.prefix.data();
+
+    std::copy(
+        image_magic.begin(),
+        image_magic.end(),
+        base);
+
+    write_u32(
+        base + 8,
+        source_manager_image_format_version);
+    write_u32(
+        base + 12,
+        endian_marker);
+    write_u32(
+        base + 16,
+        source_manager_image_header_size);
+    write_u32(
+        base + 20,
+        source_manager_image_directory_count);
+    write_u32(
+        base + 24,
+        source_manager_image_directory_entry_size);
+    write_u32(
+        base + 28,
+        0);
+
+    write_u64(
+        base + 32,
+        directory_offset);
+    write_u64(
+        base + 40,
+        cursor);
+    write_u64(
+        base + 48,
+        options.generation);
+    write_u64(
+        base + 56,
+        source_count);
+    write_u64(
+        base + 64,
+        options.roots.size());
+    write_u64(
+        base + 72,
+        native.path_index.size() /
+            path_index_record_size);
+    write_u64(
+        base + 80,
+        native.forward_edges.size());
+    write_u64(
+        base + 88,
+        native.reverse_edges.size());
+
+    write_u32(
+        base + header_change_backend_offset,
+        static_cast<std::uint32_t>(
+            options.change_checkpoint.backend));
+    write_u32(
+        base + header_change_backend_offset + 4,
+        0);
+
+    write_u64(
+        base + header_change_volume_offset,
+        options.change_checkpoint.volume_serial);
+    write_u64(
+        base + header_change_journal_offset,
+        options.change_checkpoint.journal_id);
+    write_u64(
+        base + header_change_usn_offset,
+        static_cast<std::uint64_t>(
+            options.change_checkpoint.next_usn));
+
+    for (std::size_t index = 0;
+         index < layout.size();
+         ++index) {
+
+        const auto& item =
+            layout[index];
+
+        auto* entry =
+            base +
+            directory_offset +
+            index *
+                source_manager_image_directory_entry_size;
+
+        write_u32(
+            entry,
+            static_cast<std::uint32_t>(
+                item.kind));
+        write_u32(
+            entry + 4,
+            item.record_size);
+        write_u64(
+            entry + 8,
+            item.offset);
+        write_u64(
+            entry + 16,
+            item.count);
+        write_u64(
+            entry + 24,
+            item.crc64);
+    }
+
+    const auto directory_crc =
+        persistence_crc64(
+            std::span<const std::byte>{
+                base + directory_offset,
+                directory_bytes});
+
+    write_u64(
+        base + header_directory_crc_offset,
+        directory_crc);
+
+    std::array<
+        std::byte,
+        source_manager_image_header_size>
+        header{};
+
+    std::memcpy(
+        header.data(),
+        base,
+        header.size());
+
+    write_u64(
+        header.data() + header_crc_offset,
+        0);
+
+    write_u64(
+        base + header_crc_offset,
+        persistence_crc64(header));
+
+    output.size_value =
+        static_cast<std::size_t>(cursor);
+    output.valid_value = true;
+
+    const auto segment =
+        output.segment();
+
+    if (segment.empty() ||
+        segment.size() != output.size_value) {
+        output.reset();
+        return {status_code::not_available};
     }
 
     return {};
@@ -786,33 +1552,75 @@ status encode_source_manager_image(
 
     output.clear();
 
-    const auto source_count = manager.source_count();
-    if (source_count > (std::numeric_limits<std::uint32_t>::max)())
+    const auto source_count =
+        manager.source_count();
+
+    if (source_count >
+        (std::numeric_limits<std::uint32_t>::max)()) {
         return {status_code::not_available};
+    }
 
     std::uint64_t path_bytes = 0;
     std::uint64_t forward_edges = 0;
     std::uint64_t reverse_edges = 0;
 
-    for (std::size_t index = 0; index < source_count; ++index) {
-        const auto source = source_id{static_cast<std::uint32_t>(index + 1)};
-        const auto source_path = manager.path(source);
+    for (std::size_t index = 0;
+         index < source_count;
+         ++index) {
+
+        const auto source =
+            source_id{
+                static_cast<std::uint32_t>(
+                    index + 1)};
+
+        const auto source_path =
+            manager.path(source);
+
         if (source_path.empty())
             return {status_code::artifact_corrupt};
-        if (source_path.size() > (std::numeric_limits<std::uint32_t>::max)())
-            return {status_code::not_available};
 
-        if (!add_u64(path_bytes, source_path.size(), path_bytes) ||
-            !add_u64(forward_edges, manager.include_count(source), forward_edges) ||
-            !add_u64(reverse_edges, manager.dependent_count(source), reverse_edges)) {
+        if (source_path.size() >
+            (std::numeric_limits<std::uint32_t>::max)()) {
+            return {status_code::not_available};
+        }
+
+        const auto include_count =
+            manager.include_count(source);
+        const auto dependent_count =
+            manager.dependent_count(source);
+
+        if (include_count >
+                (std::numeric_limits<std::uint32_t>::max)() ||
+            dependent_count >
+                (std::numeric_limits<std::uint32_t>::max)() ||
+            !add_u64(
+                path_bytes,
+                source_path.size(),
+                path_bytes) ||
+            !add_u64(
+                forward_edges,
+                include_count,
+                forward_edges) ||
+            !add_u64(
+                reverse_edges,
+                dependent_count,
+                reverse_edges)) {
             return {status_code::not_available};
         }
     }
 
+    if (path_bytes >
+        (std::numeric_limits<std::uint32_t>::max)()) {
+        return {status_code::not_available};
+    }
+
     for (const auto& root : options.roots) {
         if (!root.source ||
-            static_cast<std::size_t>(root.source.value()) > source_count ||
-            !valid_role(static_cast<std::uint8_t>(root.role))) {
+            static_cast<std::size_t>(
+                root.source.value()) > source_count ||
+            !valid_role(
+                static_cast<std::uint8_t>(
+                    root.role))) {
             return {status_code::invalid_argument};
         }
     }
@@ -824,7 +1632,8 @@ status encode_source_manager_image(
          (options.change_checkpoint.volume_serial == 0 ||
           options.change_checkpoint.journal_id == 0 ||
           options.change_checkpoint.next_usn < 0 ||
-          (source_count != 0 && options.file_identity_index.empty()))) ||
+          (source_count != 0 &&
+           options.file_identity_index.empty()))) ||
         (!options.file_identity_index.empty() &&
          (options.file_identity_index.size() &
           (options.file_identity_index.size() - 1)) != 0) ||
@@ -834,43 +1643,89 @@ status encode_source_manager_image(
         return {status_code::invalid_argument};
     }
 
-    const auto index_capacity = path_index_capacity(source_count);
+    const auto index_capacity =
+        path_index_capacity(source_count);
+
     if (index_capacity == 0)
         return {status_code::not_available};
 
-    std::array<layout_section, source_manager_image_directory_count> layout{{
-        {source_manager_image_section::source_core, source_core_size, source_count},
-        {source_manager_image_section::physical_state, physical_state_size, source_count},
-        {source_manager_image_section::forward_offsets, 8, source_count + 1},
-        {source_manager_image_section::forward_edges, 4, forward_edges},
-        {source_manager_image_section::reverse_offsets, 8, source_count + 1},
-        {source_manager_image_section::reverse_edges, 4, reverse_edges},
-        {source_manager_image_section::roots, root_record_size, options.roots.size()},
-        {source_manager_image_section::path_index, path_index_record_size, index_capacity},
-        {source_manager_image_section::path_bytes, 1, path_bytes},
-        {source_manager_image_section::source_file_identity_index,
-            source_file_identity_index_record_size, options.file_identity_index.size()},
-        {source_manager_image_section::tracked_directory_identity_index,
-            tracked_directory_identity_index_record_size, options.directory_identity_index.size()},
+    std::array<
+        layout_section,
+        source_manager_image_directory_count> layout{{
+        {
+            source_manager_image_section::source_core,
+            source_core_size,
+            source_count},
+        {
+            source_manager_image_section::physical_state,
+            physical_state_size,
+            source_count},
+        {
+            source_manager_image_section::graph_records,
+            graph_record_size,
+            source_count},
+        {
+            source_manager_image_section::forward_edges,
+            4,
+            forward_edges},
+        {
+            source_manager_image_section::reverse_edges,
+            4,
+            reverse_edges},
+        {
+            source_manager_image_section::roots,
+            root_record_size,
+            options.roots.size()},
+        {
+            source_manager_image_section::path_index,
+            path_index_record_size,
+            index_capacity},
+        {
+            source_manager_image_section::path_bytes,
+            1,
+            path_bytes},
+        {
+            source_manager_image_section::
+                source_file_identity_index,
+            source_file_identity_index_record_size,
+            options.file_identity_index.size()},
+        {
+            source_manager_image_section::
+                tracked_directory_identity_index,
+            tracked_directory_identity_index_record_size,
+            options.directory_identity_index.size()},
     }};
 
-    std::uint64_t cursor = first_section_offset;
+    std::uint64_t cursor =
+        first_section_offset;
+
     for (auto& item : layout) {
         cursor = align64(cursor);
         item.offset = cursor;
 
         std::uint64_t bytes = 0;
-        if (!multiply_u64(item.count, item.record_size, bytes) ||
-            !add_u64(cursor, bytes, cursor)) {
+
+        if (!multiply_u64(
+                item.count,
+                item.record_size,
+                bytes) ||
+            !add_u64(
+                cursor,
+                bytes,
+                cursor)) {
             return {status_code::not_available};
         }
     }
 
-    if (cursor > (std::numeric_limits<std::size_t>::max)())
+    if (cursor >
+        (std::numeric_limits<std::size_t>::max)()) {
         return {status_code::not_available};
+    }
 
     try {
-        output.assign(static_cast<std::size_t>(cursor), std::byte{0});
+        output.assign(
+            static_cast<std::size_t>(cursor),
+            std::byte{0});
     }
     catch (const std::bad_alloc&) {
         return {status_code::not_available};
@@ -881,126 +1736,346 @@ status encode_source_manager_image(
 
     auto* base = output.data();
 
-    std::uint64_t path_cursor = 0;
+    std::uint32_t path_cursor = 0;
     std::uint64_t forward_cursor = 0;
     std::uint64_t reverse_cursor = 0;
 
-    auto* source_core = base + static_cast<std::size_t>(
-        layout[section_index(source_manager_image_section::source_core)].offset);
-    auto* physical = base + static_cast<std::size_t>(
-        layout[section_index(source_manager_image_section::physical_state)].offset);
-    auto* forward_offsets = base + static_cast<std::size_t>(
-        layout[section_index(source_manager_image_section::forward_offsets)].offset);
-    auto* forward_edge_data = base + static_cast<std::size_t>(
-        layout[section_index(source_manager_image_section::forward_edges)].offset);
-    auto* reverse_offsets = base + static_cast<std::size_t>(
-        layout[section_index(source_manager_image_section::reverse_offsets)].offset);
-    auto* reverse_edge_data = base + static_cast<std::size_t>(
-        layout[section_index(source_manager_image_section::reverse_edges)].offset);
-    auto* root_data = base + static_cast<std::size_t>(
-        layout[section_index(source_manager_image_section::roots)].offset);
-    auto* path_index = base + static_cast<std::size_t>(
-        layout[section_index(source_manager_image_section::path_index)].offset);
-    auto* path_data = base + static_cast<std::size_t>(
-        layout[section_index(source_manager_image_section::path_bytes)].offset);
-    auto* file_identity_data = base + static_cast<std::size_t>(
-        layout[section_index(source_manager_image_section::source_file_identity_index)].offset);
-    auto* directory_identity_data = base + static_cast<std::size_t>(
-        layout[section_index(source_manager_image_section::tracked_directory_identity_index)].offset);
+    auto* source_core =
+        base +
+        static_cast<std::size_t>(
+            layout[
+                section_index(
+                    source_manager_image_section::
+                        source_core)]
+                .offset);
 
-    write_u64(forward_offsets, 0);
-    write_u64(reverse_offsets, 0);
+    auto* physical =
+        base +
+        static_cast<std::size_t>(
+            layout[
+                section_index(
+                    source_manager_image_section::
+                        physical_state)]
+                .offset);
 
-    for (std::size_t index = 0; index < source_count; ++index) {
-        const auto source = source_id{static_cast<std::uint32_t>(index + 1)};
-        const auto source_path = manager.path(source);
-        const auto snapshot = manager.current(source);
+    auto* graph =
+        base +
+        static_cast<std::size_t>(
+            layout[
+                section_index(
+                    source_manager_image_section::
+                        graph_records)]
+                .offset);
 
-        auto* core = source_core + index * source_core_size;
-        write_u64(core, path_cursor);
-        write_u32(core + 8, static_cast<std::uint32_t>(source_path.size()));
-        write_u32(core + 12, 0);
+    auto* forward_edge_data =
+        base +
+        static_cast<std::size_t>(
+            layout[
+                section_index(
+                    source_manager_image_section::
+                        forward_edges)]
+                .offset);
+
+    auto* reverse_edge_data =
+        base +
+        static_cast<std::size_t>(
+            layout[
+                section_index(
+                    source_manager_image_section::
+                        reverse_edges)]
+                .offset);
+
+    auto* root_data =
+        base +
+        static_cast<std::size_t>(
+            layout[
+                section_index(
+                    source_manager_image_section::
+                        roots)]
+                .offset);
+
+    auto* path_index =
+        base +
+        static_cast<std::size_t>(
+            layout[
+                section_index(
+                    source_manager_image_section::
+                        path_index)]
+                .offset);
+
+    auto* path_data =
+        base +
+        static_cast<std::size_t>(
+            layout[
+                section_index(
+                    source_manager_image_section::
+                        path_bytes)]
+                .offset);
+
+    auto* file_identity_data =
+        base +
+        static_cast<std::size_t>(
+            layout[
+                section_index(
+                    source_manager_image_section::
+                        source_file_identity_index)]
+                .offset);
+
+    auto* directory_identity_data =
+        base +
+        static_cast<std::size_t>(
+            layout[
+                section_index(
+                    source_manager_image_section::
+                        tracked_directory_identity_index)]
+                .offset);
+
+    for (std::size_t index = 0;
+         index < source_count;
+         ++index) {
+
+        const auto source =
+            source_id{
+                static_cast<std::uint32_t>(
+                    index + 1)};
+
+        const auto source_path =
+            manager.path(source);
+        const auto snapshot =
+            manager.current(source);
+
+        auto* core =
+            source_core +
+            index * source_core_size;
+
+        write_u32(
+            core,
+            path_cursor);
+        write_u32(
+            core + 4,
+            static_cast<std::uint32_t>(
+                source_path.size()));
+
         std::memcpy(
-            path_data + static_cast<std::size_t>(path_cursor),
+            path_data +
+                static_cast<std::size_t>(
+                    path_cursor),
             source_path.data(),
             source_path.size());
-        path_cursor += source_path.size();
 
-        auto* physical_record = physical + index * physical_state_size;
-        write_u32(physical_record, snapshot ? physical_present : 0);
-        write_u32(physical_record + 4, 0);
+        path_cursor +=
+            static_cast<std::uint32_t>(
+                source_path.size());
+
+        auto* physical_record =
+            physical +
+            index * physical_state_size;
+
+        write_u32(
+            physical_record,
+            snapshot ? physical_present : 0);
+        write_u32(
+            physical_record + 4,
+            0);
+
         if (snapshot) {
-            const auto observation = snapshot.observation();
-            write_i64(physical_record + 8, observation.write_time_ticks);
-            write_u64(physical_record + 16, observation.size);
+            const auto observation =
+                snapshot.observation();
+
+            if (observation.size >
+                (std::numeric_limits<std::uint64_t>::max)()) {
+                output.clear();
+                return {status_code::not_available};
+            }
+
+            write_i64(
+                physical_record + 8,
+                observation.write_time_ticks);
+            write_u64(
+                physical_record + 16,
+                static_cast<std::uint64_t>(
+                    observation.size));
+
             std::memcpy(
                 physical_record + 24,
                 snapshot.hash().bytes.data(),
                 snapshot.hash().bytes.size());
         }
 
-        const auto include_count = manager.include_count(source);
-        for (std::size_t edge = 0; edge < include_count; ++edge) {
-            const auto dependency = manager.include_at(source, edge);
+        auto* graph_record =
+            graph +
+            index * graph_record_size;
+
+        const auto include_count =
+            manager.include_count(source);
+
+        write_u64(
+            graph_record,
+            forward_cursor);
+        write_u32(
+            graph_record + 8,
+            static_cast<std::uint32_t>(
+                include_count));
+        write_u32(
+            graph_record + 12,
+            0);
+
+        for (std::size_t edge = 0;
+             edge < include_count;
+             ++edge) {
+
+            const auto dependency =
+                manager.include_at(
+                    source,
+                    edge);
+
             if (!dependency ||
-                static_cast<std::size_t>(dependency.value()) > source_count) {
+                static_cast<std::size_t>(
+                    dependency.value()) >
+                    source_count) {
                 output.clear();
                 return {status_code::artifact_corrupt};
             }
+
             write_u32(
-                forward_edge_data + static_cast<std::size_t>(forward_cursor) * 4,
+                forward_edge_data +
+                    static_cast<std::size_t>(
+                        forward_cursor) * 4,
                 dependency.value());
+
             ++forward_cursor;
         }
-        write_u64(forward_offsets + (index + 1) * 8, forward_cursor);
 
-        const auto dependent_count = manager.dependent_count(source);
-        for (std::size_t edge = 0; edge < dependent_count; ++edge) {
-            const auto dependent = manager.dependent_at(source, edge);
+        const auto dependent_count =
+            manager.dependent_count(source);
+
+        write_u64(
+            graph_record + 16,
+            reverse_cursor);
+        write_u32(
+            graph_record + 24,
+            static_cast<std::uint32_t>(
+                dependent_count));
+        write_u32(
+            graph_record + 28,
+            0);
+
+        for (std::size_t edge = 0;
+             edge < dependent_count;
+             ++edge) {
+
+            const auto dependent =
+                manager.dependent_at(
+                    source,
+                    edge);
+
             if (!dependent ||
-                static_cast<std::size_t>(dependent.value()) > source_count) {
+                static_cast<std::size_t>(
+                    dependent.value()) >
+                    source_count) {
                 output.clear();
                 return {status_code::artifact_corrupt};
             }
+
             write_u32(
-                reverse_edge_data + static_cast<std::size_t>(reverse_cursor) * 4,
+                reverse_edge_data +
+                    static_cast<std::size_t>(
+                        reverse_cursor) * 4,
                 dependent.value());
+
             ++reverse_cursor;
         }
-        write_u64(reverse_offsets + (index + 1) * 8, reverse_cursor);
-    }
 
-    for (std::size_t index = 0; index < options.roots.size(); ++index) {
-        const auto& root = options.roots[index];
-        auto* record = root_data + index * root_record_size;
-        write_u32(record, root.source.value());
-        record[4] = static_cast<std::byte>(static_cast<std::uint8_t>(root.role));
-    }
-
-    const auto index_mask = index_capacity - 1;
-    for (std::size_t index = 0; index < source_count; ++index) {
-        const auto source = source_id{static_cast<std::uint32_t>(index + 1)};
-        const auto normalized = manager.path(source);
-        const auto hash = hash_path(normalized);
-        auto position = static_cast<std::size_t>(hash) & index_mask;
-
-        while (read_u32(path_index + position * path_index_record_size + 4) != 0)
-            position = (position + 1) & index_mask;
-
-        auto* slot = path_index + position * path_index_record_size;
-        write_u32(slot, path_fingerprint(hash));
-        write_u32(slot + 4, source.value());
+        write_u32(
+            graph_record + 32,
+            graph_known_flags);
+        write_u32(
+            graph_record + 36,
+            0);
     }
 
     for (std::size_t index = 0;
-         index < options.file_identity_index.size();
+         index < options.roots.size();
          ++index) {
-        const auto& item = options.file_identity_index[index];
+
+        const auto& root =
+            options.roots[index];
+
+        auto* record =
+            root_data +
+            index * root_record_size;
+
+        write_u32(
+            record,
+            root.source.value());
+
+        record[4] =
+            static_cast<std::byte>(
+                static_cast<std::uint8_t>(
+                    root.role));
+    }
+
+    const auto index_mask =
+        index_capacity - 1;
+
+    for (std::size_t index = 0;
+         index < source_count;
+         ++index) {
+
+        const auto source =
+            source_id{
+                static_cast<std::uint32_t>(
+                    index + 1)};
+
+        const auto normalized =
+            manager.path(source);
+        const auto hash =
+            hash_path(normalized);
+
+        auto position =
+            static_cast<std::size_t>(
+                hash) &
+            index_mask;
+
+        while (read_u32(
+                   path_index +
+                   position *
+                       path_index_record_size +
+                   4) != 0) {
+            position =
+                (position + 1) &
+                index_mask;
+        }
+
+        auto* slot =
+            path_index +
+            position *
+                path_index_record_size;
+
+        write_u32(
+            slot,
+            path_fingerprint(hash));
+        write_u32(
+            slot + 4,
+            source.value());
+    }
+
+    for (std::size_t index = 0;
+         index <
+            options.file_identity_index.size();
+         ++index) {
+
+        const auto& item =
+            options.file_identity_index[index];
+
         if ((item.file_reference == 0 &&
-             (item.source || item.reserved != 0)) ||
+             (item.source ||
+              item.reserved != 0)) ||
             (item.file_reference != 0 &&
              (!item.source ||
-              static_cast<std::size_t>(item.source.value()) > source_count ||
+              static_cast<std::size_t>(
+                  item.source.value()) >
+                  source_count ||
               item.reserved != 0))) {
             output.clear();
             return {status_code::invalid_argument};
@@ -1008,21 +2083,35 @@ status encode_source_manager_image(
 
         auto* record =
             file_identity_data +
-            index * source_file_identity_index_record_size;
-        write_u64(record, item.file_reference);
-        write_u32(record + 8, item.source.value());
-        write_u32(record + 12, item.reserved);
+            index *
+                source_file_identity_index_record_size;
+
+        write_u64(
+            record,
+            item.file_reference);
+        write_u32(
+            record + 8,
+            item.source.value());
+        write_u32(
+            record + 12,
+            item.reserved);
     }
 
     for (std::size_t index = 0;
-         index < options.directory_identity_index.size();
+         index <
+            options.directory_identity_index.size();
          ++index) {
-        const auto& item = options.directory_identity_index[index];
+
+        const auto& item =
+            options.directory_identity_index[index];
+
         if ((item.file_reference == 0 &&
-             (item.flags != 0 || item.reserved != 0)) ||
+             (item.flags != 0 ||
+              item.reserved != 0)) ||
             (item.file_reference != 0 &&
              (item.flags == 0 ||
-              (item.flags & ~source_change_directory_watch_known) != 0 ||
+              (item.flags &
+               ~source_change_directory_watch_known) != 0 ||
               item.reserved != 0))) {
             output.clear();
             return {status_code::invalid_argument};
@@ -1030,82 +2119,198 @@ status encode_source_manager_image(
 
         auto* record =
             directory_identity_data +
-            index * tracked_directory_identity_index_record_size;
-        write_u64(record, item.file_reference);
-        write_u32(record + 8, item.flags);
-        write_u32(record + 12, item.reserved);
+            index *
+                tracked_directory_identity_index_record_size;
+
+        write_u64(
+            record,
+            item.file_reference);
+        write_u32(
+            record + 8,
+            item.flags);
+        write_u32(
+            record + 12,
+            item.reserved);
     }
 
     for (auto& item : layout) {
         std::uint64_t byte_count = 0;
-        if (!multiply_u64(item.count, item.record_size, byte_count) ||
-            byte_count > (std::numeric_limits<std::size_t>::max)()) {
+
+        if (!multiply_u64(
+                item.count,
+                item.record_size,
+                byte_count) ||
+            byte_count >
+                (std::numeric_limits<std::size_t>::max)()) {
             output.clear();
             return {status_code::not_available};
         }
 
-        item.crc64 = persistence_crc64(std::span<const std::byte>{
-            base + static_cast<std::size_t>(item.offset),
-            static_cast<std::size_t>(byte_count)});
+        item.crc64 =
+            persistence_crc64(
+                std::span<const std::byte>{
+                    base +
+                        static_cast<std::size_t>(
+                            item.offset),
+                    static_cast<std::size_t>(
+                        byte_count)});
     }
 
-    std::copy(image_magic.begin(), image_magic.end(), base);
-    write_u32(base + 8, source_manager_image_format_version);
-    write_u32(base + 12, endian_marker);
-    write_u32(base + 16, source_manager_image_header_size);
-    write_u32(base + 20, source_manager_image_directory_count);
-    write_u32(base + 24, source_manager_image_directory_entry_size);
-    write_u32(base + 28, 0);
-    write_u64(base + 32, directory_offset);
-    write_u64(base + 40, output.size());
-    write_u64(base + 48, options.generation);
-    write_u64(base + 56, source_count);
-    write_u64(base + 64, options.roots.size());
-    write_u64(base + 72, index_capacity);
-    write_u64(base + 80, forward_edges);
-    write_u64(base + 88, reverse_edges);
+    std::copy(
+        image_magic.begin(),
+        image_magic.end(),
+        base);
+
+    write_u32(
+        base + 8,
+        source_manager_image_format_version);
+    write_u32(
+        base + 12,
+        endian_marker);
+    write_u32(
+        base + 16,
+        source_manager_image_header_size);
+    write_u32(
+        base + 20,
+        source_manager_image_directory_count);
+    write_u32(
+        base + 24,
+        source_manager_image_directory_entry_size);
+    write_u32(
+        base + 28,
+        0);
+
+    write_u64(
+        base + 32,
+        directory_offset);
+    write_u64(
+        base + 40,
+        output.size());
+    write_u64(
+        base + 48,
+        options.generation);
+    write_u64(
+        base + 56,
+        source_count);
+    write_u64(
+        base + 64,
+        options.roots.size());
+    write_u64(
+        base + 72,
+        index_capacity);
+    write_u64(
+        base + 80,
+        forward_edges);
+    write_u64(
+        base + 88,
+        reverse_edges);
+
     write_u32(
         base + header_change_backend_offset,
-        static_cast<std::uint32_t>(options.change_checkpoint.backend));
-    write_u32(base + header_change_backend_offset + 4, 0);
-    write_u64(base + header_change_volume_offset, options.change_checkpoint.volume_serial);
-    write_u64(base + header_change_journal_offset, options.change_checkpoint.journal_id);
+        static_cast<std::uint32_t>(
+            options.change_checkpoint.backend));
+    write_u32(
+        base + header_change_backend_offset + 4,
+        0);
+
+    write_u64(
+        base + header_change_volume_offset,
+        options.change_checkpoint.volume_serial);
+    write_u64(
+        base + header_change_journal_offset,
+        options.change_checkpoint.journal_id);
     write_u64(
         base + header_change_usn_offset,
-        static_cast<std::uint64_t>(options.change_checkpoint.next_usn));
-    write_u64(base + header_crc_offset, 0);
-    write_u64(base + header_directory_crc_offset, 0);
-    write_u64(base + header_reserved_begin, 0);
-    write_u64(base + header_reserved_begin + 8, 0);
+        static_cast<std::uint64_t>(
+            options.change_checkpoint.next_usn));
 
-    for (std::size_t index = 0; index < layout.size(); ++index) {
-        const auto& item = layout[index];
-        auto* entry = base + directory_offset +
-            index * source_manager_image_directory_entry_size;
-        write_u32(entry, static_cast<std::uint32_t>(item.kind));
-        write_u32(entry + 4, item.record_size);
-        write_u64(entry + 8, item.offset);
-        write_u64(entry + 16, item.count);
-        write_u64(entry + 24, item.crc64);
+    write_u64(
+        base + header_crc_offset,
+        0);
+    write_u64(
+        base + header_directory_crc_offset,
+        0);
+    write_u64(
+        base + header_reserved_begin,
+        0);
+    write_u64(
+        base + header_reserved_begin + 8,
+        0);
+
+    for (std::size_t index = 0;
+         index < layout.size();
+         ++index) {
+
+        const auto& item =
+            layout[index];
+
+        auto* entry =
+            base +
+            directory_offset +
+            index *
+                source_manager_image_directory_entry_size;
+
+        write_u32(
+            entry,
+            static_cast<std::uint32_t>(
+                item.kind));
+        write_u32(
+            entry + 4,
+            item.record_size);
+        write_u64(
+            entry + 8,
+            item.offset);
+        write_u64(
+            entry + 16,
+            item.count);
+        write_u64(
+            entry + 24,
+            item.crc64);
     }
 
-    const auto directory_crc = persistence_crc64(std::span<const std::byte>{
-        base + directory_offset, directory_bytes});
-    write_u64(base + header_directory_crc_offset, directory_crc);
+    const auto directory_crc =
+        persistence_crc64(
+            std::span<const std::byte>{
+                base + directory_offset,
+                directory_bytes});
 
-    std::array<std::byte, source_manager_image_header_size> header{};
-    std::memcpy(header.data(), base, header.size());
-    write_u64(header.data() + header_crc_offset, 0);
-    const auto header_crc = persistence_crc64(header);
-    write_u64(base + header_crc_offset, header_crc);
+    write_u64(
+        base + header_directory_crc_offset,
+        directory_crc);
+
+    std::array<
+        std::byte,
+        source_manager_image_header_size> header{};
+
+    std::memcpy(
+        header.data(),
+        base,
+        header.size());
+
+    write_u64(
+        header.data() + header_crc_offset,
+        0);
+
+    const auto header_crc =
+        persistence_crc64(header);
+
+    write_u64(
+        base + header_crc_offset,
+        header_crc);
 
     source_manager_image_view validation;
-    const auto bind_result = validation.bind(output);
+
+    const auto bind_result =
+        validation.bind(output);
+
     if (!bind_result.ok()) {
         output.clear();
         return bind_result;
     }
-    const auto verify_result = validation.verify_contents();
+
+    const auto verify_result =
+        validation.verify_contents();
+
     if (!verify_result.ok()) {
         output.clear();
         return verify_result;

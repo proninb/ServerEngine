@@ -1336,6 +1336,322 @@ void print_lifecycle_result(
     return pass ? 0 : 1;
 }
 
+struct idempotent_save_timing final {
+    double minimum_ms = 0.0;
+    double median_ms = 0.0;
+    double average_ms = 0.0;
+    double maximum_ms = 0.0;
+};
+
+[[nodiscard]] idempotent_save_timing summarize_idempotent_save_timings(
+    std::vector<double> samples) {
+
+    idempotent_save_timing output;
+    if (samples.empty())
+        return output;
+
+    double total = 0.0;
+    output.minimum_ms = samples.front();
+    output.maximum_ms = samples.front();
+
+    for (const auto sample : samples) {
+        total += sample;
+        output.minimum_ms =
+            (std::min)(output.minimum_ms, sample);
+        output.maximum_ms =
+            (std::max)(output.maximum_ms, sample);
+    }
+
+    std::sort(samples.begin(), samples.end());
+    const auto middle = samples.size() / 2;
+    if ((samples.size() & 1u) != 0u) {
+        output.median_ms = samples[middle];
+    }
+    else {
+        output.median_ms =
+            (samples[middle - 1] + samples[middle]) / 2.0;
+    }
+
+    output.average_ms =
+        total / static_cast<double>(samples.size());
+    return output;
+}
+
+[[nodiscard]] int run_idempotent_save_benchmark(
+    std::size_t source_count,
+    std::size_t worker_limit,
+    std::size_t repeat_count) {
+
+    if (source_count == 0 || repeat_count == 0)
+        return 2;
+
+    temporary_tree tree;
+    std::filesystem::path configuration_path;
+    std::vector<std::filesystem::path> unused_source_paths;
+
+    const auto progress_interval =
+        source_count >= 1'000'000
+            ? std::size_t{100'000}
+            : source_count >= 100'000
+                ? std::size_t{10'000}
+                : std::size_t{0};
+
+    std::cerr
+        << "IDEMPOTENT_SAVE_SETUP_BEGIN,sources="
+        << source_count
+        << ",repeats=" << repeat_count
+        << '\n';
+
+    const auto setup_begin = lifecycle_clock::now();
+    if (!prepare_project(
+            source_count,
+            tree,
+            configuration_path,
+            unused_source_paths,
+            false,
+            progress_interval)) {
+        return 1;
+    }
+    const auto setup_end = lifecycle_clock::now();
+
+    std::error_code file_size_error;
+    const auto configuration_bytes =
+        std::filesystem::file_size(
+            configuration_path,
+            file_size_error);
+    if (file_size_error)
+        return 1;
+
+    project_manager manager;
+    diagnostic_buffer diagnostics;
+    project_build_result rebuild;
+
+    const auto rebuild_begin = lifecycle_clock::now();
+    auto result = manager.rebuild(
+        configuration_path,
+        operation_id{4200},
+        diagnostics,
+        rebuild,
+        worker_limit);
+    const auto rebuild_end = lifecycle_clock::now();
+
+    if (!result.ok() ||
+        diagnostics.has_errors() ||
+        !manager.ready() ||
+        !rebuild.changed ||
+        !rebuild.rebuilt) {
+
+        std::cout
+            << "IDEMPOTENT_SAVE_GATE,FAIL,stage=rebuild"
+            << ",sources=" << source_count
+            << ",status="
+            << static_cast<unsigned>(result.code)
+            << '\n';
+        return 1;
+    }
+
+    baseline_commit_result first_save;
+    const auto first_save_begin = lifecycle_clock::now();
+    result = manager.save(first_save);
+    const auto first_save_end = lifecycle_clock::now();
+
+    if (!result.ok() ||
+        first_save.transaction.empty() ||
+        first_save.bytes_written == 0) {
+
+        std::cout
+            << "IDEMPOTENT_SAVE_GATE,FAIL,stage=first_save"
+            << ",sources=" << source_count
+            << ",status="
+            << static_cast<unsigned>(result.code)
+            << '\n';
+        return 1;
+    }
+
+    std::vector<double> construction_samples;
+    construction_samples.reserve(repeat_count);
+
+    std::uint64_t construction_repeat_bytes = 0;
+    bool construction_pass = true;
+
+    for (std::size_t index = 0;
+         index < repeat_count;
+         ++index) {
+
+        baseline_commit_result repeated;
+        const auto begin = lifecycle_clock::now();
+        const auto repeated_status =
+            manager.save(repeated);
+        const auto end = lifecycle_clock::now();
+
+        construction_samples.push_back(
+            elapsed_ms(begin, end));
+        construction_repeat_bytes +=
+            repeated.bytes_written;
+
+        if (!repeated_status.ok() ||
+            repeated.transaction !=
+                first_save.transaction ||
+            repeated.bytes_written != 0) {
+            construction_pass = false;
+            break;
+        }
+    }
+
+    const auto construction_timing =
+        summarize_idempotent_save_timings(
+            construction_samples);
+
+    if (!construction_pass ||
+        construction_samples.size() != repeat_count) {
+
+        std::cout
+            << "IDEMPOTENT_SAVE_GATE,FAIL,"
+               "stage=construction_repeat"
+            << ",sources=" << source_count
+            << ",samples="
+            << construction_samples.size()
+            << ",repeat_bytes="
+            << construction_repeat_bytes
+            << '\n';
+
+        if (manager.ready())
+            (void)manager.unload();
+        return 1;
+    }
+
+    if (!manager.unload().ok())
+        return 1;
+
+    diagnostics.clear();
+    project_load_result load;
+
+    const auto load_begin = lifecycle_clock::now();
+    result = manager.load(
+        configuration_path,
+        operation_id{4201},
+        diagnostics,
+        load);
+    const auto load_end = lifecycle_clock::now();
+
+    if (!result.ok() ||
+        diagnostics.has_errors() ||
+        !manager.ready() ||
+        load.transaction != first_save.transaction ||
+        load.build_cache_mapped) {
+
+        std::cout
+            << "IDEMPOTENT_SAVE_GATE,FAIL,stage=load"
+            << ",sources=" << source_count
+            << ",status="
+            << static_cast<unsigned>(result.code)
+            << '\n';
+        return 1;
+    }
+
+    std::vector<double> load_samples;
+    load_samples.reserve(repeat_count);
+
+    std::uint64_t load_repeat_bytes = 0;
+    bool load_save_pass = true;
+
+    for (std::size_t index = 0;
+         index < repeat_count;
+         ++index) {
+
+        baseline_commit_result repeated;
+        const auto begin = lifecycle_clock::now();
+        const auto repeated_status =
+            manager.save(repeated);
+        const auto end = lifecycle_clock::now();
+
+        load_samples.push_back(
+            elapsed_ms(begin, end));
+        load_repeat_bytes +=
+            repeated.bytes_written;
+
+        if (!repeated_status.ok() ||
+            repeated.transaction !=
+                first_save.transaction ||
+            repeated.bytes_written != 0) {
+            load_save_pass = false;
+            break;
+        }
+    }
+
+    const auto load_timing =
+        summarize_idempotent_save_timings(
+            load_samples);
+
+    const bool pass =
+        load_save_pass &&
+        load_samples.size() == repeat_count &&
+        construction_repeat_bytes == 0 &&
+        load_repeat_bytes == 0;
+
+    std::cout
+        << std::fixed
+        << std::setprecision(6)
+        << "IDEMPOTENT_SAVE_RESULT,"
+        << (pass ? "PASS" : "FAIL")
+        << ",sources=" << source_count
+        << ",workers=" << worker_limit
+        << ",repeats=" << repeat_count
+        << ",configuration_bytes="
+        << configuration_bytes
+        << ",setup_ms="
+        << elapsed_ms(setup_begin, setup_end)
+        << ",rebuild_ms="
+        << elapsed_ms(rebuild_begin, rebuild_end)
+        << ",first_save_ms="
+        << elapsed_ms(first_save_begin, first_save_end)
+        << ",first_save_bytes="
+        << first_save.bytes_written
+        << ",construction_repeat_min_ms="
+        << construction_timing.minimum_ms
+        << ",construction_repeat_median_ms="
+        << construction_timing.median_ms
+        << ",construction_repeat_avg_ms="
+        << construction_timing.average_ms
+        << ",construction_repeat_max_ms="
+        << construction_timing.maximum_ms
+        << ",construction_repeat_bytes="
+        << construction_repeat_bytes
+        << ",load_ms="
+        << elapsed_ms(load_begin, load_end)
+        << ",load_repeat_min_ms="
+        << load_timing.minimum_ms
+        << ",load_repeat_median_ms="
+        << load_timing.median_ms
+        << ",load_repeat_avg_ms="
+        << load_timing.average_ms
+        << ",load_repeat_max_ms="
+        << load_timing.maximum_ms
+        << ",load_repeat_bytes="
+        << load_repeat_bytes
+        << ",transaction="
+        << first_save.transaction
+        << '\n';
+
+    std::cout
+        << "IDEMPOTENT_SAVE_GATE,"
+        << (pass ? "PASS" : "FAIL")
+        << ",sources=" << source_count
+        << ",repeats=" << repeat_count
+        << ",construction_bytes=0"
+        << ",load_bytes=0"
+        << ",same_transaction=1"
+        << '\n';
+
+    if (manager.ready() &&
+        !manager.unload().ok()) {
+        return 1;
+    }
+
+    return pass ? 0 : 1;
+}
+
+
 [[nodiscard]] bool run_sparse_case(
     std::size_t source_count,
     bool print_no_change,
@@ -1893,6 +2209,47 @@ int main(int argc, char** argv) {
         catch (...) {
             return 2;
         }
+    }
+
+    if ((argc == 3 ||
+         argc == 4 ||
+         argc == 5) &&
+        std::string_view{argv[1]} ==
+            "--idempotent-save") {
+        try {
+            const auto count =
+                static_cast<std::size_t>(
+                    std::stoull(argv[2]));
+
+            const auto workers =
+                argc >= 4
+                    ? static_cast<std::size_t>(
+                          std::stoull(argv[3]))
+                    : std::size_t{0};
+
+            const auto repeats =
+                argc == 5
+                    ? static_cast<std::size_t>(
+                          std::stoull(argv[4]))
+                    : std::size_t{5};
+
+            return run_idempotent_save_benchmark(
+                count,
+                workers,
+                repeats);
+        }
+        catch (...) {
+            return 2;
+        }
+    }
+
+    if (argc == 2 &&
+        std::string_view{argv[1]} ==
+            "--million-idempotent-save") {
+        return run_idempotent_save_benchmark(
+            1'000'000,
+            0,
+            5);
     }
 
     if (argc == 2 &&

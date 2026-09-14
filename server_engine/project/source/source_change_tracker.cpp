@@ -1247,6 +1247,29 @@ template <typename ChangeView>
 
 } // namespace
 
+status capture_source_change_checkpoint(
+    const std::filesystem::path& anchor,
+    source_change_checkpoint& output) noexcept {
+
+    output = {};
+
+#ifndef _WIN32
+    (void)anchor;
+    return {status_code::not_found};
+#else
+    observed_file_identity identity;
+    if (!query_file_identity(anchor, identity))
+        return {status_code::not_found};
+
+    return query_usn_checkpoint(
+        anchor,
+        identity.volume_serial,
+        output)
+        ? status{}
+        : status{status_code::not_found};
+#endif
+}
+
 status capture_file_change_token(
     const std::filesystem::path& path,
     file_change_token& output) noexcept {
@@ -1465,11 +1488,169 @@ void validate_capture_job(
 
 } // namespace
 
+status prepare_generation_source_change_capture(
+    const source_manager& sources,
+    source_change_checkpoint checkpoint,
+    std::string_view journal_anchor_path,
+    source_change_capture& output) noexcept {
+
+    output.reset();
+
+#ifndef _WIN32
+    (void)sources;
+    (void)checkpoint;
+    (void)journal_anchor_path;
+    return {status_code::not_found};
+#else
+    if (!checkpoint ||
+        journal_anchor_path.empty() ||
+        sources.source_count() == 0) {
+        return {status_code::not_found};
+    }
+
+    if (sources.source_count() >
+        (std::numeric_limits<std::uint32_t>::max)()) {
+        return {status_code::not_available};
+    }
+
+    try {
+        const auto source_count =
+            sources.source_count();
+
+        const auto file_capacity =
+            next_capacity(source_count);
+        if (file_capacity == 0)
+            return {status_code::not_available};
+
+        output.file_index.assign(
+            file_capacity,
+            source_change_file_index_slot{});
+
+        unique_path_set directories;
+
+        for (std::size_t index = 0;
+             index < source_count;
+             ++index) {
+
+            const source_id source{
+                static_cast<std::uint32_t>(index + 1)};
+
+            const auto snapshot =
+                sources.current(source);
+            const auto path_text =
+                sources.path(source);
+
+            if (!snapshot || path_text.empty()) {
+                output.reset();
+                return {status_code::not_found};
+            }
+
+            const auto identity =
+                snapshot.identity();
+
+            if (!identity ||
+                identity.volume_serial !=
+                    checkpoint.volume_serial ||
+                !insert_file_identity(
+                    output.file_index,
+                    identity.file_reference,
+                    source)) {
+                output.reset();
+                return {status_code::not_found};
+            }
+
+            auto parent =
+                std::filesystem::path{
+                    path_text}.parent_path();
+            const auto root =
+                parent.root_path();
+
+            while (!parent.empty()) {
+                bool inserted = false;
+                const auto directory_result =
+                    directories.insert(
+                        parent,
+                        source_change_directory_watch_topology,
+                        &inserted);
+
+                if (!directory_result.ok()) {
+                    output.reset();
+                    return directory_result;
+                }
+
+                if (!inserted || parent == root)
+                    break;
+
+                const auto next =
+                    parent.parent_path();
+                if (next == parent)
+                    break;
+
+                parent = next;
+            }
+        }
+
+        const auto directory_capacity =
+            next_capacity(
+                directories.values().size());
+
+        if (!directories.values().empty() &&
+            directory_capacity == 0) {
+            output.reset();
+            return {status_code::not_available};
+        }
+
+        if (!directories.values().empty()) {
+            output.directory_index.assign(
+                directory_capacity,
+                source_change_directory_index_slot{});
+        }
+
+        for (const auto& directory :
+             directories.values()) {
+
+            observed_file_identity identity;
+            if (!query_file_identity(
+                    std::filesystem::path{
+                        directory.path},
+                    identity) ||
+                identity.volume_serial !=
+                    checkpoint.volume_serial ||
+                !insert_directory_identity(
+                    output.directory_index,
+                    identity.file_reference,
+                    directory.flags)) {
+                output.reset();
+                return {status_code::not_found};
+            }
+        }
+
+        output.journal_anchor_path.assign(
+            journal_anchor_path);
+        output.checkpoint = checkpoint;
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        output.reset();
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        output.reset();
+        return {status_code::not_available};
+    }
+    catch (const std::system_error&) {
+        output.reset();
+        return {status_code::not_found};
+    }
+#endif
+}
+
 status prepare_source_change_capture(
     const source_manager& sources,
     source_change_capture& output) noexcept {
 
     output.reset();
+
 
 #ifndef _WIN32
     (void)sources;

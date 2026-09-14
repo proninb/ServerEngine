@@ -1,5 +1,6 @@
 #include "source_frontend_generation.hpp"
 
+#include <cstdio>
 #include <algorithm>
 #include <atomic>
 #include <limits>
@@ -270,8 +271,16 @@ status source_frontend_generation::build_incremental(
         std::vector<source_id> unique_dirty;
         unique_dirty.reserve(dirty_sources.size());
         for (const auto source : dirty_sources) {
-            if (!source || static_cast<std::size_t>(source.value()) > initial_source_count)
+            if (!source ||
+                static_cast<std::size_t>(source.value()) >
+                    initial_source_count) {
+                std::fprintf(
+                    stderr,
+                    "[C1C2C-STAGE] incremental dirty invalid source=%u count=%zu\n",
+                    source.value(),
+                    initial_source_count);
                 return {status_code::invalid_argument};
+            }
             bool inserted = false;
             auto result = dirty_index.insert(
                 source, static_cast<std::uint32_t>(unique_dirty.size() + 1), inserted);
@@ -285,9 +294,18 @@ status source_frontend_generation::build_incremental(
         std::vector<source_acquire_job> jobs(unique_dirty.size());
         std::vector<source_acquire_result> acquired(unique_dirty.size());
         for (std::size_t index = 0; index < unique_dirty.size(); ++index) {
-            auto result = sources.prepare_acquire(unique_dirty[index], jobs[index]);
-            if (!result.ok())
+            auto result =
+                sources.prepare_acquire(
+                    unique_dirty[index],
+                    jobs[index]);
+            if (!result.ok()) {
+                std::fprintf(
+                    stderr,
+                    "[C1C2C-STAGE] incremental prepare_acquire code=%u source=%u\n",
+                    static_cast<unsigned>(result.code),
+                    unique_dirty[index].value());
                 return result;
+            }
         }
 
         std::vector<status> acquire_status(unique_dirty.size());
@@ -321,9 +339,17 @@ status source_frontend_generation::build_incremental(
         for (std::size_t index = 0; index < acquired.size(); ++index) {
             if (!acquire_status[index].ok())
                 return acquire_status[index];
-            auto result = sources.apply_acquire(std::move(acquired[index]));
-            if (!result.ok())
+            auto result =
+                sources.apply_acquire(
+                    std::move(acquired[index]));
+            if (!result.ok()) {
+                std::fprintf(
+                    stderr,
+                    "[C1C2C-STAGE] incremental apply_acquire code=%u index=%zu\n",
+                    static_cast<unsigned>(result.code),
+                    index);
                 return result;
+            }
             ++summary.acquired;
         }
 
@@ -363,9 +389,18 @@ status source_frontend_generation::build_incremental(
             auto result = add_state(source, true, false);
             if (!result.ok())
                 return result;
-            result = sources.collect_dependents(source, old_dependents);
-            if (!result.ok())
+            result =
+                sources.collect_dependents(
+                    source,
+                    old_dependents);
+            if (!result.ok()) {
+                std::fprintf(
+                    stderr,
+                    "[C1C2C-STAGE] incremental collect_dependents code=%u source=%u\n",
+                    static_cast<unsigned>(result.code),
+                    source.value());
                 return result;
+            }
             for (const auto dependent : old_dependents) {
                 result = add_state(dependent, false, false);
                 if (!result.ok())
@@ -453,9 +488,17 @@ status source_frontend_generation::build_incremental(
 
             if (states[discovery_cursor].physical_changed || states[discovery_cursor].new_source) {
                 result = sources.set_includes(
-                    current_source, states[discovery_cursor].dependencies);
-                if (!result.ok())
+                    current_source,
+                    states[discovery_cursor].dependencies);
+                if (!result.ok()) {
+                    std::fprintf(
+                        stderr,
+                        "[C1C2C-STAGE] incremental set_includes code=%u source=%u deps=%zu\n",
+                        static_cast<unsigned>(result.code),
+                        current_source.value(),
+                        states[discovery_cursor].dependencies.size());
                     return result;
+                }
                 include_changed.push_back(current_source);
             }
             states[discovery_cursor].discovered = true;
@@ -464,10 +507,20 @@ status source_frontend_generation::build_incremental(
 
         summary.discovered = static_cast<std::uint32_t>(states.size());
         summary.affected = summary.discovered;
-        auto result = sources.validate_changed_source_graph(
-            include_changed, operation, diagnostics, &summary.source_graph_visited);
-        if (!result.ok())
+        auto result =
+            sources.validate_changed_source_graph(
+                include_changed,
+                operation,
+                diagnostics,
+                &summary.source_graph_visited);
+        if (!result.ok()) {
+            std::fprintf(
+                stderr,
+                "[C1C2C-STAGE] incremental validate_changed_graph code=%u roots=%zu\n",
+                static_cast<unsigned>(result.code),
+                include_changed.size());
             return result;
+        }
 
         for (std::uint32_t index = 0; index < states.size(); ++index) {
             auto& state = states[index];
@@ -539,9 +592,19 @@ status source_frontend_generation::build_incremental(
             const auto facts = state.parsed.facts();
 
             state.interface = std::make_unique<source_interface>();
-            result = state.interface->initialize(facts, semantic.identities(), interface_imports);
-            if (!result.ok())
+            result =
+                state.interface->initialize(
+                    facts,
+                    semantic.identities(),
+                    interface_imports);
+            if (!result.ok()) {
+                std::fprintf(
+                    stderr,
+                    "[C1C2C-STAGE] incremental interface.initialize code=%u source=%u\n",
+                    static_cast<unsigned>(result.code),
+                    state.source.value());
                 return result;
+            }
             state.parsed_value = true;
             ++parsed_count;
             ++summary.parsed;
