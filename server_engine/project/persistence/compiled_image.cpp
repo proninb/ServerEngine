@@ -1923,38 +1923,12 @@ status encode_compiled_image(
 
     const auto identity_slots = project.identity_slot_count();
     const auto identity_metadata = project.identity_metadata();
+    const auto expected_identity_count = project.identity_count();
     std::size_t observed_identity_count = 0;
 
-    for (std::size_t index = 0; index < identity_slots; ++index) {
-        const auto identity = project.identity_at_slot(index);
-        if (!identity)
-            continue;
-
-        if (index == 0) {
-            if (identity.kind() != identity_kind::root ||
-                identity.slot() != 1 ||
-                identity_metadata.parent(identity) ||
-                identity_metadata.name(identity)) {
-                return {status_code::initialization_failed};
-            }
-        } else {
-            const auto parent = identity_metadata.parent(identity);
-            const auto name = identity_metadata.name(identity);
-            if (identity.slot() != index + 1 ||
-                identity.kind() == identity_kind::root ||
-                !parent ||
-                !identity_metadata.valid(parent) ||
-                !name ||
-                project.string(name).empty()) {
-                return {status_code::initialization_failed};
-            }
-        }
-
-        ++observed_identity_count;
-    }
-
-    if (observed_identity_count != project.identity_count())
-        return {status_code::initialization_failed};
+    // GEN-02C22: fused identity validation. The old pre-serialization identity
+    // scan is removed; the exact same invariants are checked while identity_core
+    // and identity_index are emitted below.
 
     const auto graph = project.compiled_graph().data_view();
 
@@ -1967,8 +1941,8 @@ status encode_compiled_image(
         index_capacity(observed_string_count);
     const auto identity_index_count =
         index_capacity(
-            observed_identity_count > 0
-                ? observed_identity_count - 1
+            expected_identity_count > 0
+                ? expected_identity_count - 1
                 : 0);
     const auto graph_type_index_count =
         index_capacity(graph.live_types);
@@ -2064,87 +2038,251 @@ status encode_compiled_image(
     auto* string_bytes =
         section_data(compiled_image_section::string_bytes);
 
-    std::uint64_t string_offset = 0;
-    const auto string_mask = string_index_count - 1;
-
-    for (std::size_t index = 0; index < string_slots; ++index) {
-        const auto id = project.string_at_slot(index);
-        if (!id)
-            continue;
-
-        const auto value = project.string(id);
-        const auto hash = string_hash(value);
-
-        auto* core = string_core + index * string_core_size;
-        write_u64(core, string_offset);
-        write_u32(
-            core + 8,
-            static_cast<std::uint32_t>(value.size()));
-        write_u32(core + 12, 0);
-
-        std::memcpy(
-            string_bytes + static_cast<std::size_t>(string_offset),
-            value.data(),
-            value.size());
-
-        const auto fingerprint = fold32(hash);
-        auto position =
-            static_cast<std::size_t>(hash) & string_mask;
-
-        for (;;) {
-            auto* slot =
-                string_index + position * index_record_size;
-            if (read_u32(slot + 4) == 0) {
-                write_u32(slot, fingerprint);
-                write_u32(slot + 4, id.value());
-                break;
-            }
-            position = (position + 1) & string_mask;
-        }
-
-        string_offset += value.size();
-    }
-
     auto* identity_core =
         section_data(compiled_image_section::identity_core);
     auto* identity_index =
         section_data(compiled_image_section::identity_index);
-    const auto identity_mask = identity_index_count - 1;
 
-    for (std::size_t index = 0; index < identity_slots; ++index) {
-        const auto identity = project.identity_at_slot(index);
-        if (!identity)
-            continue;
+    const auto encode_string_sections = [&]() noexcept -> status {
+        std::uint64_t string_offset = 0;
+        const auto string_mask = string_index_count - 1;
 
-        auto* core = identity_core + index * identity_core_size;
-        write_u32(core, identity.value());
+        for (std::size_t index = 0; index < string_slots; ++index) {
+            const auto id = project.string_at_slot(index);
+            if (!id)
+                continue;
 
-        if (identity.kind() == identity_kind::root) {
-            write_u32(core + 4, 0);
-            write_u32(core + 8, 0);
-            continue;
+            const auto value = project.string(id);
+            if (value.empty() ||
+                value.size() >
+                    (std::numeric_limits<std::uint32_t>::max)()) {
+                return {status_code::initialization_failed};
+            }
+
+            const auto hash = string_hash(value);
+
+            auto* core =
+                string_core + index * string_core_size;
+            write_u64(core, string_offset);
+            write_u32(
+                core + 8,
+                static_cast<std::uint32_t>(value.size()));
+            write_u32(core + 12, 0);
+
+            std::memcpy(
+                string_bytes +
+                    static_cast<std::size_t>(string_offset),
+                value.data(),
+                value.size());
+
+            const auto fingerprint = fold32(hash);
+            auto position =
+                static_cast<std::size_t>(hash) &
+                string_mask;
+
+            for (;;) {
+                auto* slot =
+                    string_index +
+                    position * index_record_size;
+
+                if (read_u32(slot + 4) == 0) {
+                    write_u32(slot, fingerprint);
+                    write_u32(slot + 4, id.value());
+                    break;
+                }
+
+                position =
+                    (position + 1) &
+                    string_mask;
+            }
+
+            string_offset += value.size();
         }
 
-        const auto parent = identity_metadata.parent(identity);
-        const auto name = identity_metadata.name(identity);
-        write_u32(core + 4, parent.value());
-        write_u32(core + 8, name.value());
+        return string_offset == string_bytes_count
+            ? status{}
+            : status{status_code::initialization_failed};
+    };
 
-        const auto hash =
-            semantic_identity_hash(parent.value(), name.value());
-        const auto fingerprint = fold32(hash);
-        auto position =
-            static_cast<std::size_t>(hash) & identity_mask;
+    const auto encode_identity_sections = [&]() noexcept -> status {
+        const auto identity_mask =
+            identity_index_count - 1;
 
-        for (;;) {
-            auto* index_slot =
-                identity_index + position * index_record_size;
-            if (read_u32(index_slot + 4) == 0) {
-                write_u32(index_slot, fingerprint);
-                write_u32(index_slot + 4, identity.value());
-                break;
+        std::size_t observed = 0;
+
+        for (std::size_t index = 0;
+             index < identity_slots;
+             ++index) {
+
+            const auto identity =
+                project.identity_at_slot(index);
+
+            if (!identity)
+                continue;
+
+            identity_ref parent;
+            string_id name;
+
+            if (index == 0) {
+                if (identity.kind() != identity_kind::root ||
+                    identity.slot() != 1 ||
+                    identity_metadata.parent(identity) ||
+                    identity_metadata.name(identity)) {
+                    return {
+                        status_code::initialization_failed};
+                }
             }
-            position = (position + 1) & identity_mask;
+            else {
+                parent =
+                    identity_metadata.parent(identity);
+                name =
+                    identity_metadata.name(identity);
+
+                if (identity.slot() != index + 1 ||
+                    identity.kind() == identity_kind::root ||
+                    !parent ||
+                    !identity_metadata.valid(parent) ||
+                    !name ||
+                    project.string(name).empty()) {
+                    return {
+                        status_code::initialization_failed};
+                }
+            }
+
+            ++observed;
+
+            auto* core =
+                identity_core +
+                index * identity_core_size;
+
+            write_u32(core, identity.value());
+
+            if (index == 0) {
+                write_u32(core + 4, 0);
+                write_u32(core + 8, 0);
+                continue;
+            }
+
+            write_u32(core + 4, parent.value());
+            write_u32(core + 8, name.value());
+
+            const auto hash =
+                semantic_identity_hash(
+                    parent.value(),
+                    name.value());
+
+            const auto fingerprint =
+                fold32(hash);
+
+            auto position =
+                static_cast<std::size_t>(hash) &
+                identity_mask;
+
+            for (;;) {
+                auto* index_slot =
+                    identity_index +
+                    position * index_record_size;
+
+                if (read_u32(index_slot + 4) == 0) {
+                    write_u32(
+                        index_slot,
+                        fingerprint);
+                    write_u32(
+                        index_slot + 4,
+                        identity.value());
+                    break;
+                }
+
+                position =
+                    (position + 1) &
+                    identity_mask;
+            }
+        }
+
+        observed_identity_count = observed;
+
+        return observed ==
+                expected_identity_count
+            ? status{}
+            : status{
+                status_code::initialization_failed};
+    };
+
+    status string_encode_result;
+    status identity_encode_result;
+
+    std::jthread string_worker;
+    std::jthread identity_worker;
+
+    const bool large_compiled_sections =
+        string_slots >= 4096 ||
+        identity_slots >= 4096 ||
+        string_slots + identity_slots >= 4096;
+
+    const bool parallel_compiled_sections =
+        std::thread::hardware_concurrency() > 1 &&
+        large_compiled_sections;
+
+    if (parallel_compiled_sections) {
+        try {
+            string_worker = std::jthread(
+                [&]() noexcept {
+                    string_encode_result =
+                        encode_string_sections();
+                });
+
+            identity_worker = std::jthread(
+                [&]() noexcept {
+                    identity_encode_result =
+                        encode_identity_sections();
+                });
+        }
+        catch (const std::bad_alloc&) {
+            if (string_worker.joinable())
+                string_worker.join();
+            if (identity_worker.joinable())
+                identity_worker.join();
+
+            string_encode_result =
+                encode_string_sections();
+
+            if (string_encode_result.ok()) {
+                identity_encode_result =
+                    encode_identity_sections();
+            }
+        }
+        catch (const std::system_error&) {
+            if (string_worker.joinable())
+                string_worker.join();
+            if (identity_worker.joinable())
+                identity_worker.join();
+
+            string_encode_result =
+                encode_string_sections();
+
+            if (string_encode_result.ok()) {
+                identity_encode_result =
+                    encode_identity_sections();
+            }
+        }
+    }
+    else {
+        string_encode_result =
+            encode_string_sections();
+
+        if (string_encode_result.ok()) {
+            identity_encode_result =
+                encode_identity_sections();
+        }
+
+        if (!string_encode_result.ok()) {
+            output.clear();
+            return string_encode_result;
+        }
+
+        if (!identity_encode_result.ok()) {
+            output.clear();
+            return identity_encode_result;
         }
     }
 
@@ -2362,6 +2500,30 @@ status encode_compiled_image(
             }
             position = (position + 1) & graph_link_mask;
         }
+    }
+
+    // GEN-02C22: string/identity workers and the main Graph encoder write
+    // disjoint sections. Join before CRC and before any failure path clears the
+    // backing output buffer.
+    if (string_worker.joinable())
+        string_worker.join();
+    if (identity_worker.joinable())
+        identity_worker.join();
+
+    if (!string_encode_result.ok()) {
+        output.clear();
+        return string_encode_result;
+    }
+
+    if (!identity_encode_result.ok()) {
+        output.clear();
+        return identity_encode_result;
+    }
+
+    if (observed_identity_count !=
+        expected_identity_count) {
+        output.clear();
+        return {status_code::initialization_failed};
     }
 
     if (inserted_types != graph.live_types ||
