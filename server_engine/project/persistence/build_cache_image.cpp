@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <atomic>
 #include <thread>
+#include <type_traits>
 #include <system_error>
 #include <vector>
 
@@ -79,6 +80,61 @@ constexpr std::uint32_t dependency_edge_record_size = 12;
 constexpr std::uint32_t historical_index_record_size = 8;
 constexpr std::uint32_t source_file_identity_index_record_size = 16;
 constexpr std::uint32_t tracked_directory_identity_index_record_size = 16;
+
+// GEN-02C18 native arena serialization is valid only when the in-memory
+// compact value layout is byte-identical to Build Cache v4 on little-endian.
+static_assert(sizeof(source_frontend_native_persistence_range) == 8);
+static_assert(offsetof(
+    source_frontend_native_persistence_range, begin) == 0);
+static_assert(offsetof(
+    source_frontend_native_persistence_range, count) == 4);
+
+static_assert(sizeof(identity_ref) ==
+    frontend_local_type_record_size);
+static_assert(sizeof(source_interface_type_slot) ==
+    frontend_type_slot_record_size);
+static_assert(sizeof(source_interface_object_slot) ==
+    frontend_object_slot_record_size);
+static_assert(sizeof(source_interface_member_slot) ==
+    frontend_member_slot_record_size);
+
+static_assert(std::is_trivially_copyable_v<identity_ref>);
+static_assert(std::is_trivially_copyable_v<
+    source_interface_type_slot>);
+static_assert(std::is_trivially_copyable_v<
+    source_interface_object_slot>);
+static_assert(std::is_trivially_copyable_v<
+    source_interface_member_slot>);
+
+static_assert(std::is_standard_layout_v<
+    source_interface_type_slot>);
+static_assert(std::is_standard_layout_v<
+    source_interface_object_slot>);
+static_assert(std::is_standard_layout_v<
+    source_interface_member_slot>);
+
+static_assert(offsetof(
+    source_interface_type_slot, parent) == 0);
+static_assert(offsetof(
+    source_interface_type_slot, name) == 4);
+static_assert(offsetof(
+    source_interface_type_slot, identity) == 8);
+
+static_assert(offsetof(
+    source_interface_object_slot, parent) == 0);
+static_assert(offsetof(
+    source_interface_object_slot, name) == 4);
+static_assert(offsetof(
+    source_interface_object_slot, identity) == 8);
+static_assert(offsetof(
+    source_interface_object_slot, named_type) == 12);
+
+static_assert(offsetof(
+    source_interface_member_slot, type) == 0);
+static_assert(offsetof(
+    source_interface_member_slot, name) == 4);
+static_assert(offsetof(
+    source_interface_member_slot, index) == 8);
 
 struct layout_section final {
     build_cache_image_section kind{};
@@ -2696,6 +2752,48 @@ status encode_build_cache_image(
         static_cast<bool>(native_frontend) &&
         native_frontend.size() == source_count;
 
+    const auto native_storage =
+        frontend.native_persistence_storage();
+
+    const bool use_native_storage =
+        std::endian::native == std::endian::little &&
+        static_cast<bool>(native_storage) &&
+        native_storage.records.size() == source_count &&
+        native_storage.local_types.size() == local_type_count &&
+        native_storage.type_slots.size() == type_slot_count &&
+        native_storage.object_slots.size() == object_slot_count &&
+        native_storage.member_slots.size() == member_slot_count;
+
+    if (use_native_storage) {
+        if (!native_storage.local_types.empty()) {
+            std::memcpy(
+                local_types,
+                native_storage.local_types.data(),
+                native_storage.local_types.size_bytes());
+        }
+
+        if (!native_storage.type_slots.empty()) {
+            std::memcpy(
+                type_slots,
+                native_storage.type_slots.data(),
+                native_storage.type_slots.size_bytes());
+        }
+
+        if (!native_storage.object_slots.empty()) {
+            std::memcpy(
+                object_slots,
+                native_storage.object_slots.data(),
+                native_storage.object_slots.size_bytes());
+        }
+
+        if (!native_storage.member_slots.empty()) {
+            std::memcpy(
+                member_slots,
+                native_storage.member_slots.data(),
+                native_storage.member_slots.size_bytes());
+        }
+    }
+
     for (std::size_t index = 0; index < source_count; ++index) {
         const source_id source_value{
             static_cast<std::uint32_t>(index + 1)};
@@ -2737,9 +2835,31 @@ status encode_build_cache_image(
         source_frontend_persistence_storage interface_storage =
             source_frontend_persistence_storage::none;
         source_interface_data_view interface_data{};
+        const source_frontend_native_persistence_record*
+            native_record = nullptr;
+        bool interface_preencoded = false;
 
         status result;
-        if (use_native_frontend) {
+        if (use_native_storage) {
+            native_record = &native_storage.records[index];
+
+            if (native_record->present > 1)
+                return {status_code::initialization_failed};
+
+            if (native_record->present != 0) {
+                interface_record.present = true;
+                interface_record.local_types =
+                    native_record->local_types.count;
+                interface_record.type_slots =
+                    native_record->type_slots.count;
+                interface_record.object_slots =
+                    native_record->object_slots.count;
+                interface_record.member_slots =
+                    native_record->member_slots.count;
+                interface_preencoded = true;
+            }
+        }
+        else if (use_native_frontend) {
             if (const auto* interface_value =
                     native_frontend[index];
                 interface_value != nullptr) {
@@ -2820,7 +2940,37 @@ status encode_build_cache_image(
             write_cache_range(directory_record + 40, object_slot_range);
             write_cache_range(directory_record + 48, member_slot_range);
 
-            if (interface_storage ==
+            if (interface_preencoded) {
+                if (native_record == nullptr ||
+                    native_record->local_types.begin !=
+                        local_type_range.begin ||
+                    native_record->local_types.count !=
+                        local_type_range.count ||
+                    native_record->type_slots.begin !=
+                        type_slot_range.begin ||
+                    native_record->type_slots.count !=
+                        type_slot_range.count ||
+                    native_record->object_slots.begin !=
+                        object_slot_range.begin ||
+                    native_record->object_slots.count !=
+                        object_slot_range.count ||
+                    native_record->member_slots.begin !=
+                        member_slot_range.begin ||
+                    native_record->member_slots.count !=
+                        member_slot_range.count) {
+                    return {status_code::initialization_failed};
+                }
+
+                local_type_cursor +=
+                    local_type_range.count;
+                type_slot_cursor +=
+                    type_slot_range.count;
+                object_slot_cursor +=
+                    object_slot_range.count;
+                member_slot_cursor +=
+                    member_slot_range.count;
+            }
+            else if (interface_storage ==
                 source_frontend_persistence_storage::native_interface) {
 
                 const auto data = interface_data;

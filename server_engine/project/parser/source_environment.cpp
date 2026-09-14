@@ -5,6 +5,7 @@
 #include <limits>
 #include <new>
 #include <stdexcept>
+#include <utility>
 
 namespace cw::server {
 namespace {
@@ -42,7 +43,8 @@ namespace {
 status source_interface::initialize(
     const source_facts& facts,
     identity_view identities,
-    std::span<const source_interface* const> imports) noexcept {
+    std::span<const source_interface* const> imports,
+    bool retain_compact_persistence) noexcept {
 
     try {
         const auto type_count = facts.records().size() + facts.enums().size();
@@ -68,10 +70,19 @@ status source_interface::initialize(
         std::vector<member_slot> new_persistence_member_slots;
         std::vector<const source_interface*> new_imports;
 
+        std::size_t new_persistence_type_count = 0;
+        std::size_t new_persistence_object_count = 0;
+        std::size_t new_persistence_member_count = 0;
+
         new_types.reserve(type_count);
-        new_persistence_type_slots.reserve(type_count);
-        new_persistence_object_slots.reserve(facts.objects().size());
-        new_persistence_member_slots.reserve(member_count);
+
+        if (retain_compact_persistence) {
+            new_persistence_type_slots.reserve(type_count);
+            new_persistence_object_slots.reserve(
+                facts.objects().size());
+            new_persistence_member_slots.reserve(member_count);
+        }
+
         new_imports.reserve(imports.size());
 
         const auto insert_type = [&](identity_ref identity) -> status {
@@ -97,7 +108,11 @@ status source_interface::initialize(
                     };
                     slot = value;
                     new_types.push_back(identity);
-                    new_persistence_type_slots.push_back(value);
+                    ++new_persistence_type_count;
+
+                    if (retain_compact_persistence)
+                        new_persistence_type_slots.push_back(value);
+
                     return {};
                 }
 
@@ -150,7 +165,11 @@ status source_interface::initialize(
                         named_type,
                     };
                     slot = value;
-                    new_persistence_object_slots.push_back(value);
+                    ++new_persistence_object_count;
+
+                    if (retain_compact_persistence)
+                        new_persistence_object_slots.push_back(value);
+
                     break;
                 }
 
@@ -195,7 +214,11 @@ status source_interface::initialize(
                             member_index::from_zero_based(index),
                         };
                         slot = value;
-                        new_persistence_member_slots.push_back(value);
+                        ++new_persistence_member_count;
+
+                        if (retain_compact_persistence)
+                            new_persistence_member_slots.push_back(value);
+
                         break;
                     }
 
@@ -225,6 +248,19 @@ status source_interface::initialize(
         persistence_member_slots.swap(
             new_persistence_member_slots);
 
+        persistence_local_type_count =
+            local_type_values.size();
+        persistence_type_slot_count =
+            new_persistence_type_count;
+        persistence_object_slot_count =
+            new_persistence_object_count;
+        persistence_member_slot_count =
+            new_persistence_member_count;
+        persistence_compact_state =
+            retain_compact_persistence;
+
+        external_persistence_data = {};
+        persistence_externalized_state = false;
         imported_interfaces.swap(new_imports);
         return {};
     }
@@ -428,6 +464,18 @@ status source_interface::initialize_persisted(
         persistence_member_slots.swap(
             new_persistence_member_slots);
 
+        persistence_local_type_count =
+            local_type_values.size();
+        persistence_type_slot_count =
+            persistence_type_slots.size();
+        persistence_object_slot_count =
+            persistence_object_slots.size();
+        persistence_member_slot_count =
+            persistence_member_slots.size();
+        persistence_compact_state = true;
+
+        external_persistence_data = {};
+        persistence_externalized_state = false;
         imported_interfaces.swap(new_imports);
         return {};
     }
@@ -437,6 +485,29 @@ status source_interface::initialize_persisted(
     catch (const std::length_error&) {
         return {status_code::not_available};
     }
+}
+
+source_interface_owned_persistence_data
+source_interface::release_persistence_data() noexcept {
+
+    source_interface_owned_persistence_data output;
+    if (persistence_externalized_state)
+        return output;
+
+    output.local_types = std::move(local_type_values);
+    output.type_slots = std::move(persistence_type_slots);
+    output.object_slots = std::move(persistence_object_slots);
+    output.member_slots = std::move(persistence_member_slots);
+
+    external_persistence_data = {};
+    return output;
+}
+
+void source_interface::bind_persistence_data(
+    source_interface_data_view data) noexcept {
+
+    external_persistence_data = data;
+    persistence_externalized_state = true;
 }
 
 

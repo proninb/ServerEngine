@@ -824,7 +824,14 @@ status source_frontend_generation::build(
                     const auto facts = state.parsed.facts();
 
                     state.interface = std::make_unique<source_interface>();
-                    state.work_status = state.interface->initialize(facts, semantic.identities(), interface_imports);
+                                        // GEN-02C18.1: retain compact persistence only for incremental
+                    // frontend construction. Full REBUILD has no baseline cache and
+                    // publishes directly into canonical cache-wide arenas.
+                    state.work_status = state.interface->initialize(
+                        facts,
+                        semantic.identities(),
+                        interface_imports,
+                        cache != nullptr);
                 }
                 catch (const std::bad_alloc&) {
                     state.work_status = {status_code::not_available};
