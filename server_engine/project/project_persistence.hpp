@@ -17,6 +17,43 @@ namespace cw::server {
 
 class project_context;
 
+struct project_generation_freeze_telemetry final {
+    std::uint64_t internal_ns = 0;
+    std::uint64_t materialize_change_ns = 0;
+    std::uint64_t compiled_ns = 0;
+    std::uint64_t roots_ns = 0;
+    std::uint64_t source_manager_ns = 0;
+    std::uint64_t change_state_ns = 0;
+    std::uint64_t build_cache_ns = 0;
+    std::uint64_t build_cache_layout_allocate_ns = 0;
+    std::uint64_t build_cache_source_frontend_ns = 0;
+    std::uint64_t build_cache_source_directory_text_ns = 0;
+    std::uint64_t build_cache_frontend_record_ranges_ns = 0;
+    std::uint64_t build_cache_frontend_local_types_ns = 0;
+    std::uint64_t build_cache_frontend_type_slots_ns = 0;
+    std::uint64_t build_cache_frontend_object_slots_ns = 0;
+    std::uint64_t build_cache_frontend_member_slots_ns = 0;
+    std::uint64_t build_cache_source_frontend_total_sources = 0;
+    std::uint64_t build_cache_source_frontend_sampled_sources = 0;
+    std::uint64_t build_cache_source_lookup_sample_ns = 0;
+    std::uint64_t build_cache_source_text_copy_sample_ns = 0;
+    std::uint64_t build_cache_frontend_record_sample_ns = 0;
+    std::uint64_t build_cache_frontend_local_types_sample_ns = 0;
+    std::uint64_t build_cache_frontend_type_slots_sample_ns = 0;
+    std::uint64_t build_cache_frontend_object_slots_sample_ns = 0;
+    std::uint64_t build_cache_frontend_member_slots_sample_ns = 0;
+    std::uint64_t build_cache_contribution_ns = 0;
+    std::uint64_t build_cache_graph_ns = 0;
+    std::uint64_t build_cache_change_identity_ns = 0;
+    std::uint64_t build_cache_section_crc_ns = 0;
+    std::uint64_t build_cache_header_directory_ns = 0;
+    std::uint64_t build_cache_bind_ns = 0;
+    std::uint64_t build_cache_verify_ns = 0;
+    std::uint64_t bind_ns = 0;
+    std::uint64_t verify_change_state_ns = 0;
+    std::uint64_t verify_build_cache_ns = 0;
+};
+
 // Temporary owner used while existing encoders are migrated to native
 // Generation segments. Consumers see only project_generation_segments.
 class project_generation_storage final {
@@ -71,6 +108,12 @@ private:
 
     friend status freeze_project_generation(
         const project_context&,
+        const project_configuration&,
+        project_generation_storage&,
+        project_generation_freeze_telemetry*) noexcept;
+
+    friend status freeze_project_generation(
+        const project_context&,
         project_generation_storage&) noexcept;
 };
 
@@ -78,6 +121,12 @@ private:
     const project_context& project,
     const project_configuration& configuration,
     project_generation_storage& output) noexcept;
+
+[[nodiscard]] status freeze_project_generation(
+    const project_context& project,
+    const project_configuration& configuration,
+    project_generation_storage& output,
+    project_generation_freeze_telemetry* telemetry) noexcept;
 
 [[nodiscard]] status freeze_project_generation(
     const project_context& project,

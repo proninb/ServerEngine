@@ -1589,6 +1589,185 @@ struct idempotent_save_timing final {
         construction_repeat_bytes == 0 &&
         load_repeat_bytes == 0;
 
+    const auto first_save_total_ms =
+        static_cast<double>(
+            first_save.telemetry.save_total_ns) /
+        1'000'000.0;
+
+    const auto first_save_top_level_accounted_ms =
+        static_cast<double>(
+            first_save.telemetry.configuration_token_ns +
+            first_save.telemetry.configuration_read_ns +
+            first_save.telemetry.configuration_parse_ns +
+            first_save.telemetry.fingerprint_ns +
+            first_save.telemetry.generation_freeze_ns +
+            first_save.telemetry.store_commit_ns) /
+        1'000'000.0;
+
+    const auto first_save_unaccounted_ms =
+        first_save_total_ms >
+            first_save_top_level_accounted_ms
+        ? first_save_total_ms -
+            first_save_top_level_accounted_ms
+        : 0.0;
+
+    const auto first_save_freeze_accounted_ms =
+        static_cast<double>(
+            first_save.telemetry.generation_freeze_materialize_change_ns +
+            first_save.telemetry.generation_freeze_compiled_ns +
+            first_save.telemetry.generation_freeze_roots_ns +
+            first_save.telemetry.generation_freeze_source_manager_ns +
+            first_save.telemetry.generation_freeze_change_state_ns +
+            first_save.telemetry.generation_freeze_build_cache_ns +
+            first_save.telemetry.generation_freeze_bind_ns +
+            first_save.telemetry.generation_freeze_verify_change_state_ns +
+            first_save.telemetry.generation_freeze_verify_build_cache_ns) /
+        1'000'000.0;
+
+    const auto source_frontend_sampled =
+        first_save.telemetry.
+            generation_freeze_build_cache_source_frontend_sampled_sources;
+    const auto source_frontend_total =
+        first_save.telemetry.
+            generation_freeze_build_cache_source_frontend_total_sources;
+
+    const auto source_frontend_sample_scale =
+        source_frontend_sampled != 0
+        ? static_cast<double>(source_frontend_total) /
+            static_cast<double>(source_frontend_sampled)
+        : 0.0;
+
+    const auto sampled_estimated_ms =
+        [&](std::uint64_t sample_ns) noexcept {
+            return static_cast<double>(sample_ns) *
+                source_frontend_sample_scale /
+                1'000'000.0;
+        };
+
+    const auto first_save_sf_source_lookup_estimated_ms =
+        sampled_estimated_ms(
+            first_save.telemetry.
+                generation_freeze_build_cache_source_lookup_sample_ns);
+    const auto first_save_sf_text_copy_estimated_ms =
+        sampled_estimated_ms(
+            first_save.telemetry.
+                generation_freeze_build_cache_source_text_copy_sample_ns);
+    const auto first_save_sf_frontend_record_estimated_ms =
+        sampled_estimated_ms(
+            first_save.telemetry.
+                generation_freeze_build_cache_frontend_record_sample_ns);
+    const auto first_save_sf_local_types_estimated_ms =
+        sampled_estimated_ms(
+            first_save.telemetry.
+                generation_freeze_build_cache_frontend_local_types_sample_ns);
+    const auto first_save_sf_type_slots_estimated_ms =
+        sampled_estimated_ms(
+            first_save.telemetry.
+                generation_freeze_build_cache_frontend_type_slots_sample_ns);
+    const auto first_save_sf_object_slots_estimated_ms =
+        sampled_estimated_ms(
+            first_save.telemetry.
+                generation_freeze_build_cache_frontend_object_slots_sample_ns);
+    const auto first_save_sf_member_slots_estimated_ms =
+        sampled_estimated_ms(
+            first_save.telemetry.
+                generation_freeze_build_cache_frontend_member_slots_sample_ns);
+
+    const auto first_save_sf_sampled_accounted_estimated_ms =
+        first_save_sf_source_lookup_estimated_ms +
+        first_save_sf_text_copy_estimated_ms +
+        first_save_sf_frontend_record_estimated_ms +
+        first_save_sf_local_types_estimated_ms +
+        first_save_sf_type_slots_estimated_ms +
+        first_save_sf_object_slots_estimated_ms +
+        first_save_sf_member_slots_estimated_ms;
+
+    const auto first_save_sf_total_ms =
+        static_cast<double>(
+            first_save.telemetry.
+                generation_freeze_build_cache_source_frontend_ns) /
+        1'000'000.0;
+
+    const auto first_save_sf_directory_other_estimated_ms =
+        first_save_sf_total_ms >
+            first_save_sf_sampled_accounted_estimated_ms
+        ? first_save_sf_total_ms -
+            first_save_sf_sampled_accounted_estimated_ms
+        : 0.0;
+
+    const auto first_save_sf_exact_source_directory_text_ms =
+        static_cast<double>(
+            first_save.telemetry.generation_freeze_build_cache_source_directory_text_ns) /
+        1'000'000.0;
+    const auto first_save_sf_exact_frontend_record_ranges_ms =
+        static_cast<double>(
+            first_save.telemetry.generation_freeze_build_cache_frontend_record_ranges_ns) /
+        1'000'000.0;
+    const auto first_save_sf_exact_local_types_ms =
+        static_cast<double>(
+            first_save.telemetry.generation_freeze_build_cache_frontend_local_types_ns) /
+        1'000'000.0;
+    const auto first_save_sf_exact_type_slots_ms =
+        static_cast<double>(
+            first_save.telemetry.generation_freeze_build_cache_frontend_type_slots_ns) /
+        1'000'000.0;
+    const auto first_save_sf_exact_object_slots_ms =
+        static_cast<double>(
+            first_save.telemetry.generation_freeze_build_cache_frontend_object_slots_ns) /
+        1'000'000.0;
+    const auto first_save_sf_exact_member_slots_ms =
+        static_cast<double>(
+            first_save.telemetry.generation_freeze_build_cache_frontend_member_slots_ns) /
+        1'000'000.0;
+    const auto first_save_sf_exact_accounted_ms =
+        first_save_sf_exact_source_directory_text_ms +
+        first_save_sf_exact_frontend_record_ranges_ms +
+        first_save_sf_exact_local_types_ms +
+        first_save_sf_exact_type_slots_ms +
+        first_save_sf_exact_object_slots_ms +
+        first_save_sf_exact_member_slots_ms;
+    const auto first_save_sf_exact_unaccounted_ms =
+        first_save_sf_total_ms > first_save_sf_exact_accounted_ms
+        ? first_save_sf_total_ms - first_save_sf_exact_accounted_ms
+        : 0.0;
+
+    const auto first_save_build_cache_accounted_ms =
+        static_cast<double>(
+            first_save.telemetry.generation_freeze_build_cache_layout_allocate_ns +
+            first_save.telemetry.generation_freeze_build_cache_source_frontend_ns +
+            first_save.telemetry.generation_freeze_build_cache_contribution_ns +
+            first_save.telemetry.generation_freeze_build_cache_graph_ns +
+            first_save.telemetry.generation_freeze_build_cache_change_identity_ns +
+            first_save.telemetry.generation_freeze_build_cache_section_crc_ns +
+            first_save.telemetry.generation_freeze_build_cache_header_directory_ns +
+            first_save.telemetry.generation_freeze_build_cache_bind_ns +
+            first_save.telemetry.generation_freeze_build_cache_verify_ns) /
+        1'000'000.0;
+
+    const auto first_save_build_cache_total_ms =
+        static_cast<double>(
+            first_save.telemetry.generation_freeze_build_cache_ns) /
+        1'000'000.0;
+
+    const auto first_save_build_cache_unaccounted_ms =
+        first_save_build_cache_total_ms >
+            first_save_build_cache_accounted_ms
+        ? first_save_build_cache_total_ms -
+            first_save_build_cache_accounted_ms
+        : 0.0;
+
+    const auto first_save_freeze_internal_ms =
+        static_cast<double>(
+            first_save.telemetry.generation_freeze_internal_ns) /
+        1'000'000.0;
+
+    const auto first_save_freeze_unaccounted_ms =
+        first_save_freeze_internal_ms >
+            first_save_freeze_accounted_ms
+        ? first_save_freeze_internal_ms -
+            first_save_freeze_accounted_ms
+        : 0.0;
+
     std::cout
         << std::fixed
         << std::setprecision(6)
@@ -1605,6 +1784,182 @@ struct idempotent_save_timing final {
         << elapsed_ms(rebuild_begin, rebuild_end)
         << ",first_save_ms="
         << elapsed_ms(first_save_begin, first_save_end)
+        << ",first_save_total_ms="
+        << first_save_total_ms
+        << ",first_save_configuration_token_ms="
+        << static_cast<double>(
+            first_save.telemetry.configuration_token_ns) /
+            1'000'000.0
+        << ",first_save_configuration_read_ms="
+        << static_cast<double>(
+            first_save.telemetry.configuration_read_ns) /
+            1'000'000.0
+        << ",first_save_configuration_parse_ms="
+        << static_cast<double>(
+            first_save.telemetry.configuration_parse_ns) /
+            1'000'000.0
+        << ",first_save_fingerprint_ms="
+        << static_cast<double>(
+            first_save.telemetry.fingerprint_ns) /
+            1'000'000.0
+        << ",first_save_generation_freeze_ms="
+        << static_cast<double>(
+            first_save.telemetry.generation_freeze_ns) /
+            1'000'000.0
+        << ",first_save_freeze_internal_ms="
+        << static_cast<double>(
+            first_save.telemetry.generation_freeze_internal_ns) /
+            1'000'000.0
+        << ",first_save_freeze_materialize_change_ms="
+        << static_cast<double>(
+            first_save.telemetry.generation_freeze_materialize_change_ns) /
+            1'000'000.0
+        << ",first_save_freeze_compiled_ms="
+        << static_cast<double>(
+            first_save.telemetry.generation_freeze_compiled_ns) /
+            1'000'000.0
+        << ",first_save_freeze_roots_ms="
+        << static_cast<double>(
+            first_save.telemetry.generation_freeze_roots_ns) /
+            1'000'000.0
+        << ",first_save_freeze_source_manager_ms="
+        << static_cast<double>(
+            first_save.telemetry.generation_freeze_source_manager_ns) /
+            1'000'000.0
+        << ",first_save_freeze_change_state_ms="
+        << static_cast<double>(
+            first_save.telemetry.generation_freeze_change_state_ns) /
+            1'000'000.0
+        << ",first_save_freeze_build_cache_ms="
+        << static_cast<double>(
+            first_save.telemetry.generation_freeze_build_cache_ns) /
+            1'000'000.0
+        << ",first_save_build_cache_layout_allocate_ms="
+        << static_cast<double>(
+            first_save.telemetry.generation_freeze_build_cache_layout_allocate_ns) /
+            1'000'000.0
+        << ",first_save_build_cache_source_frontend_ms="
+        << static_cast<double>(
+            first_save.telemetry.generation_freeze_build_cache_source_frontend_ns) /
+            1'000'000.0
+        << ",first_save_sf_exact_source_directory_text_ms="
+        << first_save_sf_exact_source_directory_text_ms
+        << ",first_save_sf_exact_frontend_record_ranges_ms="
+        << first_save_sf_exact_frontend_record_ranges_ms
+        << ",first_save_sf_exact_local_types_ms="
+        << first_save_sf_exact_local_types_ms
+        << ",first_save_sf_exact_type_slots_ms="
+        << first_save_sf_exact_type_slots_ms
+        << ",first_save_sf_exact_object_slots_ms="
+        << first_save_sf_exact_object_slots_ms
+        << ",first_save_sf_exact_member_slots_ms="
+        << first_save_sf_exact_member_slots_ms
+        << ",first_save_sf_exact_accounted_ms="
+        << first_save_sf_exact_accounted_ms
+        << ",first_save_sf_exact_unaccounted_ms="
+        << first_save_sf_exact_unaccounted_ms
+        << ",first_save_sf_total_sources="
+        << source_frontend_total
+        << ",first_save_sf_sampled_sources="
+        << source_frontend_sampled
+        << ",first_save_sf_sample_scale="
+        << source_frontend_sample_scale
+        << ",first_save_sf_source_lookup_estimated_ms="
+        << first_save_sf_source_lookup_estimated_ms
+        << ",first_save_sf_text_copy_estimated_ms="
+        << first_save_sf_text_copy_estimated_ms
+        << ",first_save_sf_frontend_record_estimated_ms="
+        << first_save_sf_frontend_record_estimated_ms
+        << ",first_save_sf_local_types_estimated_ms="
+        << first_save_sf_local_types_estimated_ms
+        << ",first_save_sf_type_slots_estimated_ms="
+        << first_save_sf_type_slots_estimated_ms
+        << ",first_save_sf_object_slots_estimated_ms="
+        << first_save_sf_object_slots_estimated_ms
+        << ",first_save_sf_member_slots_estimated_ms="
+        << first_save_sf_member_slots_estimated_ms
+        << ",first_save_sf_sampled_accounted_estimated_ms="
+        << first_save_sf_sampled_accounted_estimated_ms
+        << ",first_save_sf_directory_other_estimated_ms="
+        << first_save_sf_directory_other_estimated_ms
+        << ",first_save_build_cache_contribution_ms="
+        << static_cast<double>(
+            first_save.telemetry.generation_freeze_build_cache_contribution_ns) /
+            1'000'000.0
+        << ",first_save_build_cache_graph_ms="
+        << static_cast<double>(
+            first_save.telemetry.generation_freeze_build_cache_graph_ns) /
+            1'000'000.0
+        << ",first_save_build_cache_change_identity_ms="
+        << static_cast<double>(
+            first_save.telemetry.generation_freeze_build_cache_change_identity_ns) /
+            1'000'000.0
+        << ",first_save_build_cache_section_crc_ms="
+        << static_cast<double>(
+            first_save.telemetry.generation_freeze_build_cache_section_crc_ns) /
+            1'000'000.0
+        << ",first_save_build_cache_header_directory_ms="
+        << static_cast<double>(
+            first_save.telemetry.generation_freeze_build_cache_header_directory_ns) /
+            1'000'000.0
+        << ",first_save_build_cache_bind_ms="
+        << static_cast<double>(
+            first_save.telemetry.generation_freeze_build_cache_bind_ns) /
+            1'000'000.0
+        << ",first_save_build_cache_verify_ms="
+        << static_cast<double>(
+            first_save.telemetry.generation_freeze_build_cache_verify_ns) /
+            1'000'000.0
+        << ",first_save_build_cache_accounted_ms="
+        << first_save_build_cache_accounted_ms
+        << ",first_save_build_cache_unaccounted_ms="
+        << first_save_build_cache_unaccounted_ms
+        << ",first_save_freeze_bind_ms="
+        << static_cast<double>(
+            first_save.telemetry.generation_freeze_bind_ns) /
+            1'000'000.0
+        << ",first_save_freeze_verify_change_state_ms="
+        << static_cast<double>(
+            first_save.telemetry.generation_freeze_verify_change_state_ns) /
+            1'000'000.0
+        << ",first_save_freeze_verify_build_cache_ms="
+        << static_cast<double>(
+            first_save.telemetry.generation_freeze_verify_build_cache_ns) /
+            1'000'000.0
+        << ",first_save_freeze_accounted_ms="
+        << first_save_freeze_accounted_ms
+        << ",first_save_freeze_unaccounted_ms="
+        << first_save_freeze_unaccounted_ms
+        << ",first_save_store_commit_ms="
+        << static_cast<double>(
+            first_save.telemetry.store_commit_ns) /
+            1'000'000.0
+        << ",first_save_transaction_write_ms="
+        << static_cast<double>(
+            first_save.telemetry.transaction_write_ns) /
+            1'000'000.0
+        << ",first_save_transaction_flush_ms="
+        << static_cast<double>(
+            first_save.telemetry.transaction_flush_ns) /
+            1'000'000.0
+        << ",first_save_directory_flush_ms="
+        << static_cast<double>(
+            first_save.telemetry.directory_flush_ns) /
+            1'000'000.0
+        << ",first_save_current_write_ms="
+        << static_cast<double>(
+            first_save.telemetry.current_write_ns) /
+            1'000'000.0
+        << ",first_save_current_flush_ms="
+        << static_cast<double>(
+            first_save.telemetry.current_flush_ns) /
+            1'000'000.0
+        << ",first_save_current_replace_ms="
+        << static_cast<double>(
+            first_save.telemetry.current_replace_ns) /
+            1'000'000.0
+        << ",first_save_unaccounted_ms="
+        << first_save_unaccounted_ms
         << ",first_save_bytes="
         << first_save.bytes_written
         << ",construction_repeat_min_ms="

@@ -90,6 +90,14 @@ public:
     [[nodiscard]] source_manager_update begin_update() noexcept;
 
     [[nodiscard]] std::size_t source_count() const noexcept { return records.size(); }
+
+    // Total persisted Source text bytes for the current Generation. Maintained
+    // by Source publication deltas so SAVE never rescans every Source to size
+    // Build Cache source_bytes.
+    [[nodiscard]] std::uint64_t persistence_text_bytes() const noexcept {
+        return persistence_text_bytes_value;
+    }
+
     [[nodiscard]] source_snapshot current(source_id source) const noexcept;
     [[nodiscard]] std::span<const source_id> includes(source_id source) const noexcept;
     [[nodiscard]] std::span<const source_id> dependents(source_id source) const noexcept;
@@ -191,6 +199,7 @@ private:
     mapped_vector<committed_source> states;
     source_generation_storage generation_storage_value;
     std::vector<path_slot> path_index;
+    std::uint64_t persistence_text_bytes_value = 0;
 };
 
 class source_manager_update final {
@@ -336,6 +345,7 @@ private:
     std::vector<source_id> physical_changes_value;
     mutable source_manager_update_telemetry telemetry_value{};
     std::size_t prepared_path_storage_size = 0;
+    std::uint64_t prepared_text_bytes = 0;
     bool prepared = false;
     bool committed = false;
 };

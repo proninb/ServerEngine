@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -2358,7 +2359,34 @@ status encode_build_cache_image(
     const source_change_capture& change_capture,
     std::vector<std::byte>& output) noexcept {
 
+    return encode_build_cache_image(
+        project,
+        change_capture,
+        output,
+        nullptr);
+}
+
+status encode_build_cache_image(
+    const project_context& project,
+    const source_change_capture& change_capture,
+    std::vector<std::byte>& output,
+    build_cache_encode_telemetry* telemetry) noexcept {
+
     output.clear();
+    if (telemetry != nullptr)
+        *telemetry = {};
+
+    const auto encode_begin =
+        std::chrono::steady_clock::now();
+    const auto layout_begin = encode_begin;
+
+    const auto elapsed = [](
+        std::chrono::steady_clock::time_point begin) noexcept {
+
+        return static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - begin).count());
+    };
 
     const auto& frontend = project.frontend_cache();
     const auto& contributions = project.contributions();
@@ -2385,65 +2413,25 @@ status encode_build_cache_image(
         return {status_code::initialization_failed};
     }
 
-    std::uint64_t source_bytes_count = 0;
-    std::size_t frontend_count = 0;
-    std::size_t local_type_count = 0;
-    std::size_t type_slot_count = 0;
-    std::size_t object_slot_count = 0;
-    std::size_t member_slot_count = 0;
+    const auto source_bytes_count =
+        project.sources().persistence_text_bytes();
 
-    for (std::size_t index = 0; index < source_count; ++index) {
-        const source_id source_value{
-            static_cast<std::uint32_t>(index + 1)};
-        const auto snapshot = project.sources().current(source_value);
-        if (snapshot) {
-            const auto text = snapshot.text();
-            if (text.size() >
-                    (std::numeric_limits<std::uint32_t>::max)() ||
-                !add_u64(
-                    source_bytes_count,
-                    text.size(),
-                    source_bytes_count)) {
-                return {status_code::not_available};
-            }
-        }
+    const auto& frontend_summary =
+        frontend.persistence_summary();
 
-        source_frontend_persistence_record interface_record;
-        auto result = frontend.persistence_record(
-            source_value,
-            interface_record);
-        if (!result.ok())
-            return result;
-        if (!interface_record.present)
-            continue;
+    const auto frontend_count =
+        frontend_summary.frontend_count;
+    const auto local_type_count =
+        frontend_summary.local_types;
+    const auto type_slot_count =
+        frontend_summary.type_slots;
+    const auto object_slot_count =
+        frontend_summary.object_slots;
+    const auto member_slot_count =
+        frontend_summary.member_slots;
 
-        ++frontend_count;
-
-        std::uint32_t ignored = 0;
-        if (!add_u32_count(
-                local_type_count,
-                interface_record.local_types,
-                ignored) ||
-            !add_u32_count(
-                type_slot_count,
-                interface_record.type_slots,
-                ignored) ||
-            !add_u32_count(
-                object_slot_count,
-                interface_record.object_slots,
-                ignored) ||
-            !add_u32_count(
-                member_slot_count,
-                interface_record.member_slots,
-                ignored)) {
-            return {status_code::not_available};
-        }
-
-        local_type_count += interface_record.local_types;
-        type_slot_count += interface_record.type_slots;
-        object_slot_count += interface_record.object_slots;
-        member_slot_count += interface_record.member_slots;
-    }
+    if (frontend_count > source_count)
+        return {status_code::initialization_failed};
 
     const auto fits_u32 = [](std::size_t value) noexcept {
         return value <= (std::numeric_limits<std::uint32_t>::max)();
@@ -2563,6 +2551,13 @@ status encode_build_cache_image(
                 layout[section_index(kind)].offset);
         };
 
+    if (telemetry != nullptr)
+        telemetry->layout_allocate_ns =
+            elapsed(layout_begin);
+
+    const auto source_frontend_begin =
+        std::chrono::steady_clock::now();
+
     auto* source_directory =
         section_data(build_cache_image_section::source_directory);
     auto* source_bytes =
@@ -2581,6 +2576,16 @@ status encode_build_cache_image(
     std::uint32_t type_slot_cursor = 0;
     std::uint32_t object_slot_cursor = 0;
     std::uint32_t member_slot_cursor = 0;
+    std::size_t observed_frontends = 0;
+
+    if (telemetry != nullptr)
+        telemetry->source_frontend_total_sources = source_count;
+
+    const auto native_frontend =
+        frontend.native_persistence_view();
+    const bool use_native_frontend =
+        static_cast<bool>(native_frontend) &&
+        native_frontend.size() == source_count;
 
     for (std::size_t index = 0; index < source_count; ++index) {
         const source_id source_value{
@@ -2595,6 +2600,15 @@ status encode_build_cache_image(
         if (snapshot) {
             flags |= source_flag_snapshot;
             const auto text = snapshot.text();
+
+            if (text_cursor > source_bytes_count ||
+                static_cast<std::uint64_t>(text.size()) >
+                    source_bytes_count - text_cursor ||
+                text.size() >
+                    (std::numeric_limits<std::uint32_t>::max)()) {
+                return {status_code::initialization_failed};
+            }
+
             write_u64(directory_record + 8, text_cursor);
             write_u32(
                 directory_record + 16,
@@ -2606,18 +2620,78 @@ status encode_build_cache_image(
                     text.data(),
                     text.size());
             }
+
             text_cursor += text.size();
         }
 
         source_frontend_persistence_record interface_record;
-        auto result = frontend.persistence_record(
-            source_value,
-            interface_record);
-        if (!result.ok())
-            return result;
+        source_frontend_persistence_storage interface_storage =
+            source_frontend_persistence_storage::none;
+        source_interface_data_view interface_data{};
+
+        status result;
+        if (use_native_frontend) {
+            if (const auto* interface_value =
+                    native_frontend[index];
+                interface_value != nullptr) {
+
+                interface_data = interface_value->persistence_data_view();
+                interface_storage =
+                    source_frontend_persistence_storage::
+                        native_interface;
+                interface_record.present = true;
+                interface_record.local_types =
+                    interface_data.local_types.size();
+                interface_record.type_slots =
+                    interface_data.type_slots.size();
+                interface_record.object_slots =
+                    interface_data.object_slots.size();
+                interface_record.member_slots =
+                    interface_data.member_slots.size();
+            }
+        }
+        else {
+            source_frontend_persistence_view interface_view;
+            result = frontend.persistence_view(
+                source_value,
+                interface_view);
+            if (!result.ok())
+                return result;
+
+            interface_record = interface_view.record;
+            interface_storage = interface_view.storage;
+            interface_data = interface_view.data;
+        }
 
         if (interface_record.present) {
+            if ((flags & source_flag_snapshot) == 0)
+                return {status_code::initialization_failed};
+
             flags |= source_flag_frontend;
+            ++observed_frontends;
+
+            if (static_cast<std::size_t>(local_type_cursor) >
+                    local_type_count ||
+                interface_record.local_types >
+                    local_type_count -
+                        static_cast<std::size_t>(local_type_cursor) ||
+                static_cast<std::size_t>(type_slot_cursor) >
+                    type_slot_count ||
+                interface_record.type_slots >
+                    type_slot_count -
+                        static_cast<std::size_t>(type_slot_cursor) ||
+                static_cast<std::size_t>(object_slot_cursor) >
+                    object_slot_count ||
+                interface_record.object_slots >
+                    object_slot_count -
+                        static_cast<std::size_t>(object_slot_cursor) ||
+                static_cast<std::size_t>(member_slot_cursor) >
+                    member_slot_count ||
+                interface_record.member_slots >
+                    member_slot_count -
+                        static_cast<std::size_t>(member_slot_cursor)) {
+                return {status_code::initialization_failed};
+            }
 
             const build_cache_range local_type_range{
                 local_type_cursor,
@@ -2637,83 +2711,168 @@ status encode_build_cache_image(
             write_cache_range(directory_record + 40, object_slot_range);
             write_cache_range(directory_record + 48, member_slot_range);
 
-            for (std::size_t item = 0;
-                 item < interface_record.local_types;
-                 ++item) {
-                identity_ref identity;
-                result = frontend.persistence_local_type(
-                    source_value,
-                    item,
-                    identity);
-                if (!result.ok() || !identity)
+            if (interface_storage ==
+                source_frontend_persistence_storage::native_interface) {
+
+                const auto data = interface_data;
+
+                if (data.local_types.size() != interface_record.local_types ||
+                    data.type_slots.size() != interface_record.type_slots ||
+                    data.object_slots.size() != interface_record.object_slots ||
+                    data.member_slots.size() != interface_record.member_slots) {
                     return {status_code::initialization_failed};
-                write_u32(
-                    local_types +
-                        static_cast<std::size_t>(local_type_cursor++) * 4,
-                    identity.value());
+                }
+
+                for (const auto identity : data.local_types) {
+                    if (!identity)
+                        return {status_code::initialization_failed};
+
+                    write_u32(
+                        local_types +
+                            static_cast<std::size_t>(
+                                local_type_cursor++) * 4,
+                        identity.value());
+                }
+
+                for (const auto& slot : data.type_slots) {
+                    auto* target =
+                        type_slots +
+                        static_cast<std::size_t>(
+                            type_slot_cursor++) *
+                            frontend_type_slot_record_size;
+                    write_u32(target, slot.parent.value());
+                    write_u32(target + 4, slot.name.value());
+                    write_u32(target + 8, slot.identity.value());
+                }
+
+                for (const auto& slot : data.object_slots) {
+                    auto* target =
+                        object_slots +
+                        static_cast<std::size_t>(
+                            object_slot_cursor++) *
+                            frontend_object_slot_record_size;
+                    write_u32(target, slot.parent.value());
+                    write_u32(target + 4, slot.name.value());
+                    write_u32(target + 8, slot.identity.value());
+                    write_u32(target + 12, slot.named_type.value());
+                }
+
+                for (const auto& slot : data.member_slots) {
+                    auto* target =
+                        member_slots +
+                        static_cast<std::size_t>(
+                            member_slot_cursor++) *
+                            frontend_member_slot_record_size;
+                    write_u32(target, slot.type.value());
+                    write_u32(target + 4, slot.name.value());
+                    write_u32(target + 8, slot.index.value());
+                }
+            }
+            else if (interface_storage ==
+                     source_frontend_persistence_storage::persisted_baseline) {
+
+                for (std::size_t item = 0;
+                     item < interface_record.local_types;
+                     ++item) {
+                    identity_ref identity;
+                    result = frontend.persistence_local_type(
+                        source_value, item, identity);
+                    if (!result.ok() || !identity)
+                        return {status_code::initialization_failed};
+
+                    write_u32(
+                        local_types +
+                            static_cast<std::size_t>(
+                                local_type_cursor++) * 4,
+                        identity.value());
+                }
+
+                for (std::size_t item = 0;
+                     item < interface_record.type_slots;
+                     ++item) {
+                    source_interface_type_slot slot;
+                    result = frontend.persistence_type_slot(
+                        source_value, item, slot);
+                    if (!result.ok())
+                        return result;
+
+                    auto* target =
+                        type_slots +
+                        static_cast<std::size_t>(
+                            type_slot_cursor++) *
+                            frontend_type_slot_record_size;
+                    write_u32(target, slot.parent.value());
+                    write_u32(target + 4, slot.name.value());
+                    write_u32(target + 8, slot.identity.value());
+                }
+
+                for (std::size_t item = 0;
+                     item < interface_record.object_slots;
+                     ++item) {
+                    source_interface_object_slot slot;
+                    result = frontend.persistence_object_slot(
+                        source_value, item, slot);
+                    if (!result.ok())
+                        return result;
+
+                    auto* target =
+                        object_slots +
+                        static_cast<std::size_t>(
+                            object_slot_cursor++) *
+                            frontend_object_slot_record_size;
+                    write_u32(target, slot.parent.value());
+                    write_u32(target + 4, slot.name.value());
+                    write_u32(target + 8, slot.identity.value());
+                    write_u32(target + 12, slot.named_type.value());
+                }
+
+                for (std::size_t item = 0;
+                     item < interface_record.member_slots;
+                     ++item) {
+                    source_interface_member_slot slot;
+                    result = frontend.persistence_member_slot(
+                        source_value, item, slot);
+                    if (!result.ok())
+                        return result;
+
+                    auto* target =
+                        member_slots +
+                        static_cast<std::size_t>(
+                            member_slot_cursor++) *
+                            frontend_member_slot_record_size;
+                    write_u32(target, slot.type.value());
+                    write_u32(target + 4, slot.name.value());
+                    write_u32(target + 8, slot.index.value());
+                }
+            }
+            else {
+                return {status_code::initialization_failed};
             }
 
-            for (std::size_t item = 0;
-                 item < interface_record.type_slots;
-                 ++item) {
-                source_interface_type_slot slot;
-                result = frontend.persistence_type_slot(
-                    source_value,
-                    item,
-                    slot);
-                if (!result.ok())
-                    return result;
-                auto* target =
-                    type_slots +
-                    static_cast<std::size_t>(type_slot_cursor++) *
-                        frontend_type_slot_record_size;
-                write_u32(target, slot.parent.value());
-                write_u32(target + 4, slot.name.value());
-                write_u32(target + 8, slot.identity.value());
-            }
-
-            for (std::size_t item = 0;
-                 item < interface_record.object_slots;
-                 ++item) {
-                source_interface_object_slot slot;
-                result = frontend.persistence_object_slot(
-                    source_value,
-                    item,
-                    slot);
-                if (!result.ok())
-                    return result;
-                auto* target =
-                    object_slots +
-                    static_cast<std::size_t>(object_slot_cursor++) *
-                        frontend_object_slot_record_size;
-                write_u32(target, slot.parent.value());
-                write_u32(target + 4, slot.name.value());
-                write_u32(target + 8, slot.identity.value());
-                write_u32(target + 12, slot.named_type.value());
-            }
-
-            for (std::size_t item = 0;
-                 item < interface_record.member_slots;
-                 ++item) {
-                source_interface_member_slot slot;
-                result = frontend.persistence_member_slot(
-                    source_value,
-                    item,
-                    slot);
-                if (!result.ok())
-                    return result;
-                auto* target =
-                    member_slots +
-                    static_cast<std::size_t>(member_slot_cursor++) *
-                        frontend_member_slot_record_size;
-                write_u32(target, slot.type.value());
-                write_u32(target + 4, slot.name.value());
-                write_u32(target + 8, slot.index.value());
-            }
+        }
+        else if (interface_storage !=
+                 source_frontend_persistence_storage::none) {
+            return {status_code::initialization_failed};
         }
 
         write_u32(directory_record + 4, flags);
     }
+
+    if (text_cursor != source_bytes_count ||
+        static_cast<std::size_t>(local_type_cursor) != local_type_count ||
+        static_cast<std::size_t>(type_slot_cursor) != type_slot_count ||
+        static_cast<std::size_t>(object_slot_cursor) != object_slot_count ||
+        static_cast<std::size_t>(member_slot_cursor) != member_slot_count ||
+        observed_frontends != frontend_count) {
+        return {status_code::initialization_failed};
+    }
+
+    if (telemetry != nullptr)
+        telemetry->source_frontend_ns =
+            elapsed(source_frontend_begin);
+
+    const auto contribution_begin =
+        std::chrono::steady_clock::now();
 
     auto* contribution_states =
         section_data(build_cache_image_section::contribution_states);
@@ -2865,6 +3024,13 @@ status encode_build_cache_image(
             static_cast<std::uint8_t>(value.kind));
     }
 
+    if (telemetry != nullptr)
+        telemetry->contribution_ns =
+            elapsed(contribution_begin);
+
+    const auto graph_begin =
+        std::chrono::steady_clock::now();
+
     auto* intrinsic_refs =
         section_data(build_cache_image_section::graph_intrinsic_refs);
     for (std::size_t index = 0;
@@ -2950,6 +3116,13 @@ status encode_build_cache_image(
         build_cache_image_section::graph_link_target_index,
         graph.link_target_index);
 
+    if (telemetry != nullptr)
+        telemetry->graph_ns =
+            elapsed(graph_begin);
+
+    const auto change_identity_begin =
+        std::chrono::steady_clock::now();
+
     auto* source_file_index =
         section_data(
             build_cache_image_section::source_file_identity_index);
@@ -2986,6 +3159,13 @@ status encode_build_cache_image(
         write_u32(target + 8, value.flags);
         write_u32(target + 12, 0);
     }
+
+    if (telemetry != nullptr)
+        telemetry->change_identity_ns =
+            elapsed(change_identity_begin);
+
+    const auto section_crc_begin =
+        std::chrono::steady_clock::now();
 
     const auto parallel_crc_worker_count =
         (std::min)(
@@ -3072,6 +3252,13 @@ status encode_build_cache_image(
         output.clear();
         return {status_code::not_available};
     }
+
+    if (telemetry != nullptr)
+        telemetry->section_crc_ns =
+            elapsed(section_crc_begin);
+
+    const auto header_directory_begin =
+        std::chrono::steady_clock::now();
 
     std::copy(image_magic.begin(), image_magic.end(), base);
     write_u32(base + 8, build_cache_image_format_version);
@@ -3160,21 +3347,31 @@ status encode_build_cache_image(
         base + header_crc_offset,
         persistence_crc64(header));
 
+    if (telemetry != nullptr)
+        telemetry->header_directory_ns =
+            elapsed(header_directory_begin);
+
     build_cache_image_view validation;
+
+    const auto bind_begin =
+        std::chrono::steady_clock::now();
+
     auto result = validation.bind(output);
+
+    if (telemetry != nullptr)
+        telemetry->bind_ns =
+            elapsed(bind_begin);
+
     if (!result.ok()) {
         output.clear();
         return result;
     }
 
-    result = // Section CRCs were computed from these exact completed bytes above.
-    // Recomputing them here is a duplicate full-image scan; keep every
-    // structural/range/index/statistics check but skip CRC recomputation.
-    validation.verify_contents(false);
-    if (!result.ok()) {
-        output.clear();
-        return result;
-    }
+    // Fresh construction is guarded by writer invariants, section CRCs,
+    // structural bind(), and the freeze-level verify_against() gate.
+    if (telemetry != nullptr)
+        telemetry->total_ns =
+            elapsed(encode_begin);
 
     return {};
 }

@@ -35,9 +35,66 @@ enum class baseline_artifact_kind : std::uint8_t {
     build_cache,
 };
 
+struct baseline_commit_telemetry final {
+    // project_manager SAVE boundary.
+    std::uint64_t save_total_ns = 0;
+    std::uint64_t configuration_token_ns = 0;
+    std::uint64_t configuration_read_ns = 0;
+    std::uint64_t configuration_parse_ns = 0;
+    std::uint64_t fingerprint_ns = 0;
+    std::uint64_t generation_freeze_ns = 0;
+
+    // freeze_project_generation breakdown. The outer generation_freeze_ns
+    // includes call overhead; internal_ns is measured inside the freeze body.
+    std::uint64_t generation_freeze_internal_ns = 0;
+    std::uint64_t generation_freeze_materialize_change_ns = 0;
+    std::uint64_t generation_freeze_compiled_ns = 0;
+    std::uint64_t generation_freeze_roots_ns = 0;
+    std::uint64_t generation_freeze_source_manager_ns = 0;
+    std::uint64_t generation_freeze_change_state_ns = 0;
+    std::uint64_t generation_freeze_build_cache_ns = 0;
+    std::uint64_t generation_freeze_build_cache_layout_allocate_ns = 0;
+    std::uint64_t generation_freeze_build_cache_source_frontend_ns = 0;
+    std::uint64_t generation_freeze_build_cache_source_directory_text_ns = 0;
+    std::uint64_t generation_freeze_build_cache_frontend_record_ranges_ns = 0;
+    std::uint64_t generation_freeze_build_cache_frontend_local_types_ns = 0;
+    std::uint64_t generation_freeze_build_cache_frontend_type_slots_ns = 0;
+    std::uint64_t generation_freeze_build_cache_frontend_object_slots_ns = 0;
+    std::uint64_t generation_freeze_build_cache_frontend_member_slots_ns = 0;
+    std::uint64_t generation_freeze_build_cache_source_frontend_total_sources = 0;
+    std::uint64_t generation_freeze_build_cache_source_frontend_sampled_sources = 0;
+    std::uint64_t generation_freeze_build_cache_source_lookup_sample_ns = 0;
+    std::uint64_t generation_freeze_build_cache_source_text_copy_sample_ns = 0;
+    std::uint64_t generation_freeze_build_cache_frontend_record_sample_ns = 0;
+    std::uint64_t generation_freeze_build_cache_frontend_local_types_sample_ns = 0;
+    std::uint64_t generation_freeze_build_cache_frontend_type_slots_sample_ns = 0;
+    std::uint64_t generation_freeze_build_cache_frontend_object_slots_sample_ns = 0;
+    std::uint64_t generation_freeze_build_cache_frontend_member_slots_sample_ns = 0;
+    std::uint64_t generation_freeze_build_cache_contribution_ns = 0;
+    std::uint64_t generation_freeze_build_cache_graph_ns = 0;
+    std::uint64_t generation_freeze_build_cache_change_identity_ns = 0;
+    std::uint64_t generation_freeze_build_cache_section_crc_ns = 0;
+    std::uint64_t generation_freeze_build_cache_header_directory_ns = 0;
+    std::uint64_t generation_freeze_build_cache_bind_ns = 0;
+    std::uint64_t generation_freeze_build_cache_verify_ns = 0;
+    std::uint64_t generation_freeze_bind_ns = 0;
+    std::uint64_t generation_freeze_verify_change_state_ns = 0;
+    std::uint64_t generation_freeze_verify_build_cache_ns = 0;
+
+    // baseline_store durable commit boundary.
+    std::uint64_t store_commit_ns = 0;
+    std::uint64_t transaction_write_ns = 0;
+    std::uint64_t transaction_flush_ns = 0;
+    std::uint64_t directory_flush_ns = 0;
+    std::uint64_t current_write_ns = 0;
+    std::uint64_t current_flush_ns = 0;
+    std::uint64_t current_replace_ns = 0;
+};
+
 struct baseline_commit_result final {
     std::string transaction;
     std::uint64_t bytes_written = 0;
+    baseline_commit_telemetry telemetry{};
 };
 
 // Persisted project.json fast-path identity. Filesystem metadata is only a

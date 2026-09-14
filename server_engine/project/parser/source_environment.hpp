@@ -102,6 +102,18 @@ public:
         };
     }
 
+    // Compact SAVE representation. Runtime lookup tables remain hash-capacity
+    // sized; persistence stores only occupied entries.
+    [[nodiscard]] source_interface_data_view
+    persistence_data_view() const noexcept {
+        return {
+            local_type_values,
+            persistence_type_slots,
+            persistence_object_slots,
+            persistence_member_slots,
+        };
+    }
+
 private:
     using type_slot = source_interface_type_slot;
     using object_slot = source_interface_object_slot;
@@ -123,9 +135,17 @@ private:
         std::uint32_t depth) const noexcept;
 
     std::vector<identity_ref> local_type_values;
+
+    // Parser lookup tables.
     std::vector<type_slot> type_slots;
     std::vector<object_slot> object_slots;
     std::vector<member_slot> member_slots;
+
+    // Compact occupied entries used only by persistence.
+    std::vector<type_slot> persistence_type_slots;
+    std::vector<object_slot> persistence_object_slots;
+    std::vector<member_slot> persistence_member_slots;
+
     std::vector<const source_interface*> imported_interfaces;
 };
 

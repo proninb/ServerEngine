@@ -7,6 +7,7 @@
 #include "source/source_change_tracker.hpp"
 
 #include <array>
+#include <chrono>
 #include <limits>
 #include <new>
 #include <optional>
@@ -177,9 +178,22 @@ status make_project_baseline_fingerprint(
 status freeze_project_generation(
     const project_context& project,
     const project_configuration& configuration,
-    project_generation_storage& output) noexcept {
+    project_generation_storage& output,
+    project_generation_freeze_telemetry* telemetry) noexcept {
 
     output = {};
+    if (telemetry != nullptr)
+        *telemetry = {};
+
+    const auto freeze_begin =
+        std::chrono::steady_clock::now();
+
+    const auto elapsed = [](
+        std::chrono::steady_clock::time_point begin) noexcept {
+        return static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - begin).count());
+    };
 
     if (!project.construction_backed())
         return {status_code::invalid_state};
@@ -194,11 +208,20 @@ status freeze_project_generation(
     source_change_capture materialized_change_capture;
 
     if (change_capture->baseline_overlay()) {
+        const auto phase_begin =
+            std::chrono::steady_clock::now();
+
         result =
             materialize_generation_source_change_capture(
                 project.sources(),
                 *change_capture,
                 materialized_change_capture);
+
+        if (telemetry != nullptr) {
+            telemetry->materialize_change_ns =
+                elapsed(phase_begin);
+        }
+
         if (!result.ok())
             return result;
 
@@ -206,24 +229,53 @@ status freeze_project_generation(
             &materialized_change_capture;
     }
 
+    const auto compiled_begin =
+        std::chrono::steady_clock::now();
+
     result =
         encode_compiled_image(
             project,
             output.compiled);
+
+    if (telemetry != nullptr)
+        telemetry->compiled_ns = elapsed(compiled_begin);
     if (!result.ok())
         return result;
 
     try {
+        const auto roots_begin =
+            std::chrono::steady_clock::now();
+
         std::vector<source_manager_image_root> roots;
         roots.reserve(configuration.project.size());
 
         for (const auto& item : configuration.project) {
             std::string normalized;
-            result = normalize_source_path(
-                item.path,
-                normalized);
-            if (!result.ok())
-                return result;
+
+            if (item.canonical_path) {
+                // JSON configuration roots are already absolute and lexically
+                // normalized. SAVE must not repeat filesystem normalization.
+                normalized = item.path.generic_string();
+#ifdef _WIN32
+                if (normalized.size() >= 2 &&
+                    normalized[1] == ':' &&
+                    normalized[0] >= 'A' &&
+                    normalized[0] <= 'Z') {
+                    normalized[0] =
+                        static_cast<char>(
+                            normalized[0] - 'A' + 'a');
+                }
+#endif
+                if (normalized.empty())
+                    return {status_code::invalid_argument};
+            }
+            else {
+                result = normalize_source_path(
+                    item.path,
+                    normalized);
+                if (!result.ok())
+                    return result;
+            }
 
             source_id source;
             result = project.sources().find(
@@ -236,6 +288,9 @@ status freeze_project_generation(
                 {source, item.role});
         }
 
+        if (telemetry != nullptr)
+            telemetry->roots_ns = elapsed(roots_begin);
+
         source_manager_image_options options;
         options.generation = 1;
         options.roots =
@@ -247,12 +302,24 @@ status freeze_project_generation(
         options.directory_identity_index =
             change_capture->directory_index;
 
+        const auto source_manager_begin =
+            std::chrono::steady_clock::now();
+
         result = encode_source_manager_image(
             project.sources(),
             options,
             output.sources);
+
+        if (telemetry != nullptr) {
+            telemetry->source_manager_ns =
+                elapsed(source_manager_begin);
+        }
+
         if (!result.ok())
             return result;
+
+        const auto change_state_begin =
+            std::chrono::steady_clock::now();
 
         const auto native_change =
             project.generation_native_segments().change();
@@ -269,6 +336,11 @@ status freeze_project_generation(
             if (!result.ok())
                 return result;
         }
+
+        if (telemetry != nullptr) {
+            telemetry->change_state_ns =
+                elapsed(change_state_begin);
+        }
     }
     catch (const std::bad_alloc&) {
         return {status_code::not_available};
@@ -277,10 +349,72 @@ status freeze_project_generation(
         return {status_code::not_available};
     }
 
+    const auto build_cache_begin =
+        std::chrono::steady_clock::now();
+
+    build_cache_encode_telemetry build_cache_detail;
+
     result = encode_build_cache_image(
         project,
         *change_capture,
-        output.build);
+        output.build,
+        telemetry != nullptr
+            ? &build_cache_detail
+            : nullptr);
+
+    if (telemetry != nullptr) {
+        telemetry->build_cache_ns =
+            elapsed(build_cache_begin);
+        telemetry->build_cache_layout_allocate_ns =
+            build_cache_detail.layout_allocate_ns;
+        telemetry->build_cache_source_frontend_ns =
+            build_cache_detail.source_frontend_ns;
+        telemetry->build_cache_source_directory_text_ns =
+            build_cache_detail.source_directory_text_ns;
+        telemetry->build_cache_frontend_record_ranges_ns =
+            build_cache_detail.frontend_record_ranges_ns;
+        telemetry->build_cache_frontend_local_types_ns =
+            build_cache_detail.frontend_local_types_ns;
+        telemetry->build_cache_frontend_type_slots_ns =
+            build_cache_detail.frontend_type_slots_ns;
+        telemetry->build_cache_frontend_object_slots_ns =
+            build_cache_detail.frontend_object_slots_ns;
+        telemetry->build_cache_frontend_member_slots_ns =
+            build_cache_detail.frontend_member_slots_ns;
+        telemetry->build_cache_source_frontend_total_sources =
+            build_cache_detail.source_frontend_total_sources;
+        telemetry->build_cache_source_frontend_sampled_sources =
+            build_cache_detail.source_frontend_sampled_sources;
+        telemetry->build_cache_source_lookup_sample_ns =
+            build_cache_detail.source_lookup_sample_ns;
+        telemetry->build_cache_source_text_copy_sample_ns =
+            build_cache_detail.source_text_copy_sample_ns;
+        telemetry->build_cache_frontend_record_sample_ns =
+            build_cache_detail.frontend_record_sample_ns;
+        telemetry->build_cache_frontend_local_types_sample_ns =
+            build_cache_detail.frontend_local_types_sample_ns;
+        telemetry->build_cache_frontend_type_slots_sample_ns =
+            build_cache_detail.frontend_type_slots_sample_ns;
+        telemetry->build_cache_frontend_object_slots_sample_ns =
+            build_cache_detail.frontend_object_slots_sample_ns;
+        telemetry->build_cache_frontend_member_slots_sample_ns =
+            build_cache_detail.frontend_member_slots_sample_ns;
+        telemetry->build_cache_contribution_ns =
+            build_cache_detail.contribution_ns;
+        telemetry->build_cache_graph_ns =
+            build_cache_detail.graph_ns;
+        telemetry->build_cache_change_identity_ns =
+            build_cache_detail.change_identity_ns;
+        telemetry->build_cache_section_crc_ns =
+            build_cache_detail.section_crc_ns;
+        telemetry->build_cache_header_directory_ns =
+            build_cache_detail.header_directory_ns;
+        telemetry->build_cache_bind_ns =
+            build_cache_detail.bind_ns;
+        telemetry->build_cache_verify_ns =
+            build_cache_detail.verify_ns;
+    }
+
     if (!result.ok())
         return result;
 
@@ -288,6 +422,9 @@ status freeze_project_generation(
     source_manager_image_view sources;
     change_state_image_view change_state;
     build_cache_image_view build_cache;
+
+    const auto bind_begin =
+        std::chrono::steady_clock::now();
 
     result = compiled.bind(output.compiled);
     if (!result.ok())
@@ -305,16 +442,52 @@ status freeze_project_generation(
     if (!result.ok())
         return result;
 
+    if (telemetry != nullptr)
+        telemetry->bind_ns = elapsed(bind_begin);
+
     // Encoder-local validation is the integrity boundary for compiled,
     // source-manager, and build-cache images. Change-state has no equivalent
     // encoder-local full audit, so keep its validation here.
+    const auto verify_change_begin =
+        std::chrono::steady_clock::now();
+
     result = change_state.verify_contents();
+
+    if (telemetry != nullptr) {
+        telemetry->verify_change_state_ns =
+            elapsed(verify_change_begin);
+    }
+
     if (!result.ok())
         return result;
 
-    return build_cache.verify_against(
+    const auto verify_build_begin =
+        std::chrono::steady_clock::now();
+
+    result = build_cache.verify_against(
         compiled,
         sources);
+
+    if (telemetry != nullptr) {
+        telemetry->verify_build_cache_ns =
+            elapsed(verify_build_begin);
+        telemetry->internal_ns =
+            elapsed(freeze_begin);
+    }
+
+    return result;
+}
+
+status freeze_project_generation(
+    const project_context& project,
+    const project_configuration& configuration,
+    project_generation_storage& output) noexcept {
+
+    return freeze_project_generation(
+        project,
+        configuration,
+        output,
+        nullptr);
 }
 
 status freeze_project_generation(

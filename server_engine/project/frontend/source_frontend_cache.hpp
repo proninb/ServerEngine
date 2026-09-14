@@ -23,6 +23,65 @@ struct source_frontend_persistence_record final {
     std::size_t member_slots = 0;
 };
 
+struct source_frontend_persistence_summary final {
+    std::size_t frontend_count = 0;
+    std::size_t local_types = 0;
+    std::size_t type_slots = 0;
+    std::size_t object_slots = 0;
+    std::size_t member_slots = 0;
+};
+
+enum class source_frontend_persistence_storage : std::uint8_t {
+    none = 0,
+    native_interface = 1,
+    persisted_baseline = 2,
+};
+
+// Allocation-free SAVE view. Native and sparse-overlay interfaces expose
+// contiguous typed spans; untouched mmap baseline state keeps its persisted
+// representation and uses the canonical persisted accessors as a fallback.
+struct source_frontend_persistence_view final {
+    source_frontend_persistence_storage storage =
+        source_frontend_persistence_storage::none;
+    source_frontend_persistence_record record{};
+    source_interface_data_view data{};
+};
+
+// Dense G0 persistence traversal. The view keeps ownership private while
+// allowing SAVE to walk native Source interfaces directly by source_id order.
+class source_frontend_native_persistence_view final {
+public:
+    source_frontend_native_persistence_view() noexcept = default;
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return values != nullptr;
+    }
+
+    [[nodiscard]] std::size_t size() const noexcept {
+        return values != nullptr ? values->size() : 0;
+    }
+
+    [[nodiscard]] const source_interface* operator[](
+        std::size_t index) const noexcept {
+
+        if (values == nullptr || index >= values->size())
+            return nullptr;
+
+        return (*values)[index].get();
+    }
+
+private:
+    explicit source_frontend_native_persistence_view(
+        const std::vector<std::unique_ptr<source_interface>>&
+            values_value) noexcept
+        : values(&values_value) {}
+
+    const std::vector<std::unique_ptr<source_interface>>* values =
+        nullptr;
+
+    friend class source_frontend_cache;
+};
+
 // Retains Parser-visible Source interfaces between builds. A baseline-backed cache
 // keeps persisted interfaces in mmap and materializes only interfaces actually
 // reused by the affected parse closure; changed Sources live in a sparse overlay.
@@ -42,6 +101,19 @@ public:
     // Allocation-free SAVE boundary. Untouched baseline interface records are
     // read directly from the persisted Build Cache image; changed/new Sources
     // read the sparse overlay.
+    [[nodiscard]] source_frontend_native_persistence_view
+    native_persistence_view() const noexcept {
+        if (baseline_cache != nullptr)
+            return {};
+
+        return source_frontend_native_persistence_view{
+            interfaces};
+    }
+
+    [[nodiscard]] status persistence_view(
+        source_id source,
+        source_frontend_persistence_view& output) const noexcept;
+
     [[nodiscard]] status persistence_record(
         source_id source,
         source_frontend_persistence_record& output) const noexcept;
@@ -67,6 +139,12 @@ public:
         source_interface_member_slot& output) const noexcept;
 
     [[nodiscard]] std::size_t source_slots() const noexcept { return logical_source_count; }
+
+    [[nodiscard]] const source_frontend_persistence_summary&
+    persistence_summary() const noexcept {
+        return persistence_summary_value;
+    }
+
     [[nodiscard]] bool baseline_backed() const noexcept { return baseline_cache != nullptr; }
 
     [[nodiscard]] source_frontend_cache_update begin_update(bool full_reconstruction) noexcept;
@@ -103,6 +181,7 @@ private:
     std::size_t logical_source_count = 0;
     mutable std::vector<overlay_entry> overlay;
     mutable std::vector<overlay_slot> overlay_index;
+    source_frontend_persistence_summary persistence_summary_value{};
     bool complete_state = false;
 
     friend class source_frontend_cache_update;
@@ -135,6 +214,16 @@ private:
         std::unique_ptr<source_interface> interface;
     };
 
+    struct replacement_slot final {
+        source_id source{};
+        std::uint32_t position = 0;
+    };
+
+    [[nodiscard]] status ensure_replacement_index(
+        std::size_t required) noexcept;
+    [[nodiscard]] replacement* find_replacement(
+        source_id source) noexcept;
+
     source_frontend_cache_update(
         source_frontend_cache& owner_value,
         bool full_reconstruction_value) noexcept
@@ -143,6 +232,8 @@ private:
     source_frontend_cache* owner = nullptr;
     std::vector<std::unique_ptr<source_interface>> full_candidate;
     std::vector<replacement> replacements;
+    std::vector<replacement_slot> replacement_index;
+    source_frontend_persistence_summary candidate_summary{};
     std::size_t required_source_count = 0;
     bool full_reconstruction = false;
     bool prepared = false;

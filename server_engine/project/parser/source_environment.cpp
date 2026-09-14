@@ -62,9 +62,16 @@ status source_interface::initialize(
         std::vector<type_slot> new_type_slots(type_capacity);
         std::vector<object_slot> new_object_slots(object_capacity);
         std::vector<member_slot> new_member_slots(member_capacity);
+
+        std::vector<type_slot> new_persistence_type_slots;
+        std::vector<object_slot> new_persistence_object_slots;
+        std::vector<member_slot> new_persistence_member_slots;
         std::vector<const source_interface*> new_imports;
 
         new_types.reserve(type_count);
+        new_persistence_type_slots.reserve(type_count);
+        new_persistence_object_slots.reserve(facts.objects().size());
+        new_persistence_member_slots.reserve(member_count);
         new_imports.reserve(imports.size());
 
         const auto insert_type = [&](identity_ref identity) -> status {
@@ -83,8 +90,14 @@ status source_interface::initialize(
             for (;;) {
                 auto& slot = new_type_slots[position];
                 if (!slot.identity) {
-                    slot = type_slot{parent, name, identity};
+                    const type_slot value{
+                        parent,
+                        name,
+                        identity,
+                    };
+                    slot = value;
                     new_types.push_back(identity);
+                    new_persistence_type_slots.push_back(value);
                     return {};
                 }
 
@@ -130,8 +143,14 @@ status source_interface::initialize(
             for (;;) {
                 auto& slot = new_object_slots[position];
                 if (!slot.identity) {
-                    slot = object_slot{
-                        parent, name, object.identity, named_type};
+                    const object_slot value{
+                        parent,
+                        name,
+                        object.identity,
+                        named_type,
+                    };
+                    slot = value;
+                    new_persistence_object_slots.push_back(value);
                     break;
                 }
 
@@ -170,9 +189,13 @@ status source_interface::initialize(
                 for (;;) {
                     auto& slot = new_member_slots[position];
                     if (!slot.type) {
-                        slot.type = record.identity;
-                        slot.name = member.name;
-                        slot.index = member_index::from_zero_based(index);
+                        const member_slot value{
+                            record.identity,
+                            member.name,
+                            member_index::from_zero_based(index),
+                        };
+                        slot = value;
+                        new_persistence_member_slots.push_back(value);
                         break;
                     }
 
@@ -194,6 +217,14 @@ status source_interface::initialize(
         type_slots.swap(new_type_slots);
         object_slots.swap(new_object_slots);
         member_slots.swap(new_member_slots);
+
+        persistence_type_slots.swap(
+            new_persistence_type_slots);
+        persistence_object_slots.swap(
+            new_persistence_object_slots);
+        persistence_member_slots.swap(
+            new_persistence_member_slots);
+
         imported_interfaces.swap(new_imports);
         return {};
     }
@@ -221,32 +252,162 @@ status source_interface::initialize_persisted(
         return {status_code::not_found};
 
     try {
-        std::vector<identity_ref> new_types(persisted.local_types.count);
-        std::vector<type_slot> new_type_slots(persisted.type_slots.count);
-        std::vector<object_slot> new_object_slots(persisted.object_slots.count);
-        std::vector<member_slot> new_member_slots(persisted.member_slots.count);
+        const auto type_capacity =
+            capacity_for(persisted.type_slots.count);
+        const auto object_capacity =
+            capacity_for(persisted.object_slots.count);
+        const auto member_capacity =
+            capacity_for(persisted.member_slots.count);
+
+        if (type_capacity == 0 ||
+            object_capacity == 0 ||
+            member_capacity == 0) {
+            return {status_code::not_available};
+        }
+
+        std::vector<identity_ref> new_types(
+            persisted.local_types.count);
+        std::vector<type_slot> new_type_slots(type_capacity);
+        std::vector<object_slot> new_object_slots(object_capacity);
+        std::vector<member_slot> new_member_slots(member_capacity);
+
+        std::vector<type_slot> new_persistence_type_slots;
+        std::vector<object_slot> new_persistence_object_slots;
+        std::vector<member_slot> new_persistence_member_slots;
         std::vector<const source_interface*> new_imports;
+
+        new_persistence_type_slots.reserve(
+            persisted.type_slots.count);
+        new_persistence_object_slots.reserve(
+            persisted.object_slots.count);
+        new_persistence_member_slots.reserve(
+            persisted.member_slots.count);
         new_imports.reserve(imports.size());
 
         for (std::size_t index = 0; index < new_types.size(); ++index) {
-            result = cache.frontend_local_type(source, index, new_types[index]);
-            if (!result.ok())
-                return result;
+            result = cache.frontend_local_type(
+                source,
+                index,
+                new_types[index]);
+            if (!result.ok() || !new_types[index])
+                return {status_code::artifact_corrupt};
         }
-        for (std::size_t index = 0; index < new_type_slots.size(); ++index) {
-            result = cache.frontend_type_slot(source, index, new_type_slots[index]);
-            if (!result.ok())
-                return result;
+
+        const auto type_mask = new_type_slots.size() - 1;
+        for (std::size_t index = 0;
+             index < persisted.type_slots.count;
+             ++index) {
+
+            type_slot value;
+            result = cache.frontend_type_slot(
+                source,
+                index,
+                value);
+            if (!result.ok() ||
+                !value.parent ||
+                !value.name ||
+                !value.identity) {
+                return {status_code::artifact_corrupt};
+            }
+
+            auto position =
+                static_cast<std::size_t>(
+                    binding_hash(value.parent, value.name)) &
+                type_mask;
+
+            for (;;) {
+                auto& slot = new_type_slots[position];
+                if (!slot.identity) {
+                    slot = value;
+                    new_persistence_type_slots.push_back(value);
+                    break;
+                }
+
+                if (slot.parent == value.parent &&
+                    slot.name == value.name) {
+                    return {status_code::artifact_corrupt};
+                }
+
+                position = (position + 1) & type_mask;
+            }
         }
-        for (std::size_t index = 0; index < new_object_slots.size(); ++index) {
-            result = cache.frontend_object_slot(source, index, new_object_slots[index]);
-            if (!result.ok())
-                return result;
+
+        const auto object_mask = new_object_slots.size() - 1;
+        for (std::size_t index = 0;
+             index < persisted.object_slots.count;
+             ++index) {
+
+            object_slot value;
+            result = cache.frontend_object_slot(
+                source,
+                index,
+                value);
+            if (!result.ok() ||
+                !value.parent ||
+                !value.name ||
+                !value.identity) {
+                return {status_code::artifact_corrupt};
+            }
+
+            auto position =
+                static_cast<std::size_t>(
+                    binding_hash(value.parent, value.name)) &
+                object_mask;
+
+            for (;;) {
+                auto& slot = new_object_slots[position];
+                if (!slot.identity) {
+                    slot = value;
+                    new_persistence_object_slots.push_back(value);
+                    break;
+                }
+
+                if (slot.parent == value.parent &&
+                    slot.name == value.name) {
+                    return {status_code::artifact_corrupt};
+                }
+
+                position = (position + 1) & object_mask;
+            }
         }
-        for (std::size_t index = 0; index < new_member_slots.size(); ++index) {
-            result = cache.frontend_member_slot(source, index, new_member_slots[index]);
-            if (!result.ok())
-                return result;
+
+        const auto member_mask = new_member_slots.size() - 1;
+        for (std::size_t index = 0;
+             index < persisted.member_slots.count;
+             ++index) {
+
+            member_slot value;
+            result = cache.frontend_member_slot(
+                source,
+                index,
+                value);
+            if (!result.ok() ||
+                !value.type ||
+                !value.name ||
+                !value.index) {
+                return {status_code::artifact_corrupt};
+            }
+
+            auto position =
+                static_cast<std::size_t>(
+                    binding_hash(value.type, value.name)) &
+                member_mask;
+
+            for (;;) {
+                auto& slot = new_member_slots[position];
+                if (!slot.type) {
+                    slot = value;
+                    new_persistence_member_slots.push_back(value);
+                    break;
+                }
+
+                if (slot.type == value.type &&
+                    slot.name == value.name) {
+                    return {status_code::artifact_corrupt};
+                }
+
+                position = (position + 1) & member_mask;
+            }
         }
 
         for (const auto* imported : imports) {
@@ -259,6 +420,14 @@ status source_interface::initialize_persisted(
         type_slots.swap(new_type_slots);
         object_slots.swap(new_object_slots);
         member_slots.swap(new_member_slots);
+
+        persistence_type_slots.swap(
+            new_persistence_type_slots);
+        persistence_object_slots.swap(
+            new_persistence_object_slots);
+        persistence_member_slots.swap(
+            new_persistence_member_slots);
+
         imported_interfaces.swap(new_imports);
         return {};
     }
@@ -269,6 +438,7 @@ status source_interface::initialize_persisted(
         return {status_code::not_available};
     }
 }
+
 
 identity_ref source_interface::find_type(
     identity_ref scope,

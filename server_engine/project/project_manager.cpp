@@ -1041,6 +1041,103 @@ status project_manager::save(
 
     output = {};
 
+    const auto save_begin =
+        std::chrono::steady_clock::now();
+
+    std::uint64_t configuration_token_ns = 0;
+    std::uint64_t configuration_read_ns = 0;
+    std::uint64_t configuration_parse_ns = 0;
+    std::uint64_t fingerprint_ns = 0;
+    std::uint64_t generation_freeze_ns = 0;
+    project_generation_freeze_telemetry generation_freeze_detail;
+
+    const auto publish_save_telemetry = [&]() noexcept {
+        output.telemetry.configuration_token_ns =
+            configuration_token_ns;
+        output.telemetry.configuration_read_ns =
+            configuration_read_ns;
+        output.telemetry.configuration_parse_ns =
+            configuration_parse_ns;
+        output.telemetry.fingerprint_ns =
+            fingerprint_ns;
+        output.telemetry.generation_freeze_ns =
+            generation_freeze_ns;
+        output.telemetry.generation_freeze_internal_ns =
+            generation_freeze_detail.internal_ns;
+        output.telemetry.generation_freeze_materialize_change_ns =
+            generation_freeze_detail.materialize_change_ns;
+        output.telemetry.generation_freeze_compiled_ns =
+            generation_freeze_detail.compiled_ns;
+        output.telemetry.generation_freeze_roots_ns =
+            generation_freeze_detail.roots_ns;
+        output.telemetry.generation_freeze_source_manager_ns =
+            generation_freeze_detail.source_manager_ns;
+        output.telemetry.generation_freeze_change_state_ns =
+            generation_freeze_detail.change_state_ns;
+        output.telemetry.generation_freeze_build_cache_ns =
+            generation_freeze_detail.build_cache_ns;
+        output.telemetry.generation_freeze_build_cache_layout_allocate_ns =
+            generation_freeze_detail.build_cache_layout_allocate_ns;
+        output.telemetry.generation_freeze_build_cache_source_frontend_ns =
+            generation_freeze_detail.build_cache_source_frontend_ns;
+        output.telemetry.generation_freeze_build_cache_source_directory_text_ns =
+            generation_freeze_detail.build_cache_source_directory_text_ns;
+        output.telemetry.generation_freeze_build_cache_frontend_record_ranges_ns =
+            generation_freeze_detail.build_cache_frontend_record_ranges_ns;
+        output.telemetry.generation_freeze_build_cache_frontend_local_types_ns =
+            generation_freeze_detail.build_cache_frontend_local_types_ns;
+        output.telemetry.generation_freeze_build_cache_frontend_type_slots_ns =
+            generation_freeze_detail.build_cache_frontend_type_slots_ns;
+        output.telemetry.generation_freeze_build_cache_frontend_object_slots_ns =
+            generation_freeze_detail.build_cache_frontend_object_slots_ns;
+        output.telemetry.generation_freeze_build_cache_frontend_member_slots_ns =
+            generation_freeze_detail.build_cache_frontend_member_slots_ns;
+        output.telemetry.generation_freeze_build_cache_source_frontend_total_sources =
+            generation_freeze_detail.build_cache_source_frontend_total_sources;
+        output.telemetry.generation_freeze_build_cache_source_frontend_sampled_sources =
+            generation_freeze_detail.build_cache_source_frontend_sampled_sources;
+        output.telemetry.generation_freeze_build_cache_source_lookup_sample_ns =
+            generation_freeze_detail.build_cache_source_lookup_sample_ns;
+        output.telemetry.generation_freeze_build_cache_source_text_copy_sample_ns =
+            generation_freeze_detail.build_cache_source_text_copy_sample_ns;
+        output.telemetry.generation_freeze_build_cache_frontend_record_sample_ns =
+            generation_freeze_detail.build_cache_frontend_record_sample_ns;
+        output.telemetry.generation_freeze_build_cache_frontend_local_types_sample_ns =
+            generation_freeze_detail.build_cache_frontend_local_types_sample_ns;
+        output.telemetry.generation_freeze_build_cache_frontend_type_slots_sample_ns =
+            generation_freeze_detail.build_cache_frontend_type_slots_sample_ns;
+        output.telemetry.generation_freeze_build_cache_frontend_object_slots_sample_ns =
+            generation_freeze_detail.build_cache_frontend_object_slots_sample_ns;
+        output.telemetry.generation_freeze_build_cache_frontend_member_slots_sample_ns =
+            generation_freeze_detail.build_cache_frontend_member_slots_sample_ns;
+        output.telemetry.generation_freeze_build_cache_contribution_ns =
+            generation_freeze_detail.build_cache_contribution_ns;
+        output.telemetry.generation_freeze_build_cache_graph_ns =
+            generation_freeze_detail.build_cache_graph_ns;
+        output.telemetry.generation_freeze_build_cache_change_identity_ns =
+            generation_freeze_detail.build_cache_change_identity_ns;
+        output.telemetry.generation_freeze_build_cache_section_crc_ns =
+            generation_freeze_detail.build_cache_section_crc_ns;
+        output.telemetry.generation_freeze_build_cache_header_directory_ns =
+            generation_freeze_detail.build_cache_header_directory_ns;
+        output.telemetry.generation_freeze_build_cache_bind_ns =
+            generation_freeze_detail.build_cache_bind_ns;
+        output.telemetry.generation_freeze_build_cache_verify_ns =
+            generation_freeze_detail.build_cache_verify_ns;
+        output.telemetry.generation_freeze_bind_ns =
+            generation_freeze_detail.bind_ns;
+        output.telemetry.generation_freeze_verify_change_state_ns =
+            generation_freeze_detail.verify_change_state_ns;
+        output.telemetry.generation_freeze_verify_build_cache_ns =
+            generation_freeze_detail.verify_build_cache_ns;
+        output.telemetry.save_total_ns =
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<
+                    std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() -
+                        save_begin).count());
+    };
+
     project_access access;
     if (!acquire(access).ok() || !access)
         return {status_code::invalid_state};
@@ -1101,6 +1198,7 @@ status project_manager::save(
                 }
 
                 output.bytes_written = 0;
+                publish_save_telemetry();
                 return {};
             }
 
@@ -1116,10 +1214,18 @@ status project_manager::save(
     }
 
     file_change_token configuration_change_token;
+    const auto configuration_token_begin =
+        std::chrono::steady_clock::now();
     const auto token_result =
         capture_file_change_token(
             project->configuration_path(),
             configuration_change_token);
+    configuration_token_ns =
+        static_cast<std::uint64_t>(
+            std::chrono::duration_cast<
+                std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() -
+                    configuration_token_begin).count());
 
     if (!token_result.ok() &&
         token_result.code != status_code::not_found) {
@@ -1127,11 +1233,19 @@ status project_manager::save(
     }
 
     file_snapshot configuration_file;
+    const auto configuration_read_begin =
+        std::chrono::steady_clock::now();
     const auto acquisition =
         acquire_file_snapshot(
             project->configuration_path(),
             std::nullopt,
             configuration_file);
+    configuration_read_ns =
+        static_cast<std::uint64_t>(
+            std::chrono::duration_cast<
+                std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() -
+                    configuration_read_begin).count());
 
     if (acquisition !=
         file_snapshot_result::acquired) {
@@ -1151,19 +1265,37 @@ status project_manager::save(
 
     diagnostic_buffer configuration_diagnostics;
     project_configuration configuration;
+
+    const auto configuration_parse_begin =
+        std::chrono::steady_clock::now();
     auto result = load_project_configuration(
         configuration_file.bytes,
         project->configuration_path(),
         operation_id{},
         configuration_diagnostics,
         configuration);
+    configuration_parse_ns =
+        static_cast<std::uint64_t>(
+            std::chrono::duration_cast<
+                std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() -
+                    configuration_parse_begin).count());
+
     if (!result.ok())
         return result;
 
     baseline_fingerprint fingerprint;
+    const auto fingerprint_begin =
+        std::chrono::steady_clock::now();
     result = make_project_baseline_fingerprint(
         configuration,
         fingerprint);
+    fingerprint_ns =
+        static_cast<std::uint64_t>(
+            std::chrono::duration_cast<
+                std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() -
+                    fingerprint_begin).count());
     if (!result.ok())
         return result;
 
@@ -1243,15 +1375,27 @@ status project_manager::save(
         }
 
         output.bytes_written = 0;
+        publish_save_telemetry();
         return {};
     }
 
     if (project->construction_backed()) {
         project_generation_storage generation;
+
+        const auto generation_freeze_begin =
+            std::chrono::steady_clock::now();
         result = freeze_project_generation(
                 *project,
                 configuration,
-                generation);
+                generation,
+                &generation_freeze_detail);
+        generation_freeze_ns =
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<
+                    std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() -
+                        generation_freeze_begin).count());
+
         if (!result.ok())
             return result;
 
@@ -1260,6 +1404,8 @@ status project_manager::save(
             configuration_state,
             generation.segments(),
             output);
+
+        publish_save_telemetry();
 
         if (result.ok())
             project->remember_persisted_transaction(output.transaction);
@@ -1314,6 +1460,8 @@ status project_manager::save(
         configuration_state,
         active.segments(),
         output);
+
+    publish_save_telemetry();
 
     if (result.ok())
         project->remember_persisted_transaction(output.transaction);

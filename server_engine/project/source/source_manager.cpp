@@ -294,7 +294,9 @@ source_manager::source_manager(
     const build_cache_image_view& baseline_cache_value) noexcept
     : baseline_sources(&baseline_sources_value),
       baseline_cache(&baseline_cache_value),
-      baseline_source_count(baseline_sources_value.source_count()) {
+      baseline_source_count(baseline_sources_value.source_count()),
+      persistence_text_bytes_value(
+          baseline_cache_value.source_bytes_count()) {
 
     records.bind_baseline(
         this,
@@ -1740,6 +1742,57 @@ status source_manager_update::prepare_publish() noexcept {
         }
     }
 
+    prepared_text_bytes =
+        owner->persistence_text_bytes_value;
+
+    for (const auto& item : candidates) {
+        if (!item.has_snapshot)
+            continue;
+
+        std::uint64_t previous_bytes = 0;
+        if (static_cast<std::size_t>(item.source.value()) <=
+            owner->records.size()) {
+
+            const auto previous =
+                owner->current(item.source);
+            if (previous) {
+                const auto size =
+                    previous.observation().size;
+                if (size >
+                    (std::numeric_limits<std::uint64_t>::max)()) {
+                    return {status_code::not_available};
+                }
+                previous_bytes =
+                    static_cast<std::uint64_t>(size);
+            }
+        }
+
+        if (previous_bytes > prepared_text_bytes)
+            return {status_code::initialization_failed};
+
+        prepared_text_bytes -= previous_bytes;
+
+        if (item.snapshot) {
+            const auto size =
+                item.snapshot.observation().size;
+            if (size >
+                (std::numeric_limits<std::uint64_t>::max)()) {
+                return {status_code::not_available};
+            }
+
+            const auto current_bytes =
+                static_cast<std::uint64_t>(size);
+
+            if (prepared_text_bytes >
+                (std::numeric_limits<std::uint64_t>::max)() -
+                    current_bytes) {
+                return {status_code::not_available};
+            }
+
+            prepared_text_bytes += current_bytes;
+        }
+    }
+
     result = owner->generation_storage_value.prepare_publish(
         new_sources.size(),
         additional_forward_edges,
@@ -1820,6 +1873,10 @@ void source_manager_update::publish_prepared() noexcept {
         for (const auto& insertion : prepared_path_insertions)
             owner->path_index[insertion.position] = insertion.slot;
     }
+
+    owner->persistence_text_bytes_value =
+        prepared_text_bytes;
+
     committed = true;
 }
 

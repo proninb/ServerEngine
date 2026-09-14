@@ -82,6 +82,11 @@ std::atomic<std::uint64_t> transaction_counter{0};
             end - begin).count());
 }
 
+struct durable_write_telemetry final {
+    std::uint64_t write_ns = 0;
+    std::uint64_t flush_ns = 0;
+};
+
 void write_u32(std::array<std::byte, manifest_size>& output, std::size_t offset, std::uint32_t value) noexcept {
     for (std::size_t byte = 0; byte < 4; ++byte)
         output[offset + byte] = static_cast<std::byte>((value >> (byte * 8)) & 0xffu);
@@ -294,7 +299,11 @@ void write_u64(std::array<std::byte, manifest_size>& output, std::size_t offset,
     const std::filesystem::path& path,
     const project_generation_segment& first,
     const project_generation_segment& second =
-        project_generation_segment{}) noexcept {
+        project_generation_segment{},
+    durable_write_telemetry* telemetry = nullptr) noexcept {
+
+    if (telemetry != nullptr)
+        *telemetry = {};
 #if defined(_WIN32)
     const auto handle = ::CreateFileW(
         path.c_str(),
@@ -307,6 +316,9 @@ void write_u64(std::array<std::byte, manifest_size>& output, std::size_t offset,
 
     if (handle == INVALID_HANDLE_VALUE)
         return {status_code::io_failed};
+
+    const auto write_begin =
+        std::chrono::steady_clock::now();
 
     const project_generation_segment* segments[]{
         &first,
@@ -351,8 +363,25 @@ void write_u64(std::array<std::byte, manifest_size>& output, std::size_t offset,
         }
     }
 
+    if (telemetry != nullptr) {
+        telemetry->write_ns =
+            elapsed_ns(
+                write_begin,
+                std::chrono::steady_clock::now());
+    }
+
+    const auto flush_begin =
+        std::chrono::steady_clock::now();
     const auto flushed =
         ::FlushFileBuffers(handle) != 0;
+
+    if (telemetry != nullptr) {
+        telemetry->flush_ns =
+            elapsed_ns(
+                flush_begin,
+                std::chrono::steady_clock::now());
+    }
+
     const auto closed =
         ::CloseHandle(handle) != 0;
 
@@ -368,6 +397,9 @@ void write_u64(std::array<std::byte, manifest_size>& output, std::size_t offset,
 
     if (handle < 0)
         return {status_code::io_failed};
+
+    const auto write_begin =
+        std::chrono::steady_clock::now();
 
     const project_generation_segment* segments[]{
         &first,
@@ -409,8 +441,25 @@ void write_u64(std::array<std::byte, manifest_size>& output, std::size_t offset,
         }
     }
 
+    if (telemetry != nullptr) {
+        telemetry->write_ns =
+            elapsed_ns(
+                write_begin,
+                std::chrono::steady_clock::now());
+    }
+
+    const auto flush_begin =
+        std::chrono::steady_clock::now();
     const auto synced =
         ::fsync(handle) == 0;
+
+    if (telemetry != nullptr) {
+        telemetry->flush_ns =
+            elapsed_ns(
+                flush_begin,
+                std::chrono::steady_clock::now());
+    }
+
     const auto closed =
         ::close(handle) == 0;
 
@@ -423,12 +472,14 @@ void write_u64(std::array<std::byte, manifest_size>& output, std::size_t offset,
 [[nodiscard]] status durable_write_file(
     const std::filesystem::path& path,
     std::span<const std::byte> first,
-    std::span<const std::byte> second = {}) noexcept {
+    std::span<const std::byte> second = {},
+    durable_write_telemetry* telemetry = nullptr) noexcept {
 
     return durable_write_file(
         path,
         project_generation_segment{first},
-        project_generation_segment{second});
+        project_generation_segment{second},
+        telemetry);
 }
 
 [[nodiscard]] status flush_directory(const std::filesystem::path& path) noexcept {
@@ -2813,6 +2864,27 @@ status baseline_store::commit(
 
 
     output = {};
+    const auto commit_begin =
+        std::chrono::steady_clock::now();
+
+    durable_write_telemetry io;
+
+    const auto record_transaction_io =
+        [&](const durable_write_telemetry& value) noexcept {
+            output.telemetry.transaction_write_ns +=
+                value.write_ns;
+            output.telemetry.transaction_flush_ns +=
+                value.flush_ns;
+        };
+
+    const auto record_directory_flush =
+        [&](std::chrono::steady_clock::time_point begin) noexcept {
+            output.telemetry.directory_flush_ns +=
+                elapsed_ns(
+                    begin,
+                    std::chrono::steady_clock::now());
+        };
+
     try {
         const auto root = root_path();
         std::error_code error;
@@ -2845,7 +2917,10 @@ status baseline_store::commit(
         auto result =
             durable_write_file(
                 directory / compiled_name,
-                compiled);
+                compiled,
+                {},
+                &io);
+        record_transaction_io(io);
         if (!result.ok()) {
             cleanup_failed_transaction();
             return {status_code::persistence_failed};
@@ -2873,10 +2948,14 @@ status baseline_store::commit(
             ? durable_write_file(
                 directory / source_manager_name,
                 source_manager,
-                build_cache)
+                build_cache,
+                &io)
             : durable_write_file(
                 directory / source_manager_name,
-                source_manager);
+                source_manager,
+                {},
+                &io);
+        record_transaction_io(io);
 
         if (!result.ok()) {
             cleanup_failed_transaction();
@@ -2885,7 +2964,10 @@ status baseline_store::commit(
         if (!change_state.empty()) {
             result = durable_write_file(
                 directory / change_state_name,
-                change_state);
+                change_state,
+                {},
+                &io);
+            record_transaction_io(io);
             if (!result.ok()) {
                 cleanup_failed_transaction();
                 return {status_code::persistence_failed};
@@ -2898,7 +2980,10 @@ status baseline_store::commit(
         if (!pack_build_state) {
             result = durable_write_file(
                 directory / build_cache_name,
-                build_cache);
+                build_cache,
+                {},
+                &io);
+            record_transaction_io(io);
             if (!result.ok()) {
                 cleanup_failed_transaction();
                 return {status_code::persistence_failed};
@@ -2918,17 +3003,29 @@ status baseline_store::commit(
             cleanup_failed_transaction();
             return result;
         }
-        result = durable_write_file(directory / manifest_name, manifest);
+        result = durable_write_file(
+            directory / manifest_name,
+            manifest,
+            {},
+            &io);
+        record_transaction_io(io);
         if (!result.ok()) {
             cleanup_failed_transaction();
             return {status_code::persistence_failed};
         }
+        auto directory_flush_begin =
+            std::chrono::steady_clock::now();
         result = flush_directory(directory);
+        record_directory_flush(directory_flush_begin);
         if (!result.ok()) {
             cleanup_failed_transaction();
             return {status_code::persistence_failed};
         }
+
+        directory_flush_begin =
+            std::chrono::steady_clock::now();
         result = flush_directory(root);
+        record_directory_flush(directory_flush_begin);
         if (!result.ok()) {
             cleanup_failed_transaction();
             return {status_code::persistence_failed};
@@ -2950,12 +3047,29 @@ status baseline_store::commit(
                 selector_bytes.size()};
         const auto selector_temp = root / ("CURRENT.tmp-" + std::to_string(process_id()) + "-" +
             std::to_string(transaction_counter.fetch_add(1, std::memory_order_relaxed)));
-        result = durable_write_file(selector_temp, selector);
+        result = durable_write_file(
+            selector_temp,
+            selector,
+            {},
+            &io);
+        output.telemetry.current_write_ns +=
+            io.write_ns;
+        output.telemetry.current_flush_ns +=
+            io.flush_ns;
         if (!result.ok()) {
             cleanup_failed_transaction();
             return {status_code::persistence_failed};
         }
-        result = atomic_replace(selector_temp, root / current_name);
+
+        const auto replace_begin =
+            std::chrono::steady_clock::now();
+        result = atomic_replace(
+            selector_temp,
+            root / current_name);
+        output.telemetry.current_replace_ns =
+            elapsed_ns(
+                replace_begin,
+                std::chrono::steady_clock::now());
         if (!result.ok()) {
             std::filesystem::remove(selector_temp, error);
             cleanup_failed_transaction();
@@ -2964,7 +3078,10 @@ status baseline_store::commit(
         // CURRENT replacement is the commit point. After it succeeds the new
         // transaction is authoritative; directory flush is a durability barrier,
         // not a reason to report the already-committed operation as failed.
+        directory_flush_begin =
+            std::chrono::steady_clock::now();
         (void)flush_directory(root);
+        record_directory_flush(directory_flush_begin);
 
         output.transaction = transaction;
         output.bytes_written =
@@ -2974,6 +3091,11 @@ status baseline_store::commit(
             static_cast<std::uint64_t>(build_cache.size()) +
             manifest_size +
             static_cast<std::uint64_t>(selector_bytes.size());
+
+        output.telemetry.store_commit_ns =
+            elapsed_ns(
+                commit_begin,
+                std::chrono::steady_clock::now());
         return {};
     }
     catch (const std::bad_alloc&) {

@@ -38,6 +38,72 @@ namespace {
     return std::bit_ceil(minimum);
 }
 
+[[nodiscard]] source_frontend_persistence_record
+persistence_record_of(
+    const source_interface* value) noexcept {
+
+    source_frontend_persistence_record output;
+    if (value == nullptr)
+        return output;
+
+    const auto data = value->persistence_data_view();
+    output.present = true;
+    output.local_types = data.local_types.size();
+    output.type_slots = data.type_slots.size();
+    output.object_slots = data.object_slots.size();
+    output.member_slots = data.member_slots.size();
+    return output;
+}
+
+[[nodiscard]] bool add_persistence_record(
+    source_frontend_persistence_summary& summary,
+    const source_frontend_persistence_record& value) noexcept {
+
+    if (!value.present)
+        return true;
+
+    const auto maximum =
+        (std::numeric_limits<std::size_t>::max)();
+
+    if (summary.frontend_count == maximum ||
+        summary.local_types > maximum - value.local_types ||
+        summary.type_slots > maximum - value.type_slots ||
+        summary.object_slots > maximum - value.object_slots ||
+        summary.member_slots > maximum - value.member_slots) {
+        return false;
+    }
+
+    ++summary.frontend_count;
+    summary.local_types += value.local_types;
+    summary.type_slots += value.type_slots;
+    summary.object_slots += value.object_slots;
+    summary.member_slots += value.member_slots;
+    return true;
+}
+
+[[nodiscard]] bool subtract_persistence_record(
+    source_frontend_persistence_summary& summary,
+    const source_frontend_persistence_record& value) noexcept {
+
+    if (!value.present)
+        return true;
+
+    if (summary.frontend_count == 0 ||
+        summary.local_types < value.local_types ||
+        summary.type_slots < value.type_slots ||
+        summary.object_slots < value.object_slots ||
+        summary.member_slots < value.member_slots) {
+        return false;
+    }
+
+    --summary.frontend_count;
+    summary.local_types -= value.local_types;
+    summary.type_slots -= value.type_slots;
+    summary.object_slots -= value.object_slots;
+    summary.member_slots -= value.member_slots;
+    return true;
+}
+
 } // namespace
 
 source_frontend_cache::source_frontend_cache(
@@ -47,6 +113,12 @@ source_frontend_cache::source_frontend_cache(
       baseline_sources(&baseline_sources_value),
       baseline_source_count(baseline_sources_value.source_count()),
       logical_source_count(baseline_sources_value.source_count()),
+      persistence_summary_value{
+          baseline_cache_value.frontend_count(),
+          baseline_cache_value.frontend_local_type_count(),
+          baseline_cache_value.frontend_type_slot_count(),
+          baseline_cache_value.frontend_object_slot_count(),
+          baseline_cache_value.frontend_member_slot_count()},
       complete_state(
           baseline_cache_value.frontend_complete() &&
           baseline_cache_value.source_count() == baseline_sources_value.source_count()) {}
@@ -221,47 +293,83 @@ const source_interface* source_frontend_cache::interface(source_id source) const
     return materialize_baseline(source);
 }
 
-status source_frontend_cache::persistence_record(
+status source_frontend_cache::persistence_view(
     source_id source,
-    source_frontend_persistence_record& output) const noexcept {
+    source_frontend_persistence_view& output) const noexcept {
 
     output = {};
-    if (!source || static_cast<std::size_t>(source.value()) > logical_source_count)
+    if (!source ||
+        static_cast<std::size_t>(source.value()) > logical_source_count) {
         return {status_code::not_found};
+    }
 
     const source_interface* value = nullptr;
+
     if (baseline_cache == nullptr) {
-        const auto index = static_cast<std::size_t>(source.value() - 1);
-        value = index < interfaces.size() ? interfaces[index].get() : nullptr;
-    } else if (const auto* item = find_overlay(source); item != nullptr) {
+        const auto index =
+            static_cast<std::size_t>(source.value() - 1);
+        value = index < interfaces.size()
+            ? interfaces[index].get()
+            : nullptr;
+    }
+    else if (const auto* item = find_overlay(source);
+             item != nullptr) {
+
         if (!item->resolved)
             return {status_code::invalid_state};
+
         value = item->interface.get();
-    } else if (static_cast<std::size_t>(source.value()) <= baseline_source_count) {
+    }
+    else if (static_cast<std::size_t>(source.value()) <=
+             baseline_source_count) {
+
         build_cache_source_record persisted;
-        const auto result = baseline_cache->source(source, persisted);
+        const auto result =
+            baseline_cache->source(source, persisted);
         if (!result.ok())
             return result;
+
         if (!persisted.frontend_present)
             return {};
 
-        output.present = true;
-        output.local_types = persisted.local_types.count;
-        output.type_slots = persisted.type_slots.count;
-        output.object_slots = persisted.object_slots.count;
-        output.member_slots = persisted.member_slots.count;
+        output.storage =
+            source_frontend_persistence_storage::persisted_baseline;
+        output.record.present = true;
+        output.record.local_types = persisted.local_types.count;
+        output.record.type_slots = persisted.type_slots.count;
+        output.record.object_slots = persisted.object_slots.count;
+        output.record.member_slots = persisted.member_slots.count;
         return {};
     }
 
     if (value == nullptr)
         return {};
 
-    const auto data = value->data_view();
-    output.present = true;
-    output.local_types = data.local_types.size();
-    output.type_slots = data.type_slots.size();
-    output.object_slots = data.object_slots.size();
-    output.member_slots = data.member_slots.size();
+    const auto data = value->persistence_data_view();
+    output.storage =
+        source_frontend_persistence_storage::native_interface;
+    output.record.present = true;
+    output.record.local_types = data.local_types.size();
+    output.record.type_slots = data.type_slots.size();
+    output.record.object_slots = data.object_slots.size();
+    output.record.member_slots = data.member_slots.size();
+    output.data = data;
+    return {};
+}
+
+status source_frontend_cache::persistence_record(
+    source_id source,
+    source_frontend_persistence_record& output) const noexcept {
+
+    source_frontend_persistence_view view;
+    const auto result = persistence_view(source, view);
+
+    if (!result.ok()) {
+        output = {};
+        return result;
+    }
+
+    output = view.record;
     return {};
 }
 
@@ -407,6 +515,7 @@ void source_frontend_cache::invalidate() noexcept {
     interfaces.clear();
     overlay.clear();
     overlay_index.clear();
+    persistence_summary_value = {};
     complete_state = false;
 }
 
@@ -419,11 +528,102 @@ source_frontend_cache_update::source_frontend_cache_update(
     : owner(std::exchange(other.owner, nullptr)),
       full_candidate(std::move(other.full_candidate)),
       replacements(std::move(other.replacements)),
+      replacement_index(std::move(other.replacement_index)),
+      candidate_summary(other.candidate_summary),
       required_source_count(other.required_source_count),
       full_reconstruction(other.full_reconstruction),
       prepared(other.prepared),
       published(other.published),
       failure(other.failure) {}
+
+status source_frontend_cache_update::ensure_replacement_index(
+    std::size_t required) noexcept {
+
+    if (required == 0)
+        return {};
+
+    if (!replacement_index.empty() &&
+        required <= replacement_index.size() / 2) {
+        return {};
+    }
+
+    const auto capacity =
+        overlay_capacity(required);
+    if (capacity == 0)
+        return {status_code::not_available};
+
+    try {
+        std::vector<replacement_slot> replacement_slots(
+            capacity);
+
+        const auto mask = capacity - 1;
+        for (std::uint32_t index = 0;
+             index < replacements.size();
+             ++index) {
+
+            const auto source =
+                replacements[index].source;
+            auto position =
+                static_cast<std::size_t>(
+                    mix64(source.value())) & mask;
+
+            while (replacement_slots[position].source)
+                position = (position + 1) & mask;
+
+            replacement_slots[position] = {
+                source,
+                index + 1,
+            };
+        }
+
+        replacement_index.swap(replacement_slots);
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+}
+
+source_frontend_cache_update::replacement*
+source_frontend_cache_update::find_replacement(
+    source_id source) noexcept {
+
+    if (!source || replacement_index.empty())
+        return nullptr;
+
+    const auto mask =
+        replacement_index.size() - 1;
+    auto position =
+        static_cast<std::size_t>(
+            mix64(source.value())) & mask;
+
+    for (std::size_t probe = 0;
+         probe < replacement_index.size();
+         ++probe) {
+
+        const auto& slot =
+            replacement_index[position];
+
+        if (!slot.source)
+            return nullptr;
+
+        if (slot.source == source) {
+            const auto index =
+                static_cast<std::size_t>(
+                    slot.position - 1);
+            return index < replacements.size()
+                ? &replacements[index]
+                : nullptr;
+        }
+
+        position = (position + 1) & mask;
+    }
+
+    return nullptr;
+}
 
 status source_frontend_cache_update::replace(
     source_id source,
@@ -438,12 +638,68 @@ status source_frontend_cache_update::replace(
         if (full_reconstruction) {
             if (owner->baseline_backed())
                 return {status_code::invalid_state};
-            const auto required = static_cast<std::size_t>(source.value());
+
+            const auto required =
+                static_cast<std::size_t>(source.value());
+
             if (full_candidate.size() < required)
                 full_candidate.resize(required);
-            full_candidate[required - 1] = std::move(interface_value);
-        } else {
-            replacements.push_back(replacement{source, std::move(interface_value)});
+
+            auto next_summary = candidate_summary;
+
+            if (!subtract_persistence_record(
+                    next_summary,
+                    persistence_record_of(
+                        full_candidate[required - 1].get())) ||
+                !add_persistence_record(
+                    next_summary,
+                    persistence_record_of(
+                        interface_value.get()))) {
+                failure = {status_code::not_available};
+                return failure;
+            }
+
+            full_candidate[required - 1] =
+                std::move(interface_value);
+            candidate_summary = next_summary;
+        }
+        else {
+            auto result =
+                ensure_replacement_index(
+                    replacements.size() + 1);
+            if (!result.ok()) {
+                failure = result;
+                return failure;
+            }
+
+            if (auto* existing =
+                    find_replacement(source);
+                existing != nullptr) {
+
+                existing->interface =
+                    std::move(interface_value);
+                return {};
+            }
+
+            replacements.push_back(
+                replacement{
+                    source,
+                    std::move(interface_value)});
+
+            const auto mask =
+                replacement_index.size() - 1;
+            auto position =
+                static_cast<std::size_t>(
+                    mix64(source.value())) & mask;
+
+            while (replacement_index[position].source)
+                position = (position + 1) & mask;
+
+            replacement_index[position] = {
+                source,
+                static_cast<std::uint32_t>(
+                    replacements.size()),
+            };
         }
         return {};
     }
@@ -468,6 +724,80 @@ status source_frontend_cache_update::prepare_publish(
 
     try {
         required_source_count = required_count;
+
+        if (!full_reconstruction) {
+            candidate_summary =
+                owner->persistence_summary_value;
+
+            for (const auto& item : replacements) {
+                source_frontend_persistence_record previous;
+                auto summary_result =
+                    owner->persistence_record(
+                        item.source,
+                        previous);
+
+                if (!summary_result.ok() &&
+                    summary_result.code ==
+                        status_code::not_found &&
+                    static_cast<std::size_t>(
+                        item.source.value()) >
+                        owner->logical_source_count) {
+
+                    summary_result = {};
+                }
+
+                if (!summary_result.ok() &&
+                    summary_result.code ==
+                        status_code::invalid_state &&
+                    owner->baseline_cache != nullptr &&
+                    static_cast<std::size_t>(
+                        item.source.value()) <=
+                        owner->baseline_source_count) {
+
+                    build_cache_source_record persisted;
+                    summary_result =
+                        owner->baseline_cache->source(
+                            item.source,
+                            persisted);
+
+                    if (summary_result.ok() &&
+                        persisted.frontend_present) {
+                        previous.present = true;
+                        previous.local_types =
+                            persisted.local_types.count;
+                        previous.type_slots =
+                            persisted.type_slots.count;
+                        previous.object_slots =
+                            persisted.object_slots.count;
+                        previous.member_slots =
+                            persisted.member_slots.count;
+                    }
+                }
+
+                if (!summary_result.ok())
+                    return summary_result;
+
+                auto next_summary =
+                    candidate_summary;
+
+                if (!subtract_persistence_record(
+                        next_summary,
+                        previous)) {
+                    return {
+                        status_code::initialization_failed};
+                }
+
+                if (!add_persistence_record(
+                        next_summary,
+                        persistence_record_of(
+                            item.interface.get()))) {
+                    return {status_code::not_available};
+                }
+
+                candidate_summary = next_summary;
+            }
+        }
+
         if (full_reconstruction) {
             if (owner->baseline_backed())
                 return {status_code::invalid_state};
@@ -536,6 +866,8 @@ void source_frontend_cache_update::publish_prepared() noexcept {
         owner->logical_source_count = required_source_count;
     }
 
+    owner->persistence_summary_value =
+        candidate_summary;
     owner->complete_state = true;
     published = true;
     prepared = false;

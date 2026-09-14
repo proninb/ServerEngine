@@ -19,7 +19,7 @@ class compiled_image_view;
 class project_context;
 class source_manager_image_view;
 
-inline constexpr std::uint32_t build_cache_image_format_version = 3;
+inline constexpr std::uint32_t build_cache_image_format_version = 4;
 inline constexpr std::size_t build_cache_image_header_size = 256;
 inline constexpr std::size_t build_cache_image_directory_count = 25;
 inline constexpr std::size_t build_cache_image_directory_entry_size = 32;
@@ -74,6 +74,38 @@ struct build_cache_derived_index_slot final {
     TypeRef type{};
 };
 
+struct build_cache_encode_telemetry final {
+    std::uint64_t total_ns = 0;
+    std::uint64_t layout_allocate_ns = 0;
+    std::uint64_t source_frontend_ns = 0;
+    std::uint64_t source_directory_text_ns = 0;
+    std::uint64_t frontend_record_ranges_ns = 0;
+    std::uint64_t frontend_local_types_ns = 0;
+    std::uint64_t frontend_type_slots_ns = 0;
+    std::uint64_t frontend_object_slots_ns = 0;
+    std::uint64_t frontend_member_slots_ns = 0;
+
+    // Stratified SAVE profiling. Only every 64th Source is timed so telemetry
+    // does not materially perturb the hot 100k+ Source serialization loop.
+    std::uint64_t source_frontend_total_sources = 0;
+    std::uint64_t source_frontend_sampled_sources = 0;
+    std::uint64_t source_lookup_sample_ns = 0;
+    std::uint64_t source_text_copy_sample_ns = 0;
+    std::uint64_t frontend_record_sample_ns = 0;
+    std::uint64_t frontend_local_types_sample_ns = 0;
+    std::uint64_t frontend_type_slots_sample_ns = 0;
+    std::uint64_t frontend_object_slots_sample_ns = 0;
+    std::uint64_t frontend_member_slots_sample_ns = 0;
+
+    std::uint64_t contribution_ns = 0;
+    std::uint64_t graph_ns = 0;
+    std::uint64_t change_identity_ns = 0;
+    std::uint64_t section_crc_ns = 0;
+    std::uint64_t header_directory_ns = 0;
+    std::uint64_t bind_ns = 0;
+    std::uint64_t verify_ns = 0;
+};
+
 // Mmap-native BUILD-only baseline. The view contains Source bytes, Parser-local
 // interface tables, SourceContribution append arenas, and Builder lineage caches.
 // It contains no Runtime/READY ownership and no process pointers.
@@ -102,6 +134,37 @@ public:
 
     [[nodiscard]] std::size_t frontend_count() const noexcept {
         return frontend_count_value;
+    }
+
+    // O(1) persistence sizing metadata. These counts are validated while the
+    // mmap image is bound and seed sparse Generation summaries without scans.
+    [[nodiscard]] std::uint64_t source_bytes_count() const noexcept {
+        return section(
+            build_cache_image_section::source_bytes).count;
+    }
+
+    [[nodiscard]] std::size_t frontend_local_type_count() const noexcept {
+        return static_cast<std::size_t>(
+            section(
+                build_cache_image_section::frontend_local_types).count);
+    }
+
+    [[nodiscard]] std::size_t frontend_type_slot_count() const noexcept {
+        return static_cast<std::size_t>(
+            section(
+                build_cache_image_section::frontend_type_slots).count);
+    }
+
+    [[nodiscard]] std::size_t frontend_object_slot_count() const noexcept {
+        return static_cast<std::size_t>(
+            section(
+                build_cache_image_section::frontend_object_slots).count);
+    }
+
+    [[nodiscard]] std::size_t frontend_member_slot_count() const noexcept {
+        return static_cast<std::size_t>(
+            section(
+                build_cache_image_section::frontend_member_slots).count);
     }
 
     [[nodiscard]] std::size_t derived_index_entries() const noexcept {
@@ -298,5 +361,11 @@ private:
     const project_context& project,
     const source_change_capture& change_capture,
     std::vector<std::byte>& output) noexcept;
+
+[[nodiscard]] status encode_build_cache_image(
+    const project_context& project,
+    const source_change_capture& change_capture,
+    std::vector<std::byte>& output,
+    build_cache_encode_telemetry* telemetry) noexcept;
 
 } // namespace cw::server
