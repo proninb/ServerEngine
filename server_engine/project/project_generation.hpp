@@ -52,6 +52,18 @@ private:
 // does not create or own it.
 class project_generation_provenance final {
 public:
+    // Configuration roots resolved to stable Source identities for this
+    // Generation. Order exactly matches project_configuration::project.
+    [[nodiscard]] std::span<const source_id>
+    roots() const noexcept {
+        return roots_value;
+    }
+
+    void publish_roots(
+        std::vector<source_id>&& roots) noexcept {
+        roots_value = std::move(roots);
+    }
+
     [[nodiscard]] const source_change_capture*
     source_change() const noexcept {
         return source_change_available
@@ -74,6 +86,7 @@ public:
     }
 
 private:
+    std::vector<source_id> roots_value;
     source_change_capture source_change_value;
     bool source_change_available = false;
 };

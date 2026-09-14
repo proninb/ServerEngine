@@ -531,6 +531,10 @@ status source_frontend_generation::build(
     try {
         std::vector<generation_source_state> states;
         states.reserve(roots.size() * 2 + 8);
+
+        std::vector<source_id> resolved_roots;
+        resolved_roots.reserve(roots.size());
+
         std::vector<std::uint32_t> state_by_source(1,
             (std::numeric_limits<std::uint32_t>::max)());
         std::size_t unique_roots = 0;
@@ -589,6 +593,9 @@ status source_frontend_generation::build(
                     source);
             if (!result.ok())
                 return result;
+
+            resolved_roots.push_back(source);
+
             bool inserted = false;
             result = add_state(source, inserted);
             if (!result.ok())
@@ -859,6 +866,7 @@ status source_frontend_generation::build(
 
         const auto result_materialize_begin = frontend_clock::now();
         source_frontend_result candidate;
+        candidate.root_sources = std::move(resolved_roots);
         candidate.entries.reserve(states.size());
         for (auto& state : states) {
             candidate.entries.push_back(source_frontend_entry{

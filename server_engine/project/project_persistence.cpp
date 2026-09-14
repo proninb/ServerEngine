@@ -249,43 +249,80 @@ status freeze_project_generation(
         std::vector<source_manager_image_root> roots;
         roots.reserve(configuration.project.size());
 
-        for (const auto& item : configuration.project) {
-            std::string normalized;
+        const auto generation_roots =
+            project.generation_provenance().roots();
 
-            if (item.canonical_path) {
-                // JSON configuration roots are already absolute and lexically
-                // normalized. SAVE must not repeat filesystem normalization.
-                normalized = item.path.generic_string();
-#ifdef _WIN32
-                if (normalized.size() >= 2 &&
-                    normalized[1] == ':' &&
-                    normalized[0] >= 'A' &&
-                    normalized[0] <= 'Z') {
-                    normalized[0] =
-                        static_cast<char>(
-                            normalized[0] - 'A' + 'a');
+        if (generation_roots.size() ==
+            configuration.project.size()) {
+
+            // GEN-02C11: Generation-owned root identities were resolved by the
+            // frontend that constructed this exact state. SAVE only pairs them
+            // with immutable configuration roles; no path conversion or lookup.
+            for (std::size_t index = 0;
+                 index < generation_roots.size();
+                 ++index) {
+
+                const auto source =
+                    generation_roots[index];
+
+                if (!source ||
+                    static_cast<std::size_t>(
+                        source.value()) >
+                        project.sources().source_count()) {
+                    return {
+                        status_code::initialization_failed};
                 }
+
+                roots.push_back({
+                    source,
+                    configuration.project[index].role,
+                });
+            }
+        }
+        else {
+            // Compatibility fallback for construction states activated from an
+            // older persisted baseline that does not yet own Generation roots.
+            for (const auto& item : configuration.project) {
+                std::string normalized;
+
+                if (item.canonical_path) {
+                    normalized =
+                        item.path.generic_string();
+#ifdef _WIN32
+                    if (normalized.size() >= 2 &&
+                        normalized[1] == ':' &&
+                        normalized[0] >= 'A' &&
+                        normalized[0] <= 'Z') {
+                        normalized[0] =
+                            static_cast<char>(
+                                normalized[0] - 'A' + 'a');
+                    }
 #endif
-                if (normalized.empty())
-                    return {status_code::invalid_argument};
-            }
-            else {
-                result = normalize_source_path(
-                    item.path,
-                    normalized);
-                if (!result.ok())
-                    return result;
-            }
+                    if (normalized.empty())
+                        return {status_code::invalid_argument};
+                }
+                else {
+                    result = normalize_source_path(
+                        item.path,
+                        normalized);
+                    if (!result.ok())
+                        return result;
+                }
 
-            source_id source;
-            result = project.sources().find(
-                normalized,
-                source);
-            if (!result.ok())
-                return {status_code::initialization_failed};
+                source_id source;
+                result = project.sources().find(
+                    normalized,
+                    source);
+                if (!result.ok()) {
+                    return {
+                        status_code::initialization_failed};
+                }
 
-            roots.push_back(
-                {source, item.role});
+                roots.push_back({
+                    source,
+                    item.role,
+                });
+            }
         }
 
         if (telemetry != nullptr)

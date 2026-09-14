@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <memory>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace cw::server {
@@ -70,9 +71,20 @@ public:
     [[nodiscard]] const source_frontend_summary& summary() const noexcept { return statistics; }
 
 private:
+    [[nodiscard]] std::vector<source_id>
+    release_roots() noexcept {
+        return std::move(root_sources);
+    }
+
     friend class source_frontend_generation;
     friend class project_build_orchestrator;
+
     std::vector<source_frontend_entry> entries;
+
+    // Exact configuration-root Source identities in caller order. These are
+    // resolved once by the frontend and become Generation composition metadata.
+    std::vector<source_id> root_sources;
+
     source_frontend_summary statistics{};
 };
 

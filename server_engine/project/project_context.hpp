@@ -472,6 +472,12 @@ private:
             std::move(capture));
     }
 
+    void publish_generation_roots(
+        std::vector<source_id>&& roots) noexcept {
+        generation_provenance_value.publish_roots(
+            std::move(roots));
+    }
+
     void clear_generation_source_change() noexcept {
         generation_provenance_value.clear_source_change();
     }

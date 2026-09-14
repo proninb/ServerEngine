@@ -280,6 +280,12 @@ auto semantic = project.parser_services();
             project.clear_generation_change_segment();
         }
 
+        // GEN-02C11: frontend already resolved every configuration root before
+        // Source acquisition. Preserve those Source identities with the
+        // Generation so SAVE never repeats path conversion/hash lookup.
+        project.publish_generation_roots(
+            frontend.release_roots());
+
         interface_publish_end = build_clock::now();
         output.telemetry.publication_ns = elapsed_ns(publish_begin, publish_end);
         output.telemetry.interface_publish_ns =
