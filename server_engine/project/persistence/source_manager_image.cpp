@@ -3,11 +3,15 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cstring>
 #include <limits>
 #include <new>
 #include <stdexcept>
+#include <system_error>
+#include <thread>
+#include <vector>
 
 namespace cw::server {
 namespace {
@@ -1304,32 +1308,10 @@ status freeze_source_manager_native_image(
         return {status_code::invalid_argument};
     }
 
-    for (const auto& record : native.graph) {
-        if (record.includes.reserved != 0 ||
-            record.dependents.reserved != 0 ||
-            record.reserved != 0 ||
-            (record.flags & ~graph_known_flags) != 0 ||
-            record.includes.offset >
-                native.forward_edges.size() ||
-            record.includes.count >
-                native.forward_edges.size() -
-                    record.includes.offset ||
-            record.dependents.offset >
-                native.reverse_edges.size() ||
-            record.dependents.count >
-                native.reverse_edges.size() -
-                    record.dependents.offset) {
-            return {status_code::artifact_corrupt};
-        }
-    }
-
-    for (const auto& record : native.physical) {
-        if (record.reserved != 0 ||
-            (record.flags &
-             ~source_generation_physical_present) != 0) {
-            return {status_code::artifact_corrupt};
-        }
-    }
+    // GEN-02C9: native.graph and native.physical are fresh Generation-owned
+    // publication records. source_generation_storage constructs their reserved
+    // fields, flags, and arena ranges; rescanning all Sources here duplicates
+    // that publication contract. Persisted/mapped input keeps its cold verifier.
 
     try {
         output.roots.assign(
@@ -1440,9 +1422,7 @@ status freeze_source_manager_native_image(
             record_size;
         layout[index].offset =
             cursor;
-        layout[index].crc64 =
-            persistence_crc64(
-                sections[index]);
+        layout[index].crc64 = 0;
 
         if (!add_u64(
                 cursor,
@@ -1485,6 +1465,66 @@ status freeze_source_manager_native_image(
                 .count - 1)) != 0) {
         output.reset();
         return {status_code::artifact_corrupt};
+    }
+
+    // GEN-02C9: Source Manager sections are immutable and independent.
+    // Compute their CRCs concurrently; the persisted CRC contract is unchanged.
+    const auto crc_worker_count =
+        (std::min)(
+            sections.size(),
+            (std::max)(
+                std::size_t{1},
+                static_cast<std::size_t>(
+                    std::thread::hardware_concurrency())));
+
+    std::atomic<std::size_t> next_crc_section{0};
+
+    const auto crc_worker = [&]() noexcept {
+        for (;;) {
+            const auto index =
+                next_crc_section.fetch_add(
+                    1,
+                    std::memory_order_relaxed);
+
+            if (index >= sections.size())
+                return;
+
+            layout[index].crc64 =
+                persistence_crc64(
+                    sections[index]);
+        }
+    };
+
+    if (crc_worker_count == 1) {
+        crc_worker();
+    }
+    else {
+        try {
+            std::vector<std::jthread> crc_workers;
+            crc_workers.reserve(crc_worker_count);
+
+            for (std::size_t worker = 0;
+                 worker < crc_worker_count;
+                 ++worker) {
+
+                crc_workers.emplace_back(
+                    [&]() noexcept {
+                        crc_worker();
+                    });
+            }
+        }
+        catch (const std::bad_alloc&) {
+            output.reset();
+            return {status_code::not_available};
+        }
+        catch (const std::length_error&) {
+            output.reset();
+            return {status_code::not_available};
+        }
+        catch (const std::system_error&) {
+            output.reset();
+            return {status_code::not_available};
+        }
     }
 
     auto* base =

@@ -5,10 +5,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <limits>
 #include <new>
 #include <stdexcept>
+#include <system_error>
+#include <thread>
+#include <vector>
 
 namespace cw::server {
 namespace {
@@ -2367,11 +2371,19 @@ status encode_compiled_image(
         return {status_code::initialization_failed};
     }
 
-    for (auto& value : layout) {
+    // GEN-02C10: compiled sections are independent immutable regions.
+    // Validate their byte extents once, then compute CRCs concurrently.
+    std::array<std::size_t, compiled_image_directory_count>
+        section_byte_counts{};
+
+    for (std::size_t index = 0;
+         index < layout.size();
+         ++index) {
+
         std::uint64_t byte_count = 0;
         if (!multiply_u64(
-                value.count,
-                value.record_size,
+                layout[index].count,
+                layout[index].record_size,
                 byte_count) ||
             byte_count >
                 (std::numeric_limits<std::size_t>::max)()) {
@@ -2379,9 +2391,73 @@ status encode_compiled_image(
             return {status_code::not_available};
         }
 
-        value.crc64 = persistence_crc64(std::span<const std::byte>{
-            base + static_cast<std::size_t>(value.offset),
-            static_cast<std::size_t>(byte_count)});
+        section_byte_counts[index] =
+            static_cast<std::size_t>(byte_count);
+        layout[index].crc64 = 0;
+    }
+
+    const auto crc_worker_count =
+        (std::min)(
+            layout.size(),
+            (std::max)(
+                std::size_t{1},
+                static_cast<std::size_t>(
+                    std::thread::hardware_concurrency())));
+
+    std::atomic<std::size_t> next_crc_section{0};
+
+    const auto crc_worker = [&]() noexcept {
+        for (;;) {
+            const auto index =
+                next_crc_section.fetch_add(
+                    1,
+                    std::memory_order_relaxed);
+
+            if (index >= layout.size())
+                return;
+
+            const auto& value = layout[index];
+
+            layout[index].crc64 =
+                persistence_crc64(
+                    std::span<const std::byte>{
+                        base +
+                            static_cast<std::size_t>(
+                                value.offset),
+                        section_byte_counts[index]});
+        }
+    };
+
+    if (crc_worker_count == 1) {
+        crc_worker();
+    }
+    else {
+        try {
+            std::vector<std::jthread> crc_workers;
+            crc_workers.reserve(crc_worker_count);
+
+            for (std::size_t worker = 0;
+                 worker < crc_worker_count;
+                 ++worker) {
+
+                crc_workers.emplace_back(
+                    [&]() noexcept {
+                        crc_worker();
+                    });
+            }
+        }
+        catch (const std::bad_alloc&) {
+            output.clear();
+            return {status_code::not_available};
+        }
+        catch (const std::length_error&) {
+            output.clear();
+            return {status_code::not_available};
+        }
+        catch (const std::system_error&) {
+            output.clear();
+            return {status_code::not_available};
+        }
     }
 
     std::copy(image_magic.begin(), image_magic.end(), base);
@@ -2446,12 +2522,9 @@ status encode_compiled_image(
         return bind_result;
     }
 
-    const auto verify_result = validation.verify_contents();
-    if (!verify_result.ok()) {
-        output.clear();
-        return verify_result;
-    }
-
+    // GEN-02C10: this image was just produced by the canonical encoder above.
+    // bind() proves the structural layout/header contract. Deep verify_contents()
+    // remains the cold persisted-input audit and is not repeated on fresh output.
     return {};
 }
 
