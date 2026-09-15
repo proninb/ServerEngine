@@ -1385,10 +1385,14 @@ status project_manager::save(
             generation_freeze_detail.source_manager_verify_ns;
         output.telemetry.generation_freeze_source_manager_segment_validate_ns =
             generation_freeze_detail.source_manager_segment_validate_ns;
+        output.telemetry.generation_freeze_source_manager_identity_copy_ns =
+            generation_freeze_detail.source_manager_identity_copy_ns;
         output.telemetry.generation_freeze_source_manager_mode =
             generation_freeze_detail.source_manager_mode;
         output.telemetry.generation_freeze_source_manager_crc_worker_count =
             generation_freeze_detail.source_manager_crc_worker_count;
+        output.telemetry.generation_freeze_source_manager_extent_count =
+            generation_freeze_detail.source_manager_extent_count;
         output.telemetry.generation_freeze_source_manager_sparse_fallback_reason =
             generation_freeze_detail.source_manager_sparse_fallback_reason;
         output.telemetry.generation_freeze_change_state_ns =

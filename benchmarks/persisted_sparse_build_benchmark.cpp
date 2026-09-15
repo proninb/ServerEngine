@@ -3404,6 +3404,11 @@ struct idempotent_save_timing final {
         << ",source_manager_segment_validate_ms="
         << ns_ms(
             telemetry.generation_freeze_source_manager_segment_validate_ns)
+        << ",source_manager_identity_copy_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_identity_copy_ns)
+        << ",source_manager_extent_count="
+        << telemetry.generation_freeze_source_manager_extent_count
         << ",freeze_change_state_ms="
         << ns_ms(
             telemetry.generation_freeze_change_state_ns)
@@ -3603,6 +3608,448 @@ struct idempotent_save_timing final {
     return post_save_pass ? 0 : 1;
 }
 
+
+[[nodiscard]] int run_d4e_sparse_save_extent_gate(
+    std::size_t source_count) {
+
+#ifdef _WIN32
+    constexpr std::size_t update_counts[]{
+        1,
+        13,
+        14,
+        27,
+        28,
+        100,
+    };
+
+    if (source_count < 100)
+        return 2;
+
+    temporary_tree tree;
+    std::filesystem::path configuration_path;
+    std::vector<std::filesystem::path> unused_source_paths;
+
+    const auto progress_interval =
+        source_count >= 1'000'000
+            ? std::size_t{100'000}
+            : source_count >= 100'000
+                ? std::size_t{10'000}
+                : std::size_t{0};
+
+    std::cerr
+        << "D4E_SETUP_BEGIN,sources="
+        << source_count
+        << '\n';
+
+    if (!prepare_project(
+            source_count,
+            tree,
+            configuration_path,
+            unused_source_paths,
+            false,
+            progress_interval)) {
+        return 1;
+    }
+
+    baseline_commit_result baseline;
+    if (!create_baseline(
+            configuration_path,
+            baseline,
+            0)) {
+        std::cout
+            << "D4E_SPARSE_SAVE_EXTENT_GATE,FAIL,"
+            << "stage=baseline,sources="
+            << source_count
+            << '\n';
+        return 1;
+    }
+
+    const auto ns_ms =
+        [](std::uint64_t value) noexcept {
+            return static_cast<double>(value) /
+                1'000'000.0;
+        };
+
+    std::size_t revision = 0;
+
+    for (const auto update_count : update_counts) {
+        ++revision;
+
+        for (std::size_t index = 0;
+             index < update_count;
+             ++index) {
+
+            const auto changed_text =
+                "struct " + type_name(index) +
+                " { int d4e_" +
+                std::to_string(revision) +
+                "; };\n";
+
+            if (!write_text(
+                    tree.path / source_name(index),
+                    changed_text)) {
+                std::cout
+                    << "D4E_SPARSE_SAVE_EXTENT,FAIL,"
+                    << "stage=write,sources="
+                    << source_count
+                    << ",updates="
+                    << update_count
+                    << '\n';
+                return 1;
+            }
+        }
+
+        project_manager manager;
+        diagnostic_buffer diagnostics;
+        project_build_result build;
+
+        const auto build_status =
+            manager.build(
+                configuration_path,
+                operation_id{4500},
+                diagnostics,
+                build,
+                1);
+
+        const bool build_pass =
+            build_status.ok() &&
+            !diagnostics.has_errors() &&
+            manager.ready() &&
+            build.changed &&
+            !build.rebuilt &&
+            build.telemetry.baseline_sources ==
+                source_count &&
+            build.telemetry.dirty_detection_backend == 1 &&
+            build.telemetry.dirty_detection_fast &&
+            !build.telemetry.dirty_detection_fallback &&
+            build.telemetry.dirty_sources ==
+                update_count &&
+            build.telemetry.generation_checkpoint_available &&
+            build.telemetry.generation_anchor_available &&
+            build.telemetry.generation_change_ready &&
+            build.telemetry.generation_change_overlay &&
+            build.telemetry.generation_change_fallback_reason == 0 &&
+            build.telemetry.generation_change_file_updates ==
+                update_count &&
+            build.telemetry.sources.path_index_full_rebuilds == 0 &&
+            build.telemetry.sources.source_graph_full_scans == 0 &&
+            build.telemetry.builder.graph_full_scans == 0 &&
+            build.telemetry.builder.contribution_full_scans == 0;
+
+        if (!build_pass) {
+            std::cout
+                << "D4E_SPARSE_SAVE_EXTENT,FAIL,"
+                << "stage=build,sources="
+                << source_count
+                << ",updates="
+                << update_count
+                << ",manager_ms="
+                << ns_ms(
+                    build.telemetry.manager_total_ns)
+                << ",backend="
+                << build.telemetry.dirty_detection_backend
+                << ",fast="
+                << (build.telemetry.dirty_detection_fast ? 1 : 0)
+                << ",fallback="
+                << (build.telemetry.dirty_detection_fallback ? 1 : 0)
+                << ",dirty_sources="
+                << build.telemetry.dirty_sources
+                << ",generation_change_ready="
+                << (build.telemetry.generation_change_ready ? 1 : 0)
+                << ",generation_change_overlay="
+                << (build.telemetry.generation_change_overlay ? 1 : 0)
+                << ",generation_change_fallback_reason="
+                << build.telemetry.generation_change_fallback_reason
+                << ",generation_change_file_updates="
+                << build.telemetry.generation_change_file_updates
+                << ",generation_change_directory_updates="
+                << build.telemetry.generation_change_directory_updates
+                << '\n';
+
+            if (manager.ready())
+                (void)manager.unload();
+
+            return 1;
+        }
+
+        baseline_commit_result save;
+
+        const auto save_begin =
+            lifecycle_clock::now();
+        const auto save_status =
+            manager.save(save);
+        const auto save_end =
+            lifecycle_clock::now();
+
+        const auto& telemetry =
+            save.telemetry;
+
+        const auto freeze_accounted_ns =
+            telemetry.generation_freeze_materialize_change_ns +
+            telemetry.generation_freeze_compiled_ns +
+            telemetry.generation_freeze_roots_ns +
+            telemetry.generation_freeze_source_manager_ns +
+            telemetry.generation_freeze_change_state_ns +
+            telemetry.generation_freeze_build_cache_ns +
+            telemetry.generation_freeze_bind_ns +
+            telemetry.generation_freeze_verify_change_state_ns +
+            telemetry.generation_freeze_verify_build_cache_ns;
+
+        const auto freeze_unaccounted_ns =
+            telemetry.generation_freeze_internal_ns >
+                freeze_accounted_ns
+            ? telemetry.generation_freeze_internal_ns -
+                freeze_accounted_ns
+            : 0;
+
+        const auto save_accounted_ns =
+            telemetry.configuration_token_ns +
+            telemetry.configuration_read_ns +
+            telemetry.configuration_parse_ns +
+            telemetry.fingerprint_ns +
+            telemetry.generation_freeze_ns +
+            telemetry.store_commit_ns;
+
+        const auto save_unaccounted_ns =
+            telemetry.save_total_ns >
+                save_accounted_ns
+            ? telemetry.save_total_ns -
+                save_accounted_ns
+            : 0;
+
+        const bool expect_sparse =
+            update_count <= 27;
+
+        const auto expected_sparse_extent_count =
+            static_cast<std::uint32_t>(
+                update_count + 5);
+
+        const bool source_manager_path_pass =
+            expect_sparse
+            ? telemetry.generation_freeze_source_manager_mode == 3 &&
+              telemetry.generation_freeze_source_manager_sparse_fallback_reason == 0 &&
+              telemetry.generation_freeze_source_manager_extent_count ==
+                  expected_sparse_extent_count
+            : telemetry.generation_freeze_source_manager_mode == 2 &&
+              telemetry.generation_freeze_source_manager_sparse_fallback_reason == 10 &&
+              telemetry.generation_freeze_source_manager_extent_count == 1;
+
+        const bool save_pass =
+            save_status.ok() &&
+            !save.transaction.empty() &&
+            save.bytes_written != 0 &&
+            telemetry.generation_freeze_materialize_change_ns != 0 &&
+            telemetry.generation_freeze_materialize_change_source_count ==
+                source_count &&
+            telemetry.generation_freeze_materialize_change_file_updates ==
+                update_count &&
+            source_manager_path_pass;
+
+        std::cout
+            << "D4E_SPARSE_SAVE_EXTENT,"
+            << (save_pass ? "PASS" : "FAIL")
+            << ",sources="
+            << source_count
+            << ",updates="
+            << update_count
+            << ",build_directory_updates="
+            << build.telemetry.generation_change_directory_updates
+            << ",materialized_directory_updates="
+            << telemetry.generation_freeze_materialize_change_directory_updates
+            << ",build_ms="
+            << ns_ms(
+                build.telemetry.manager_total_ns)
+            << ",save_wall_ms="
+            << elapsed_ms(
+                save_begin,
+                save_end)
+            << ",save_total_ms="
+            << ns_ms(
+                telemetry.save_total_ns)
+            << ",configuration_token_ms="
+            << ns_ms(
+                telemetry.configuration_token_ns)
+            << ",configuration_read_ms="
+            << ns_ms(
+                telemetry.configuration_read_ns)
+            << ",configuration_parse_ms="
+            << ns_ms(
+                telemetry.configuration_parse_ns)
+            << ",fingerprint_ms="
+            << ns_ms(
+                telemetry.fingerprint_ns)
+            << ",freeze_ms="
+            << ns_ms(
+                telemetry.generation_freeze_ns)
+            << ",freeze_internal_ms="
+            << ns_ms(
+                telemetry.generation_freeze_internal_ns)
+            << ",materialize_change_ms="
+            << ns_ms(
+                telemetry.generation_freeze_materialize_change_ns)
+            << ",compiled_ms="
+            << ns_ms(
+                telemetry.generation_freeze_compiled_ns)
+            << ",roots_ms="
+            << ns_ms(
+                telemetry.generation_freeze_roots_ns)
+            << ",source_manager_ms="
+            << ns_ms(
+                telemetry.generation_freeze_source_manager_ns)
+            << ",source_manager_identity_copy_ms="
+            << ns_ms(
+                telemetry.generation_freeze_source_manager_identity_copy_ns)
+            << ",source_manager_mode="
+            << telemetry.generation_freeze_source_manager_mode
+            << ",source_manager_sparse_fallback_reason="
+            << telemetry.generation_freeze_source_manager_sparse_fallback_reason
+            << ",source_manager_extent_count="
+            << telemetry.generation_freeze_source_manager_extent_count
+            << ",expected_sparse_extent_count="
+            << (expect_sparse
+                    ? expected_sparse_extent_count
+                    : 0u)
+            << ",source_manager_crc_wall_ms="
+            << ns_ms(
+                telemetry.generation_freeze_source_manager_crc_wall_ns)
+            << ",sm_crc_physical_state_ms="
+            << ns_ms(
+                telemetry.generation_freeze_source_manager_crc_physical_state_ns)
+            << ",sm_crc_file_identity_ms="
+            << ns_ms(
+                telemetry.generation_freeze_source_manager_crc_file_identity_ns)
+            << ",sm_crc_directory_identity_ms="
+            << ns_ms(
+                telemetry.generation_freeze_source_manager_crc_directory_identity_ns)
+            << ",change_state_ms="
+            << ns_ms(
+                telemetry.generation_freeze_change_state_ns)
+            << ",build_cache_ms="
+            << ns_ms(
+                telemetry.generation_freeze_build_cache_ns)
+            << ",freeze_bind_ms="
+            << ns_ms(
+                telemetry.generation_freeze_bind_ns)
+            << ",freeze_verify_change_state_ms="
+            << ns_ms(
+                telemetry.generation_freeze_verify_change_state_ns)
+            << ",freeze_verify_build_cache_ms="
+            << ns_ms(
+                telemetry.generation_freeze_verify_build_cache_ns)
+            << ",freeze_accounted_ms="
+            << ns_ms(
+                freeze_accounted_ns)
+            << ",freeze_unaccounted_ms="
+            << ns_ms(
+                freeze_unaccounted_ns)
+            << ",store_commit_ms="
+            << ns_ms(
+                telemetry.store_commit_ns)
+            << ",transaction_write_ms="
+            << ns_ms(
+                telemetry.transaction_write_ns)
+            << ",transaction_flush_ms="
+            << ns_ms(
+                telemetry.transaction_flush_ns)
+            << ",directory_flush_ms="
+            << ns_ms(
+                telemetry.directory_flush_ns)
+            << ",current_write_ms="
+            << ns_ms(
+                telemetry.current_write_ns)
+            << ",current_flush_ms="
+            << ns_ms(
+                telemetry.current_flush_ns)
+            << ",current_replace_ms="
+            << ns_ms(
+                telemetry.current_replace_ns)
+            << ",save_accounted_ms="
+            << ns_ms(
+                save_accounted_ns)
+            << ",save_unaccounted_ms="
+            << ns_ms(
+                save_unaccounted_ns)
+            << ",bytes_written="
+            << save.bytes_written
+            << '\n';
+
+        if (!save_pass) {
+            if (manager.ready())
+                (void)manager.unload();
+            return 1;
+        }
+
+        if (!manager.ready() ||
+            !manager.unload().ok()) {
+            return 1;
+        }
+    }
+
+    project_manager verify_manager;
+    diagnostic_buffer verify_diagnostics;
+    project_build_result verify_build;
+
+    const auto verify_status =
+        verify_manager.build(
+            configuration_path,
+            operation_id{4501},
+            verify_diagnostics,
+            verify_build,
+            1);
+
+    const bool verify_pass =
+        verify_status.ok() &&
+        !verify_diagnostics.has_errors() &&
+        verify_manager.ready() &&
+        validate_no_change(
+            source_count,
+            verify_build) &&
+        verify_build.telemetry.dirty_detection_backend == 1 &&
+        verify_build.telemetry.dirty_detection_fast &&
+        !verify_build.telemetry.dirty_detection_fallback &&
+        verify_build.telemetry.sources.path_index_full_rebuilds == 0 &&
+        verify_build.telemetry.sources.source_graph_full_scans == 0 &&
+        verify_build.telemetry.builder.graph_full_scans == 0 &&
+        verify_build.telemetry.builder.contribution_full_scans == 0;
+
+    std::cout
+        << "D4E_POST_SAVE_FAST_BUILD,"
+        << (verify_pass ? "PASS" : "FAIL")
+        << ",sources="
+        << source_count
+        << ",manager_ms="
+        << ns_ms(
+            verify_build.telemetry.manager_total_ns)
+        << ",dirty_sources="
+        << verify_build.telemetry.dirty_sources
+        << ",graph_full_scans="
+        << verify_build.telemetry.builder.graph_full_scans
+        << ",contribution_full_scans="
+        << verify_build.telemetry.builder.contribution_full_scans
+        << '\n';
+
+    if (verify_manager.ready() &&
+        !verify_manager.unload().ok()) {
+        return 1;
+    }
+
+    std::cout
+        << "D4E_SPARSE_SAVE_EXTENT_GATE,"
+        << (verify_pass ? "PASS" : "FAIL")
+        << ",sources="
+        << source_count
+        << '\n';
+
+    return verify_pass ? 0 : 1;
+#else
+    (void)source_count;
+    std::cout
+        << "D4E_SPARSE_SAVE_EXTENT_GATE,UNAVAILABLE,"
+        << "backend=0,platform=non_windows\n";
+    return 3;
+#endif
+}
+
 [[nodiscard]] bool run_matrix() {
     constexpr std::size_t matrix[]{
         1'000,
@@ -3769,6 +4216,27 @@ int main(int argc, char** argv) {
             return run_lifecycle_scale(
                 count,
                 workers);
+        }
+        catch (...) {
+            return 2;
+        }
+    }
+
+    if (argc == 2 &&
+        std::string_view{argv[1]} == "--d4e") {
+        return run_d4e_sparse_save_extent_gate(
+            100'000);
+    }
+
+    if (argc == 3 &&
+        std::string_view{argv[1]} ==
+            "--d4e-sparse-save") {
+        try {
+            const auto count =
+                static_cast<std::size_t>(
+                    std::stoull(argv[2]));
+            return run_d4e_sparse_save_extent_gate(
+                count);
         }
         catch (...) {
             return 2;

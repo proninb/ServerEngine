@@ -109,8 +109,10 @@ struct baseline_commit_telemetry final {
     std::uint64_t generation_freeze_source_manager_bind_ns = 0;
     std::uint64_t generation_freeze_source_manager_verify_ns = 0;
     std::uint64_t generation_freeze_source_manager_segment_validate_ns = 0;
+    std::uint64_t generation_freeze_source_manager_identity_copy_ns = 0;
     std::uint32_t generation_freeze_source_manager_mode = 0;
     std::uint32_t generation_freeze_source_manager_crc_worker_count = 0;
+    std::uint32_t generation_freeze_source_manager_extent_count = 0;
     std::uint32_t generation_freeze_source_manager_sparse_fallback_reason = 0;
     std::uint64_t generation_freeze_change_state_ns = 0;
     std::uint64_t generation_freeze_build_cache_ns = 0;

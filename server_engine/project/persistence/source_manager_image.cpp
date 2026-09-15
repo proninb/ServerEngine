@@ -1937,6 +1937,9 @@ status freeze_source_manager_native_image(
         telemetry->segment_validate_ns =
             source_manager_elapsed_ns(
                 segment_validate_begin);
+        telemetry->extent_count =
+            static_cast<std::uint32_t>(
+                segment.extent_count());
         telemetry->internal_ns =
             source_manager_elapsed_ns(
                 internal_begin);
@@ -2119,16 +2122,6 @@ status freeze_source_manager_sparse_baseline_image(
         return {status_code::not_found};
     }
 
-    // Each physical patch adds at most two scatter/gather extents. Keep the
-    // storage-neutral Generation segment inside its fixed extent budget.
-    constexpr std::size_t maximum_sparse_physical_updates = 13;
-    if (physical_updates.size() >
-        maximum_sparse_physical_updates) {
-        if (telemetry != nullptr)
-            telemetry->sparse_fallback_reason = 10;
-        return {status_code::not_found};
-    }
-
     try {
         output.patch_sources.reserve(
             physical_updates.size());
@@ -2166,6 +2159,70 @@ status freeze_source_manager_sparse_baseline_image(
             output.patch_sources.insert(
                 position,
                 update.source);
+        }
+
+        // Count the exact extents segment() will emit. Empty baseline gaps are
+        // not extents, so adjacent physical patches consume one extent each
+        // instead of the conservative two-extents-per-patch bound.
+        std::size_t required_extent_count = 1;
+        std::size_t extent_cursor =
+            source_manager_image_prefix_size;
+
+        for (const auto source :
+             output.patch_sources) {
+
+            const auto patch_offset =
+                physical_offset_value +
+                static_cast<std::size_t>(
+                    source.value() - 1) *
+                    sizeof(
+                        source_generation_physical_record);
+
+            if (patch_offset > extent_cursor)
+                ++required_extent_count;
+
+            ++required_extent_count;
+            extent_cursor =
+                patch_offset +
+                sizeof(
+                    source_generation_physical_record);
+        }
+
+        if (file_identity_offset_value >
+            extent_cursor) {
+            ++required_extent_count;
+        }
+
+        if (!file_bytes.empty())
+            ++required_extent_count;
+
+        extent_cursor =
+            file_identity_offset_value +
+            file_bytes.size();
+
+        if (directory_identity_offset_value >
+            extent_cursor) {
+            ++required_extent_count;
+        }
+
+        if (!directory_bytes_value.empty())
+            ++required_extent_count;
+
+        extent_cursor =
+            directory_identity_offset_value +
+            directory_bytes_value.size();
+
+        if (baseline.bytes.size() >
+            extent_cursor) {
+            ++required_extent_count;
+        }
+
+        if (required_extent_count >
+            project_generation_segment_max_extents) {
+            if (telemetry != nullptr)
+                telemetry->sparse_fallback_reason = 10;
+            output.reset();
+            return {status_code::not_found};
         }
 
         // Only include topology can change Source Manager graph topology.
@@ -2472,6 +2529,9 @@ status freeze_source_manager_sparse_baseline_image(
                 header_crc_begin);
     }
 
+    const auto identity_copy_begin =
+        source_manager_freeze_clock::now();
+
     try {
         output.file_identity_index.assign(
             options.file_identity_index.begin(),
@@ -2487,6 +2547,12 @@ status freeze_source_manager_sparse_baseline_image(
     catch (const std::length_error&) {
         output.reset();
         return {status_code::not_available};
+    }
+
+    if (telemetry != nullptr) {
+        telemetry->identity_copy_ns =
+            source_manager_elapsed_ns(
+                identity_copy_begin);
     }
 
     output.baseline = baseline.bytes;
@@ -2521,6 +2587,9 @@ status freeze_source_manager_sparse_baseline_image(
     }
 
     if (telemetry != nullptr) {
+        telemetry->extent_count =
+            static_cast<std::uint32_t>(
+                segment.extent_count());
         telemetry->internal_ns =
             source_manager_elapsed_ns(
                 internal_begin);
@@ -3460,6 +3529,8 @@ status encode_source_manager_image(
     }
 
     if (telemetry != nullptr) {
+        telemetry->extent_count =
+            output.empty() ? 0u : 1u;
         telemetry->internal_ns =
             source_manager_elapsed_ns(
                 internal_begin);

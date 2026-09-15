@@ -558,10 +558,14 @@ status freeze_project_generation(
                 source_manager_detail.verify_ns;
             telemetry->source_manager_segment_validate_ns =
                 source_manager_detail.segment_validate_ns;
+            telemetry->source_manager_identity_copy_ns =
+                source_manager_detail.identity_copy_ns;
             telemetry->source_manager_mode =
                 source_manager_detail.mode;
             telemetry->source_manager_crc_worker_count =
                 source_manager_detail.crc_worker_count;
+            telemetry->source_manager_extent_count =
+                source_manager_detail.extent_count;
             telemetry->source_manager_sparse_fallback_reason =
                 source_manager_detail.sparse_fallback_reason;
         }

@@ -105,10 +105,13 @@ struct source_manager_freeze_telemetry final {
     std::uint64_t bind_ns = 0;
     std::uint64_t verify_ns = 0;
     std::uint64_t segment_validate_ns = 0;
+    std::uint64_t identity_copy_ns = 0;
 
-    // 1 = native scatter/gather freeze, 2 = full encoded image.
+    // 1 = native scatter/gather freeze, 2 = full encoded image,
+    // 3 = sparse baseline scatter/gather.
     std::uint32_t mode = 0;
     std::uint32_t crc_worker_count = 0;
+    std::uint32_t extent_count = 0;
 
     // D4D1_SPARSE_FALLBACK_REASON
     // 0 none; 1 endian; 2 baseline binding; 3 root proof unavailable;
