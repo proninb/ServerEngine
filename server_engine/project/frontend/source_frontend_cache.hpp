@@ -200,6 +200,11 @@ public:
 
     [[nodiscard]] bool baseline_backed() const noexcept { return baseline_cache != nullptr; }
 
+    [[nodiscard]] const build_cache_image_view*
+    baseline_persistence_image() const noexcept {
+        return baseline_cache;
+    }
+
     [[nodiscard]] source_frontend_cache_update begin_update(bool full_reconstruction) noexcept;
     void invalidate() noexcept;
 

@@ -668,6 +668,14 @@ status freeze_project_generation(
             build_cache_detail.bind_ns;
         telemetry->build_cache_verify_ns =
             build_cache_detail.verify_ns;
+        telemetry->build_cache_mapped_baseline_bulk_bytes =
+            build_cache_detail.mapped_baseline_bulk_bytes;
+        telemetry->build_cache_mapped_baseline_patch_records =
+            build_cache_detail.mapped_baseline_patch_records;
+        telemetry->build_cache_mapped_baseline_append_records =
+            build_cache_detail.mapped_baseline_append_records;
+        telemetry->build_cache_mapped_baseline_bulk_sections =
+            build_cache_detail.mapped_baseline_bulk_sections;
     }
 
     if (!result.ok())

@@ -3182,7 +3182,8 @@ struct idempotent_save_timing final {
         telemetry.generation_freeze_source_manager_allocate_zero_ns == 0 &&
         telemetry.generation_freeze_source_manager_source_records_ns == 0 &&
         telemetry.generation_freeze_source_manager_path_index_ns == 0 &&
-        telemetry.generation_freeze_source_manager_verify_ns == 0;
+        telemetry.generation_freeze_source_manager_verify_ns == 0 &&
+        telemetry.generation_freeze_build_cache_mapped_baseline_bulk_bytes != 0;
 
     std::cout
         << "D4A_SPARSE_SAVE_MATERIALIZATION,"
@@ -3470,6 +3471,14 @@ struct idempotent_save_timing final {
         << ",build_cache_verify_ms="
         << ns_ms(
             telemetry.generation_freeze_build_cache_verify_ns)
+        << ",build_cache_mapped_bulk_bytes="
+        << telemetry.generation_freeze_build_cache_mapped_baseline_bulk_bytes
+        << ",build_cache_mapped_patch_records="
+        << telemetry.generation_freeze_build_cache_mapped_baseline_patch_records
+        << ",build_cache_mapped_append_records="
+        << telemetry.generation_freeze_build_cache_mapped_baseline_append_records
+        << ",build_cache_mapped_bulk_sections="
+        << telemetry.generation_freeze_build_cache_mapped_baseline_bulk_sections
 
         << ",freeze_accounted_ms="
         << ns_ms(

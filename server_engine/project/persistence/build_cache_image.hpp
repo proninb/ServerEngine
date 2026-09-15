@@ -105,6 +105,11 @@ struct build_cache_encode_telemetry final {
     std::uint64_t header_directory_ns = 0;
     std::uint64_t bind_ns = 0;
     std::uint64_t verify_ns = 0;
+
+    std::uint64_t mapped_baseline_bulk_bytes = 0;
+    std::uint64_t mapped_baseline_patch_records = 0;
+    std::uint64_t mapped_baseline_append_records = 0;
+    std::uint32_t mapped_baseline_bulk_sections = 0;
 };
 
 // Mmap-native BUILD-only baseline. The view contains Source bytes, Parser-local
@@ -136,6 +141,9 @@ public:
     [[nodiscard]] std::size_t frontend_count() const noexcept {
         return frontend_count_value;
     }
+
+    [[nodiscard]] std::span<const std::byte> section_bytes(
+        build_cache_image_section kind) const noexcept;
 
     // O(1) persistence sizing metadata. These counts are validated while the
     // mmap image is bound and seed sparse Generation summaries without scans.

@@ -474,6 +474,28 @@ void build_cache_image_view::reset() noexcept {
     contributions_complete_value = false;
 }
 
+std::span<const std::byte> build_cache_image_view::section_bytes(
+    build_cache_image_section kind) const noexcept {
+
+    const auto& value = section(kind);
+
+    std::uint64_t byte_count = 0;
+    if (value.data == nullptr ||
+        !multiply_u64(
+            value.count,
+            value.record_size,
+            byte_count) ||
+        byte_count >
+            (std::numeric_limits<std::size_t>::max)()) {
+        return {};
+    }
+
+    return {
+        value.data,
+        static_cast<std::size_t>(byte_count),
+    };
+}
+
 status build_cache_image_view::bind(
     std::span<const std::byte> image) noexcept {
 
@@ -3090,6 +3112,110 @@ status encode_build_cache_image(
                 layout[section_index(kind)].offset);
         };
 
+    const auto* baseline_build_cache =
+        frontend.baseline_persistence_image();
+
+    const bool use_mapped_baseline_sections =
+        std::endian::native == std::endian::little &&
+        baseline_build_cache != nullptr &&
+        baseline_build_cache->valid();
+
+    const auto encode_mapped_baseline_section =
+        [&](build_cache_image_section kind,
+            const auto& values,
+            std::size_t record_size,
+            const auto& write_record) noexcept {
+
+            if (!use_mapped_baseline_sections)
+                return false;
+
+            const auto baseline_count =
+                values.baseline_size();
+            const auto local_values =
+                values.local_values();
+
+            if (values.size() !=
+                baseline_count + local_values.size()) {
+                return false;
+            }
+
+            if (record_size != 0 &&
+                baseline_count >
+                    (std::numeric_limits<std::size_t>::max)() /
+                        record_size) {
+                return false;
+            }
+
+            const auto baseline_bytes =
+                baseline_build_cache->section_bytes(kind);
+            const auto expected_baseline_bytes =
+                baseline_count * record_size;
+
+            if (baseline_bytes.size() !=
+                expected_baseline_bytes) {
+                return false;
+            }
+
+            bool patches_valid = true;
+            std::size_t patch_records = 0;
+
+            values.for_each_materialized(
+                [&](std::size_t index,
+                    const auto&) noexcept {
+
+                    if (index >= baseline_count) {
+                        patches_valid = false;
+                        return;
+                    }
+
+                    ++patch_records;
+                });
+
+            if (!patches_valid)
+                return false;
+
+            auto* target = section_data(kind);
+
+            if (!baseline_bytes.empty()) {
+                std::memcpy(
+                    target,
+                    baseline_bytes.data(),
+                    baseline_bytes.size());
+            }
+
+            values.for_each_materialized(
+                [&](std::size_t index,
+                    const auto& value) noexcept {
+
+                    write_record(
+                        target + index * record_size,
+                        value);
+                });
+
+            for (std::size_t index = 0;
+                 index < local_values.size();
+                 ++index) {
+
+                write_record(
+                    target +
+                        (baseline_count + index) *
+                            record_size,
+                    local_values[index]);
+            }
+
+            if (telemetry != nullptr) {
+                telemetry->mapped_baseline_bulk_bytes +=
+                    baseline_bytes.size();
+                telemetry->mapped_baseline_patch_records +=
+                    patch_records;
+                telemetry->mapped_baseline_append_records +=
+                    local_values.size();
+                ++telemetry->mapped_baseline_bulk_sections;
+            }
+
+            return true;
+        };
+
     if (telemetry != nullptr)
         telemetry->layout_allocate_ns =
             elapsed(layout_begin);
@@ -3945,154 +4071,307 @@ status encode_build_cache_image(
     const auto contribution_begin =
         std::chrono::steady_clock::now();
 
-    auto* contribution_states =
-        section_data(build_cache_image_section::contribution_states);
-    for (std::size_t index = 0;
-         index < contribution.sources.size();
-         ++index) {
+    const auto write_contribution_state =
+        [&](std::byte* target,
+            const source_contribution_state& value) noexcept {
 
-        const auto& value = contribution.sources[index];
+            write_u32(target, value.source.value());
+            write_u32(target + 4, 0);
+            write_range(target + 8, value.types);
+            write_range(target + 16, value.members);
+            write_range(target + 24, value.modifiers);
+            write_range(target + 32, value.enum_values);
+            write_range(target + 40, value.objects);
+            write_range(target + 48, value.links);
+        };
+
+    if (!encode_mapped_baseline_section(
+            build_cache_image_section::contribution_states,
+            contribution.sources,
+            contribution_state_record_size,
+            write_contribution_state)) {
+
         auto* target =
-            contribution_states + index * contribution_state_record_size;
+            section_data(
+                build_cache_image_section::contribution_states);
 
-        write_u32(target, value.source.value());
-        write_u32(target + 4, 0);
-        write_range(target + 8, value.types);
-        write_range(target + 16, value.members);
-        write_range(target + 24, value.modifiers);
-        write_range(target + 32, value.enum_values);
-        write_range(target + 40, value.objects);
-        write_range(target + 48, value.links);
+        for (std::size_t index = 0;
+             index < contribution.sources.size();
+             ++index) {
+
+            write_contribution_state(
+                target +
+                    index * contribution_state_record_size,
+                contribution.sources[index]);
+        }
     }
 
-    auto* contribution_types =
-        section_data(build_cache_image_section::contribution_types);
-    for (std::size_t index = 0;
-         index < contribution.types.size();
-         ++index) {
+    const auto write_contribution_type =
+        [&](std::byte* target,
+            const source_contribution_type& value) noexcept {
 
-        const auto& value = contribution.types[index];
+            write_u32(target, value.identity.value());
+            write_range(target + 4, value.definition_items);
+            target[12] = static_cast<std::byte>(
+                static_cast<std::uint8_t>(
+                    value.explicit_underlying));
+            target[13] = static_cast<std::byte>(
+                static_cast<std::uint8_t>(
+                    value.record_kind));
+            target[14] = static_cast<std::byte>(
+                static_cast<std::uint8_t>(
+                    value.kind));
+            target[15] =
+                static_cast<std::byte>(value.flags);
+        };
+
+    if (!encode_mapped_baseline_section(
+            build_cache_image_section::contribution_types,
+            contribution.types,
+            contribution_type_record_size,
+            write_contribution_type)) {
+
         auto* target =
-            contribution_types + index * contribution_type_record_size;
+            section_data(
+                build_cache_image_section::contribution_types);
 
-        write_u32(target, value.identity.value());
-        write_range(target + 4, value.definition_items);
-        target[12] = static_cast<std::byte>(
-            static_cast<std::uint8_t>(value.explicit_underlying));
-        target[13] = static_cast<std::byte>(
-            static_cast<std::uint8_t>(value.record_kind));
-        target[14] = static_cast<std::byte>(
-            static_cast<std::uint8_t>(value.kind));
-        target[15] = static_cast<std::byte>(value.flags);
+        for (std::size_t index = 0;
+             index < contribution.types.size();
+             ++index) {
+
+            write_contribution_type(
+                target +
+                    index * contribution_type_record_size,
+                contribution.types[index]);
+        }
     }
 
-    auto* contribution_members =
-        section_data(build_cache_image_section::contribution_members);
-    for (std::size_t index = 0;
-         index < contribution.members.size();
-         ++index) {
+    const auto write_contribution_member =
+        [&](std::byte* target,
+            const source_contribution_member& value) noexcept {
 
-        const auto& value = contribution.members[index];
+            write_u32(
+                target,
+                value.type.identity.value());
+            write_range(
+                target + 4,
+                value.type.modifiers);
+            target[12] = static_cast<std::byte>(
+                static_cast<std::uint8_t>(
+                    value.type.intrinsic));
+            write_u32(
+                target + 16,
+                value.name.value());
+            target[20] = static_cast<std::byte>(
+                static_cast<std::uint8_t>(
+                    value.access));
+        };
+
+    if (!encode_mapped_baseline_section(
+            build_cache_image_section::contribution_members,
+            contribution.members,
+            contribution_member_record_size,
+            write_contribution_member)) {
+
         auto* target =
-            contribution_members + index * contribution_member_record_size;
+            section_data(
+                build_cache_image_section::contribution_members);
 
-        write_u32(target, value.type.identity.value());
-        write_range(target + 4, value.type.modifiers);
-        target[12] = static_cast<std::byte>(
-            static_cast<std::uint8_t>(value.type.intrinsic));
-        write_u32(target + 16, value.name.value());
-        target[20] = static_cast<std::byte>(
-            static_cast<std::uint8_t>(value.access));
+        for (std::size_t index = 0;
+             index < contribution.members.size();
+             ++index) {
+
+            write_contribution_member(
+                target +
+                    index * contribution_member_record_size,
+                contribution.members[index]);
+        }
     }
 
-    auto* contribution_modifiers =
-        section_data(build_cache_image_section::contribution_modifiers);
-    for (std::size_t index = 0;
-         index < contribution.modifiers.size();
-         ++index) {
+    const auto write_contribution_modifier =
+        [&](std::byte* target,
+            const source_type_modifier& value) noexcept {
 
-        const auto& value = contribution.modifiers[index];
+            write_u64(target, value.value);
+            target[8] = static_cast<std::byte>(
+                static_cast<std::uint8_t>(
+                    value.kind));
+        };
+
+    if (!encode_mapped_baseline_section(
+            build_cache_image_section::contribution_modifiers,
+            contribution.modifiers,
+            contribution_modifier_record_size,
+            write_contribution_modifier)) {
+
         auto* target =
-            contribution_modifiers + index * contribution_modifier_record_size;
+            section_data(
+                build_cache_image_section::contribution_modifiers);
 
-        write_u64(target, value.value);
-        target[8] = static_cast<std::byte>(
-            static_cast<std::uint8_t>(value.kind));
+        for (std::size_t index = 0;
+             index < contribution.modifiers.size();
+             ++index) {
+
+            write_contribution_modifier(
+                target +
+                    index * contribution_modifier_record_size,
+                contribution.modifiers[index]);
+        }
     }
 
-    auto* contribution_enum_values =
-        section_data(build_cache_image_section::contribution_enum_values);
-    for (std::size_t index = 0;
-         index < contribution.enum_values.size();
-         ++index) {
+    const auto write_contribution_enum_value =
+        [&](std::byte* target,
+            const source_contribution_enum_value& value) noexcept {
 
-        const auto& value = contribution.enum_values[index];
+            write_u32(target, value.name.value());
+            target[4] = static_cast<std::byte>(
+                static_cast<std::uint8_t>(
+                    value.value.intrinsic));
+            write_u64(
+                target + 8,
+                value.value.bits);
+        };
+
+    if (!encode_mapped_baseline_section(
+            build_cache_image_section::contribution_enum_values,
+            contribution.enum_values,
+            contribution_enum_value_record_size,
+            write_contribution_enum_value)) {
+
         auto* target =
-            contribution_enum_values +
-            index * contribution_enum_value_record_size;
+            section_data(
+                build_cache_image_section::contribution_enum_values);
 
-        write_u32(target, value.name.value());
-        target[4] = static_cast<std::byte>(
-            static_cast<std::uint8_t>(value.value.intrinsic));
-        write_u64(target + 8, value.value.bits);
+        for (std::size_t index = 0;
+             index < contribution.enum_values.size();
+             ++index) {
+
+            write_contribution_enum_value(
+                target +
+                    index *
+                        contribution_enum_value_record_size,
+                contribution.enum_values[index]);
+        }
     }
 
-    auto* contribution_objects =
-        section_data(build_cache_image_section::contribution_objects);
-    for (std::size_t index = 0;
-         index < contribution.objects.size();
-         ++index) {
+    const auto write_contribution_object =
+        [&](std::byte* target,
+            const source_contribution_object& value) noexcept {
 
-        const auto& value = contribution.objects[index];
+            write_u32(
+                target,
+                value.identity.value());
+            write_u32(
+                target + 4,
+                value.type.identity.value());
+            write_range(
+                target + 8,
+                value.type.modifiers);
+            target[16] = static_cast<std::byte>(
+                static_cast<std::uint8_t>(
+                    value.type.intrinsic));
+        };
+
+    if (!encode_mapped_baseline_section(
+            build_cache_image_section::contribution_objects,
+            contribution.objects,
+            contribution_object_record_size,
+            write_contribution_object)) {
+
         auto* target =
-            contribution_objects + index * contribution_object_record_size;
+            section_data(
+                build_cache_image_section::contribution_objects);
 
-        write_u32(target, value.identity.value());
-        write_u32(target + 4, value.type.identity.value());
-        write_range(target + 8, value.type.modifiers);
-        target[16] = static_cast<std::byte>(
-            static_cast<std::uint8_t>(value.type.intrinsic));
+        for (std::size_t index = 0;
+             index < contribution.objects.size();
+             ++index) {
+
+            write_contribution_object(
+                target +
+                    index * contribution_object_record_size,
+                contribution.objects[index]);
+        }
     }
 
-    auto* contribution_links =
-        section_data(build_cache_image_section::contribution_links);
-    for (std::size_t index = 0;
-         index < contribution.links.size();
-         ++index) {
+    const auto write_contribution_link =
+        [&](std::byte* target,
+            const source_contribution_link& value) noexcept {
 
-        const auto& value = contribution.links[index];
+            write_u32(
+                target,
+                value.source.object.value());
+            write_u32(
+                target + 4,
+                value.source.member.value());
+            write_u32(
+                target + 8,
+                value.target.object.value());
+            write_u32(
+                target + 12,
+                value.target.member.value());
+        };
+
+    if (!encode_mapped_baseline_section(
+            build_cache_image_section::contribution_links,
+            contribution.links,
+            contribution_link_record_size,
+            write_contribution_link)) {
+
         auto* target =
-            contribution_links + index * contribution_link_record_size;
+            section_data(
+                build_cache_image_section::contribution_links);
 
-        write_u32(target, value.source.object.value());
-        write_u32(target + 4, value.source.member.value());
-        write_u32(target + 8, value.target.object.value());
-        write_u32(target + 12, value.target.member.value());
+        for (std::size_t index = 0;
+             index < contribution.links.size();
+             ++index) {
+
+            write_contribution_link(
+                target +
+                    index * contribution_link_record_size,
+                contribution.links[index]);
+        }
     }
 
-    auto* construction_states =
-        section_data(build_cache_image_section::construction_states);
-    for (std::size_t index = 0;
-         index < contribution.construction.size();
-         ++index) {
+    const auto write_construction_state =
+        [&](std::byte* target,
+            const source_construction_state& value) noexcept {
 
-        const auto& value = contribution.construction[index];
+            write_u32(target, value.declarations);
+            write_u32(target + 4, value.definitions);
+            write_u32(target + 8, value.definition_type);
+            write_u32(target + 12, value.record_struct);
+            write_u32(target + 16, value.record_class);
+            write_u32(target + 20, value.record_union);
+            write_u32(target + 24, value.enum_scoped);
+            write_u32(target + 28, value.enum_unscoped);
+            write_u32(target + 32, value.enum_fixed);
+            target[36] = static_cast<std::byte>(
+                static_cast<std::uint8_t>(
+                    value.fixed_underlying));
+            target[37] = static_cast<std::byte>(
+                static_cast<std::uint8_t>(
+                    value.kind));
+        };
+
+    if (!encode_mapped_baseline_section(
+            build_cache_image_section::construction_states,
+            contribution.construction,
+            construction_state_record_size,
+            write_construction_state)) {
+
         auto* target =
-            construction_states + index * construction_state_record_size;
+            section_data(
+                build_cache_image_section::construction_states);
 
-        write_u32(target, value.declarations);
-        write_u32(target + 4, value.definitions);
-        write_u32(target + 8, value.definition_type);
-        write_u32(target + 12, value.record_struct);
-        write_u32(target + 16, value.record_class);
-        write_u32(target + 20, value.record_union);
-        write_u32(target + 24, value.enum_scoped);
-        write_u32(target + 28, value.enum_unscoped);
-        write_u32(target + 32, value.enum_fixed);
-        target[36] = static_cast<std::byte>(
-            static_cast<std::uint8_t>(value.fixed_underlying));
-        target[37] = static_cast<std::byte>(
-            static_cast<std::uint8_t>(value.kind));
+        for (std::size_t index = 0;
+             index < contribution.construction.size();
+             ++index) {
+
+            write_construction_state(
+                target +
+                    index * construction_state_record_size,
+                contribution.construction[index]);
+        }
     }
 
     if (telemetry != nullptr)
@@ -4200,59 +4479,185 @@ status encode_build_cache_image(
             build_cache_image_section::graph_link_target_index,
             native_link_target_index);
     } else {
-        for (std::size_t index = 0; index < graph.intrinsic_refs.size(); ++index)
-            write_u32(intrinsic_refs + index * 4,
-                      graph.intrinsic_refs[index].value());
+        for (std::size_t index = 0;
+             index < graph.intrinsic_refs.size();
+             ++index) {
 
-        for (std::size_t index = 0; index < graph.named_refs.size(); ++index)
-            write_u32(named_refs + index * 4,
-                      graph.named_refs[index].value());
-
-        for (std::size_t index = 0; index < graph.derived_index.size(); ++index) {
-            const auto& value = graph.derived_index[index];
-            auto* target = derived_index + index * derived_index_record_size;
-            write_u32(target, value.fingerprint);
-            write_u32(target + 4, value.type_ref);
+            write_u32(
+                intrinsic_refs + index * 4,
+                graph.intrinsic_refs[index].value());
         }
 
-        for (std::size_t index = 0;
-             index < graph.dependency_versions.size(); ++index)
-            write_u32(dependency_versions + index * 4,
-                      graph.dependency_versions[index]);
+        const auto write_type_ref =
+            [&](std::byte* target,
+                const TypeRef& value) noexcept {
 
-        for (std::size_t index = 0;
-             index < graph.reverse_dependency_heads.size(); ++index)
-            write_u32(reverse_heads + index * 4,
-                      graph.reverse_dependency_heads[index]);
+                write_u32(target, value.value());
+            };
 
-        for (std::size_t index = 0; index < graph.dependency_edges.size(); ++index) {
-            const auto& value = graph.dependency_edges[index];
-            auto* target = dependency_edges + index * dependency_edge_record_size;
-            write_u32(target, value.owner_handle);
-            write_u32(target + 4, value.next_for_target);
-            write_u32(target + 8, value.owner_version);
+        if (!encode_mapped_baseline_section(
+                build_cache_image_section::graph_named_refs,
+                graph.named_refs,
+                type_ref_record_size,
+                write_type_ref)) {
+
+            for (std::size_t index = 0;
+                 index < graph.named_refs.size();
+                 ++index) {
+
+                write_type_ref(
+                    named_refs + index * type_ref_record_size,
+                    graph.named_refs[index]);
+            }
         }
 
-        const auto write_historical_index =
-            [&](build_cache_image_section kind, const auto& values) noexcept {
-                auto* data = section_data(kind);
-                for (std::size_t index = 0; index < values.size(); ++index) {
-                    write_u32(
-                        data + index * historical_index_record_size,
-                        values[index].fingerprint);
-                    write_u32(
-                        data + index * historical_index_record_size + 4,
-                        values[index].handle);
+        const auto write_derived_index =
+            [&](std::byte* target,
+                const graph_derived_index_slot& value) noexcept {
+
+                write_u32(
+                    target,
+                    value.fingerprint);
+                write_u32(
+                    target + 4,
+                    value.type_ref);
+            };
+
+        if (!encode_mapped_baseline_section(
+                build_cache_image_section::graph_derived_index,
+                graph.derived_index,
+                derived_index_record_size,
+                write_derived_index)) {
+
+            for (std::size_t index = 0;
+                 index < graph.derived_index.size();
+                 ++index) {
+
+                write_derived_index(
+                    derived_index +
+                        index * derived_index_record_size,
+                    graph.derived_index[index]);
+            }
+        }
+
+        const auto write_u32_record =
+            [&](std::byte* target,
+                const std::uint32_t& value) noexcept {
+
+                write_u32(target, value);
+            };
+
+        if (!encode_mapped_baseline_section(
+                build_cache_image_section::graph_dependency_versions,
+                graph.dependency_versions,
+                u32_record_size,
+                write_u32_record)) {
+
+            for (std::size_t index = 0;
+                 index < graph.dependency_versions.size();
+                 ++index) {
+
+                write_u32_record(
+                    dependency_versions +
+                        index * u32_record_size,
+                    graph.dependency_versions[index]);
+            }
+        }
+
+        if (!encode_mapped_baseline_section(
+                build_cache_image_section::graph_reverse_dependency_heads,
+                graph.reverse_dependency_heads,
+                u32_record_size,
+                write_u32_record)) {
+
+            for (std::size_t index = 0;
+                 index < graph.reverse_dependency_heads.size();
+                 ++index) {
+
+                write_u32_record(
+                    reverse_heads +
+                        index * u32_record_size,
+                    graph.reverse_dependency_heads[index]);
+            }
+        }
+
+        const auto write_dependency_edge =
+            [&](std::byte* target,
+                const graph_dependency_edge& value) noexcept {
+
+                write_u32(
+                    target,
+                    value.owner_handle);
+                write_u32(
+                    target + 4,
+                    value.next_for_target);
+                write_u32(
+                    target + 8,
+                    value.owner_version);
+            };
+
+        if (!encode_mapped_baseline_section(
+                build_cache_image_section::graph_dependency_edges,
+                graph.dependency_edges,
+                dependency_edge_record_size,
+                write_dependency_edge)) {
+
+            for (std::size_t index = 0;
+                 index < graph.dependency_edges.size();
+                 ++index) {
+
+                write_dependency_edge(
+                    dependency_edges +
+                        index * dependency_edge_record_size,
+                    graph.dependency_edges[index]);
+            }
+        }
+
+        const auto encode_historical_index =
+            [&](build_cache_image_section kind,
+                const auto& values) noexcept {
+
+                const auto write_index =
+                    [&](std::byte* target,
+                        const auto& value) noexcept {
+
+                        write_u32(
+                            target,
+                            value.fingerprint);
+                        write_u32(
+                            target + 4,
+                            value.handle);
+                    };
+
+                if (encode_mapped_baseline_section(
+                        kind,
+                        values,
+                        historical_index_record_size,
+                        write_index)) {
+                    return;
+                }
+
+                auto* target = section_data(kind);
+
+                for (std::size_t index = 0;
+                     index < values.size();
+                     ++index) {
+
+                    write_index(
+                        target +
+                            index *
+                                historical_index_record_size,
+                        values[index]);
                 }
             };
 
-        write_historical_index(
+        encode_historical_index(
             build_cache_image_section::graph_type_identity_index,
             graph.type_identity_index);
-        write_historical_index(
+        encode_historical_index(
             build_cache_image_section::graph_object_identity_index,
             graph.object_identity_index);
-        write_historical_index(
+        encode_historical_index(
             build_cache_image_section::graph_link_target_index,
             graph.link_target_index);
     }

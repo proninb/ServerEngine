@@ -332,6 +332,12 @@ public:
         return local;
     }
 
+    template<class Function>
+    void for_each_materialized(Function&& function) const noexcept {
+        for (const auto& value : element_cache)
+            function(value.index, *value.value);
+    }
+
 private:
     struct element_block final {
         std::size_t index = 0;
@@ -520,6 +526,27 @@ public:
 
     [[nodiscard]] bool empty() const noexcept {
         return size() == 0;
+    }
+
+    [[nodiscard]] std::size_t baseline_size() const noexcept {
+        return owner != nullptr
+            ? owner->baseline_size()
+            : 0;
+    }
+
+    [[nodiscard]] std::span<const T> local_values() const noexcept {
+        if (owner == nullptr)
+            return {};
+        const auto& values = owner->local_values();
+        return {values.data(), values.size()};
+    }
+
+    template<class Function>
+    void for_each_materialized(Function&& function) const noexcept {
+        if (owner != nullptr) {
+            owner->for_each_materialized(
+                std::forward<Function>(function));
+        }
     }
 
     [[nodiscard]] T operator[](std::size_t index) const noexcept {
