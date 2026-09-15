@@ -3311,6 +3311,966 @@ status encode_build_cache_image(
         native_sources.complete &&
         native_sources.physical.size() == source_count;
 
+    // D4G2: baseline-backed Source/Frontend reconstruction.
+    //
+    // Build Cache v4 stores Source text and Frontend arenas compacted in
+    // source_id order. Sparse BUILD therefore reconstructs those sections from
+    // unchanged baseline runs plus sparse replacements instead of decoding all
+    // untouched Sources one by one.
+    const auto* generation_change_capture =
+        project.generation_provenance().source_change();
+
+    const bool sparse_source_frontend_candidate =
+        !native_source_encoded &&
+        use_mapped_baseline_sections &&
+        frontend.baseline_backed() &&
+        generation_change_capture != nullptr &&
+        generation_change_capture->baseline_overlay();
+
+    if (sparse_source_frontend_candidate) {
+        const auto clear_source_frontend_sections =
+            [&]() noexcept {
+
+                const auto clear_section =
+                    [&](build_cache_image_section kind) noexcept {
+
+                        const auto& value =
+                            layout[section_index(kind)];
+
+                        std::uint64_t byte_count = 0;
+                        if (!multiply_u64(
+                                value.count,
+                                value.record_size,
+                                byte_count) ||
+                            byte_count >
+                                (std::numeric_limits<
+                                    std::size_t>::max)()) {
+                            return;
+                        }
+
+                        if (byte_count != 0) {
+                            std::memset(
+                                section_data(kind),
+                                0,
+                                static_cast<std::size_t>(
+                                    byte_count));
+                        }
+                    };
+
+                clear_section(
+                    build_cache_image_section::source_directory);
+                clear_section(
+                    build_cache_image_section::source_bytes);
+                clear_section(
+                    build_cache_image_section::frontend_local_types);
+                clear_section(
+                    build_cache_image_section::frontend_type_slots);
+                clear_section(
+                    build_cache_image_section::frontend_object_slots);
+                clear_section(
+                    build_cache_image_section::frontend_member_slots);
+            };
+
+        const auto try_sparse_source_frontend =
+            [&]() -> bool {
+
+                try {
+                    const auto baseline_source_count =
+                        baseline_build_cache->source_count();
+
+                    if (baseline_source_count > source_count ||
+                        source_count >
+                            (std::numeric_limits<
+                                std::uint32_t>::max)()) {
+                        return false;
+                    }
+
+                    const auto baseline_directory =
+                        baseline_build_cache->section_bytes(
+                            build_cache_image_section::
+                                source_directory);
+                    const auto baseline_source_bytes =
+                        baseline_build_cache->section_bytes(
+                            build_cache_image_section::
+                                source_bytes);
+
+                    std::uint64_t expected_directory_bytes = 0;
+                    if (!multiply_u64(
+                            baseline_source_count,
+                            source_directory_record_size,
+                            expected_directory_bytes) ||
+                        expected_directory_bytes !=
+                            baseline_directory.size() ||
+                        baseline_source_bytes.size() !=
+                            baseline_build_cache->
+                                source_bytes_count()) {
+                        return false;
+                    }
+
+                    struct sparse_source_index final {
+                        std::uint32_t frontend_overlay = 0;
+                        bool text_candidate = false;
+                    };
+
+                    std::vector<sparse_source_index>
+                        sparse_index(source_count + 1);
+
+                    for (const auto& update :
+                         generation_change_capture->
+                            file_updates) {
+
+                        if (!update.source ||
+                            static_cast<std::size_t>(
+                                update.source.value()) >
+                                source_count ||
+                            update.reserved != 0) {
+                            return false;
+                        }
+
+                        sparse_index[
+                            update.source.value()].
+                                text_candidate = true;
+                    }
+
+                    const auto overlay_count =
+                        frontend.persistence_overlay_count();
+
+                    if (overlay_count >
+                        (std::numeric_limits<
+                            std::uint32_t>::max)()) {
+                        return false;
+                    }
+
+                    std::vector<
+                        source_frontend_persistence_view>
+                            overlay_views(overlay_count);
+
+                    for (std::size_t index = 0;
+                         index < overlay_count;
+                         ++index) {
+
+                        source_id source_value;
+                        const auto result =
+                            frontend.persistence_overlay(
+                                index,
+                                source_value,
+                                overlay_views[index]);
+
+                        if (!result.ok() ||
+                            !source_value ||
+                            static_cast<std::size_t>(
+                                source_value.value()) >
+                                source_count) {
+                            return false;
+                        }
+
+                        auto& slot =
+                            sparse_index[
+                                source_value.value()];
+
+                        if (slot.frontend_overlay != 0) {
+                            return false;
+                        }
+
+                        slot.frontend_overlay =
+                            static_cast<std::uint32_t>(
+                                index + 1);
+
+                        // Overlay entries accumulate across sparse BUILDs. A
+                        // retained overlay therefore also proves this Source is
+                        // safe to resolve directly without touching unrelated
+                        // baseline Sources.
+                        slot.text_candidate = true;
+                    }
+
+                    if (!baseline_directory.empty()) {
+                        std::memcpy(
+                            source_directory,
+                            baseline_directory.data(),
+                            baseline_directory.size());
+                    }
+
+                    std::uint64_t baseline_bytes_copied =
+                        baseline_directory.size();
+
+                    struct sparse_arena_state final {
+                        std::span<const std::byte> baseline;
+                        std::byte* output = nullptr;
+                        std::size_t record_size = 0;
+                        std::size_t baseline_count = 0;
+                        std::size_t current_count = 0;
+                        std::size_t logical_cursor = 0;
+                        std::size_t copy_cursor = 0;
+                        std::size_t output_cursor = 0;
+                    };
+
+                    std::array<sparse_arena_state, 4>
+                        arenas{{
+                            {
+                                baseline_build_cache->
+                                    section_bytes(
+                                        build_cache_image_section::
+                                            frontend_local_types),
+                                local_types,
+                                frontend_local_type_record_size,
+                                baseline_build_cache->
+                                    frontend_local_type_count(),
+                                local_type_count,
+                            },
+                            {
+                                baseline_build_cache->
+                                    section_bytes(
+                                        build_cache_image_section::
+                                            frontend_type_slots),
+                                type_slots,
+                                frontend_type_slot_record_size,
+                                baseline_build_cache->
+                                    frontend_type_slot_count(),
+                                type_slot_count,
+                            },
+                            {
+                                baseline_build_cache->
+                                    section_bytes(
+                                        build_cache_image_section::
+                                            frontend_object_slots),
+                                object_slots,
+                                frontend_object_slot_record_size,
+                                baseline_build_cache->
+                                    frontend_object_slot_count(),
+                                object_slot_count,
+                            },
+                            {
+                                baseline_build_cache->
+                                    section_bytes(
+                                        build_cache_image_section::
+                                            frontend_member_slots),
+                                member_slots,
+                                frontend_member_slot_record_size,
+                                baseline_build_cache->
+                                    frontend_member_slot_count(),
+                                member_slot_count,
+                            },
+                        }};
+
+                    for (const auto& arena : arenas) {
+                        if (arena.record_size == 0 ||
+                            arena.baseline_count >
+                                (std::numeric_limits<
+                                    std::size_t>::max)() /
+                                    arena.record_size ||
+                            arena.baseline.size() !=
+                                arena.baseline_count *
+                                    arena.record_size) {
+                            return false;
+                        }
+                    }
+
+                    const auto copy_arena_until =
+                        [&](sparse_arena_state& arena,
+                            std::size_t target) noexcept {
+
+                            if (target <
+                                    arena.copy_cursor ||
+                                target >
+                                    arena.baseline_count ||
+                                arena.output_cursor >
+                                    arena.current_count) {
+                                return false;
+                            }
+
+                            const auto records =
+                                target -
+                                arena.copy_cursor;
+
+                            if (records >
+                                arena.current_count -
+                                    arena.output_cursor) {
+                                return false;
+                            }
+
+                            const auto bytes =
+                                records *
+                                arena.record_size;
+
+                            if (bytes != 0) {
+                                std::memcpy(
+                                    arena.output +
+                                        arena.output_cursor *
+                                            arena.record_size,
+                                    arena.baseline.data() +
+                                        arena.copy_cursor *
+                                            arena.record_size,
+                                    bytes);
+
+                                baseline_bytes_copied +=
+                                    bytes;
+                            }
+
+                            arena.output_cursor +=
+                                records;
+                            arena.copy_cursor =
+                                target;
+                            return true;
+                        };
+
+                    const auto unchanged_arena_range =
+                        [&](sparse_arena_state& arena,
+                            build_cache_range old_range,
+                            build_cache_range& current_range)
+                            noexcept {
+
+                            if (old_range.begin !=
+                                    arena.logical_cursor ||
+                                old_range.count >
+                                    arena.baseline_count -
+                                        arena.logical_cursor ||
+                                arena.logical_cursor <
+                                    arena.copy_cursor) {
+                                return false;
+                            }
+
+                            const auto begin =
+                                arena.output_cursor +
+                                (arena.logical_cursor -
+                                    arena.copy_cursor);
+
+                            if (begin >
+                                    (std::numeric_limits<
+                                        std::uint32_t>::max)()) {
+                                return false;
+                            }
+
+                            current_range = {
+                                static_cast<std::uint32_t>(
+                                    begin),
+                                old_range.count,
+                            };
+
+                            arena.logical_cursor +=
+                                old_range.count;
+                            return true;
+                        };
+
+                    const auto replace_arena_range =
+                        [&](sparse_arena_state& arena,
+                            build_cache_range old_range,
+                            bool old_present,
+                            std::span<const std::byte>
+                                replacement,
+                            std::size_t replacement_count,
+                            bool baseline_source,
+                            build_cache_range& current_range)
+                            noexcept {
+
+                            if (replacement_count != 0 &&
+                                replacement_count >
+                                    (std::numeric_limits<
+                                        std::size_t>::max)() /
+                                        arena.record_size) {
+                                return false;
+                            }
+
+                            const auto replacement_bytes =
+                                replacement_count *
+                                arena.record_size;
+
+                            if (replacement.size() !=
+                                replacement_bytes) {
+                                return false;
+                            }
+
+                            if (baseline_source) {
+                                if (old_present) {
+                                    if (old_range.begin !=
+                                            arena.logical_cursor ||
+                                        old_range.count >
+                                            arena.baseline_count -
+                                                arena.logical_cursor) {
+                                        return false;
+                                    }
+                                }
+                                else if (old_range.begin != 0 ||
+                                         old_range.count != 0) {
+                                    return false;
+                                }
+
+                                if (!copy_arena_until(
+                                        arena,
+                                        arena.logical_cursor)) {
+                                    return false;
+                                }
+
+                                const auto old_count =
+                                    old_present
+                                    ? static_cast<std::size_t>(
+                                        old_range.count)
+                                    : std::size_t{0};
+
+                                if (old_count >
+                                    arena.baseline_count -
+                                        arena.copy_cursor) {
+                                    return false;
+                                }
+
+                                arena.copy_cursor +=
+                                    old_count;
+                                arena.logical_cursor +=
+                                    old_count;
+                            }
+                            else {
+                                if (arena.logical_cursor !=
+                                        arena.baseline_count ||
+                                    !copy_arena_until(
+                                        arena,
+                                        arena.baseline_count)) {
+                                    return false;
+                                }
+                            }
+
+                            if (replacement_count >
+                                    (std::numeric_limits<
+                                        std::uint32_t>::max)() ||
+                                arena.output_cursor >
+                                    (std::numeric_limits<
+                                        std::uint32_t>::max)() ||
+                                replacement_count >
+                                    arena.current_count -
+                                        arena.output_cursor) {
+                                return false;
+                            }
+
+                            current_range = {
+                                static_cast<std::uint32_t>(
+                                    arena.output_cursor),
+                                static_cast<std::uint32_t>(
+                                    replacement_count),
+                            };
+
+                            if (!replacement.empty()) {
+                                std::memcpy(
+                                    arena.output +
+                                        arena.output_cursor *
+                                            arena.record_size,
+                                    replacement.data(),
+                                    replacement.size());
+                            }
+
+                            arena.output_cursor +=
+                                replacement_count;
+                            return true;
+                        };
+
+                    std::size_t baseline_text_logical = 0;
+                    std::size_t baseline_text_copy = 0;
+                    std::size_t current_text_cursor = 0;
+
+                    const auto copy_text_until =
+                        [&](std::size_t target) noexcept {
+
+                            if (target <
+                                    baseline_text_copy ||
+                                target >
+                                    baseline_source_bytes.size() ||
+                                current_text_cursor >
+                                    source_bytes_count) {
+                                return false;
+                            }
+
+                            const auto bytes =
+                                target -
+                                baseline_text_copy;
+
+                            if (static_cast<std::uint64_t>(
+                                    bytes) >
+                                source_bytes_count -
+                                    current_text_cursor) {
+                                return false;
+                            }
+
+                            if (bytes != 0) {
+                                std::memcpy(
+                                    source_bytes +
+                                        current_text_cursor,
+                                    baseline_source_bytes.data() +
+                                        baseline_text_copy,
+                                    bytes);
+
+                                baseline_bytes_copied +=
+                                    bytes;
+                            }
+
+                            current_text_cursor +=
+                                bytes;
+                            baseline_text_copy =
+                                target;
+                            return true;
+                        };
+
+                    std::size_t current_frontends = 0;
+
+                    for (std::size_t index = 0;
+                         index < source_count;
+                         ++index) {
+
+                        const source_id source_value{
+                            static_cast<std::uint32_t>(
+                                index + 1)};
+
+                        const bool baseline_source =
+                            index <
+                            baseline_source_count;
+
+                        auto* current_record =
+                            source_directory +
+                            index *
+                                source_directory_record_size;
+
+                        write_u32(
+                            current_record,
+                            source_value.value());
+
+                        const std::byte*
+                            baseline_record = nullptr;
+
+                        std::uint32_t old_flags = 0;
+                        std::uint64_t old_text_offset = 0;
+                        std::uint32_t old_text_length = 0;
+                        build_cache_range old_ranges[4]{};
+
+                        if (baseline_source) {
+                            baseline_record =
+                                baseline_directory.data() +
+                                index *
+                                    source_directory_record_size;
+
+                            if (read_u32(
+                                    baseline_record) !=
+                                    source_value.value()) {
+                                return false;
+                            }
+
+                            old_flags =
+                                read_u32(
+                                    baseline_record + 4);
+
+                            if ((old_flags &
+                                    ~source_known_flags) != 0 ||
+                                read_u32(
+                                    baseline_record + 20) != 0) {
+                                return false;
+                            }
+
+                            old_text_offset =
+                                read_u64(
+                                    baseline_record + 8);
+                            old_text_length =
+                                read_u32(
+                                    baseline_record + 16);
+
+                            old_ranges[0] = {
+                                read_u32(
+                                    baseline_record + 24),
+                                read_u32(
+                                    baseline_record + 28),
+                            };
+                            old_ranges[1] = {
+                                read_u32(
+                                    baseline_record + 32),
+                                read_u32(
+                                    baseline_record + 36),
+                            };
+                            old_ranges[2] = {
+                                read_u32(
+                                    baseline_record + 40),
+                                read_u32(
+                                    baseline_record + 44),
+                            };
+                            old_ranges[3] = {
+                                read_u32(
+                                    baseline_record + 48),
+                                read_u32(
+                                    baseline_record + 52),
+                            };
+                        }
+
+                        auto flags = old_flags;
+
+                        const bool old_snapshot =
+                            (old_flags &
+                             source_flag_snapshot) != 0;
+
+                        if (baseline_source &&
+                            old_snapshot) {
+
+                            if (old_text_offset !=
+                                    baseline_text_logical ||
+                                old_text_length >
+                                    baseline_source_bytes.size() -
+                                        baseline_text_logical) {
+                                return false;
+                            }
+                        }
+
+                        const auto& sparse =
+                            sparse_index[
+                                source_value.value()];
+
+                        if (sparse.text_candidate) {
+                            if (baseline_source) {
+                                if (!copy_text_until(
+                                        baseline_text_logical)) {
+                                    return false;
+                                }
+
+                                if (old_snapshot) {
+                                    if (old_text_length >
+                                        baseline_source_bytes.size() -
+                                            baseline_text_copy) {
+                                        return false;
+                                    }
+
+                                    baseline_text_copy +=
+                                        old_text_length;
+                                    baseline_text_logical +=
+                                        old_text_length;
+                                }
+                            }
+                            else {
+                                if (baseline_text_logical !=
+                                        baseline_source_bytes.size() ||
+                                    !copy_text_until(
+                                        baseline_source_bytes.size())) {
+                                    return false;
+                                }
+                            }
+
+                            const auto snapshot =
+                                project.sources().current(
+                                    source_value);
+
+                            flags &=
+                                ~source_flag_snapshot;
+
+                            if (snapshot) {
+                                const auto text =
+                                    snapshot.text();
+
+                                if (text.size() >
+                                        (std::numeric_limits<
+                                            std::uint32_t>::max)() ||
+                                    current_text_cursor >
+                                        source_bytes_count ||
+                                    static_cast<std::uint64_t>(
+                                        text.size()) >
+                                        source_bytes_count -
+                                            current_text_cursor) {
+                                    return false;
+                                }
+
+                                write_u64(
+                                    current_record + 8,
+                                    current_text_cursor);
+                                write_u32(
+                                    current_record + 16,
+                                    static_cast<std::uint32_t>(
+                                        text.size()));
+
+                                if (!text.empty()) {
+                                    std::memcpy(
+                                        source_bytes +
+                                            current_text_cursor,
+                                        text.data(),
+                                        text.size());
+                                }
+
+                                current_text_cursor +=
+                                    text.size();
+                                flags |=
+                                    source_flag_snapshot;
+                            }
+                            else {
+                                write_u64(
+                                    current_record + 8,
+                                    0);
+                                write_u32(
+                                    current_record + 16,
+                                    0);
+                            }
+                        }
+                        else if (baseline_source) {
+                            if (old_snapshot) {
+                                if (baseline_text_logical <
+                                        baseline_text_copy) {
+                                    return false;
+                                }
+
+                                const auto adjusted =
+                                    current_text_cursor +
+                                    (baseline_text_logical -
+                                        baseline_text_copy);
+
+                                write_u64(
+                                    current_record + 8,
+                                    adjusted);
+
+                                baseline_text_logical +=
+                                    old_text_length;
+                            }
+                        }
+                        else {
+                            return false;
+                        }
+
+                        const bool old_frontend =
+                            (old_flags &
+                             source_flag_frontend) != 0;
+
+                        if (old_frontend &&
+                            !old_snapshot) {
+                            return false;
+                        }
+
+                        const auto overlay_slot =
+                            sparse.frontend_overlay;
+
+                        if (overlay_slot != 0) {
+                            const auto overlay_index =
+                                static_cast<std::size_t>(
+                                    overlay_slot - 1);
+
+                            if (overlay_index >=
+                                overlay_views.size()) {
+                                return false;
+                            }
+
+                            const auto& view =
+                                overlay_views[
+                                    overlay_index];
+
+                            flags &=
+                                ~source_flag_frontend;
+
+                            for (std::size_t range = 0;
+                                 range < 4;
+                                 ++range) {
+                                write_cache_range(
+                                    current_record +
+                                        24 +
+                                        range * 8,
+                                    {});
+                            }
+
+                            if (view.record.present) {
+                                if ((flags &
+                                     source_flag_snapshot) == 0 ||
+                                    view.storage !=
+                                        source_frontend_persistence_storage::
+                                            native_interface) {
+                                    return false;
+                                }
+
+                                const auto data =
+                                    view.data;
+
+                                if (data.local_types.size() !=
+                                        view.record.local_types ||
+                                    data.type_slots.size() !=
+                                        view.record.type_slots ||
+                                    data.object_slots.size() !=
+                                        view.record.object_slots ||
+                                    data.member_slots.size() !=
+                                        view.record.member_slots) {
+                                    return false;
+                                }
+
+                                build_cache_range
+                                    current_ranges[4]{};
+
+                                if (!replace_arena_range(
+                                        arenas[0],
+                                        old_ranges[0],
+                                        old_frontend,
+                                        std::as_bytes(
+                                            data.local_types),
+                                        data.local_types.size(),
+                                        baseline_source,
+                                        current_ranges[0]) ||
+                                    !replace_arena_range(
+                                        arenas[1],
+                                        old_ranges[1],
+                                        old_frontend,
+                                        std::as_bytes(
+                                            data.type_slots),
+                                        data.type_slots.size(),
+                                        baseline_source,
+                                        current_ranges[1]) ||
+                                    !replace_arena_range(
+                                        arenas[2],
+                                        old_ranges[2],
+                                        old_frontend,
+                                        std::as_bytes(
+                                            data.object_slots),
+                                        data.object_slots.size(),
+                                        baseline_source,
+                                        current_ranges[2]) ||
+                                    !replace_arena_range(
+                                        arenas[3],
+                                        old_ranges[3],
+                                        old_frontend,
+                                        std::as_bytes(
+                                            data.member_slots),
+                                        data.member_slots.size(),
+                                        baseline_source,
+                                        current_ranges[3])) {
+                                    return false;
+                                }
+
+                                for (std::size_t range = 0;
+                                     range < 4;
+                                     ++range) {
+                                    write_cache_range(
+                                        current_record +
+                                            24 +
+                                            range * 8,
+                                        current_ranges[
+                                            range]);
+                                }
+
+                                flags |=
+                                    source_flag_frontend;
+                                ++current_frontends;
+                            }
+                            else {
+                                for (std::size_t range = 0;
+                                     range < 4;
+                                     ++range) {
+
+                                    build_cache_range
+                                        ignored{};
+
+                                    if (!replace_arena_range(
+                                            arenas[range],
+                                            old_ranges[range],
+                                            old_frontend,
+                                            {},
+                                            0,
+                                            baseline_source,
+                                            ignored)) {
+                                        return false;
+                                    }
+                                }
+                            }
+                        }
+                        else if (baseline_source) {
+                            if (old_frontend) {
+                                build_cache_range
+                                    current_ranges[4]{};
+
+                                for (std::size_t range = 0;
+                                     range < 4;
+                                     ++range) {
+
+                                    if (!unchanged_arena_range(
+                                            arenas[range],
+                                            old_ranges[range],
+                                            current_ranges[
+                                                range])) {
+                                        return false;
+                                    }
+
+                                    write_cache_range(
+                                        current_record +
+                                            24 +
+                                            range * 8,
+                                        current_ranges[
+                                            range]);
+                                }
+
+                                ++current_frontends;
+                            }
+                        }
+                        else if ((flags &
+                                  source_flag_snapshot) != 0) {
+                            return false;
+                        }
+
+                        write_u32(
+                            current_record + 4,
+                            flags);
+                    }
+
+                    if (baseline_text_logical !=
+                            baseline_source_bytes.size() ||
+                        !copy_text_until(
+                            baseline_source_bytes.size()) ||
+                        current_text_cursor !=
+                            source_bytes_count) {
+                        return false;
+                    }
+
+                    for (auto& arena : arenas) {
+                        if (arena.logical_cursor !=
+                                arena.baseline_count ||
+                            !copy_arena_until(
+                                arena,
+                                arena.baseline_count) ||
+                            arena.output_cursor !=
+                                arena.current_count) {
+                            return false;
+                        }
+                    }
+
+                    if (current_frontends !=
+                        frontend_count) {
+                        return false;
+                    }
+
+                    text_cursor =
+                        source_bytes_count;
+                    local_type_cursor =
+                        static_cast<std::uint32_t>(
+                            local_type_count);
+                    type_slot_cursor =
+                        static_cast<std::uint32_t>(
+                            type_slot_count);
+                    object_slot_cursor =
+                        static_cast<std::uint32_t>(
+                            object_slot_count);
+                    member_slot_cursor =
+                        static_cast<std::uint32_t>(
+                            member_slot_count);
+                    observed_frontends =
+                        current_frontends;
+
+                    if (telemetry != nullptr) {
+                        telemetry->
+                            mapped_baseline_bulk_bytes +=
+                                baseline_bytes_copied;
+                        telemetry->
+                            mapped_baseline_bulk_sections +=
+                                6;
+                    }
+
+                    return true;
+                }
+                catch (const std::bad_alloc&) {
+                    return false;
+                }
+                catch (const std::length_error&) {
+                    return false;
+                }
+            };
+
+        if (try_sparse_source_frontend()) {
+            native_source_encoded = true;
+        }
+        else {
+            // Fast path is optional. Partial writes must never leak into the
+            // established canonical fallback encoder.
+            clear_source_frontend_sections();
+        }
+    }
+
     const auto hardware_workers =
         (std::max)(
             std::size_t{1},

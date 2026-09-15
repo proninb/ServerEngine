@@ -205,6 +205,19 @@ public:
         return baseline_cache;
     }
 
+    [[nodiscard]] std::size_t persistence_overlay_count() const noexcept {
+        return baseline_cache != nullptr
+            ? overlay.size()
+            : 0;
+    }
+
+    // Enumerates only sparse Frontend replacements retained over a mapped
+    // baseline. The returned data spans remain owned by this cache.
+    [[nodiscard]] status persistence_overlay(
+        std::size_t index,
+        source_id& source,
+        source_frontend_persistence_view& output) const noexcept;
+
     [[nodiscard]] source_frontend_cache_update begin_update(bool full_reconstruction) noexcept;
     void invalidate() noexcept;
 

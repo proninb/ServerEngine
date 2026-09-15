@@ -657,6 +657,29 @@ status source_frontend_cache::persistence_view(
     return {};
 }
 
+status source_frontend_cache::persistence_overlay(
+    std::size_t index,
+    source_id& source,
+    source_frontend_persistence_view& output) const noexcept {
+
+    source = {};
+    output = {};
+
+    if (baseline_cache == nullptr ||
+        index >= overlay.size()) {
+        return {status_code::not_found};
+    }
+
+    const auto& item = overlay[index];
+
+    if (!item.source || !item.resolved)
+        return {status_code::invalid_state};
+
+    source = item.source;
+    return persistence_view(source, output);
+}
+
+
 status source_frontend_cache::persistence_record(
     source_id source,
     source_frontend_persistence_record& output) const noexcept {

@@ -3183,7 +3183,8 @@ struct idempotent_save_timing final {
         telemetry.generation_freeze_source_manager_source_records_ns == 0 &&
         telemetry.generation_freeze_source_manager_path_index_ns == 0 &&
         telemetry.generation_freeze_source_manager_verify_ns == 0 &&
-        telemetry.generation_freeze_build_cache_mapped_baseline_bulk_bytes != 0;
+        telemetry.generation_freeze_build_cache_mapped_baseline_bulk_bytes != 0 &&
+        telemetry.generation_freeze_build_cache_mapped_baseline_bulk_sections >= 22;
 
     std::cout
         << "D4A_SPARSE_SAVE_MATERIALIZATION,"
