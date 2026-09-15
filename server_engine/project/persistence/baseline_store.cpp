@@ -9,6 +9,7 @@
 #include <limits>
 #include <new>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -2914,23 +2915,10 @@ status baseline_store::commit(
             std::filesystem::remove_all(directory, cleanup_error);
         };
 
-        auto result =
-            durable_write_file(
-                directory / compiled_name,
-                compiled,
-                {},
-                &io);
-        record_transaction_io(io);
-        if (!result.ok()) {
-            cleanup_failed_transaction();
-            return {status_code::persistence_failed};
-        }
-
-        // GEN-D3E: packing is a physical-layout optimization, not a
-        // contiguity requirement. durable_write_file() writes every immutable
-        // Source extent in order and then the Build Cache, so a native
-        // multi-extent Source Generation can use one physical file without
-        // assembling a second contiguous Source copy.
+        // Production sparse SAVE persists four independent immutable
+        // transaction artifacts. They may be written and flushed concurrently;
+        // CURRENT remains the only commit point and is published only after
+        // every worker has completed successfully.
         const bool pack_build_state =
             !change_state.empty() &&
             !source_manager.empty() &&
@@ -2944,54 +2932,8 @@ status baseline_store::commit(
             return {status_code::not_available};
         }
 
-        result = pack_build_state
-            ? durable_write_file(
-                directory / source_manager_name,
-                source_manager,
-                build_cache,
-                &io)
-            : durable_write_file(
-                directory / source_manager_name,
-                source_manager,
-                {},
-                &io);
-        record_transaction_io(io);
-
-        if (!result.ok()) {
-            cleanup_failed_transaction();
-            return {status_code::persistence_failed};
-        }
-        if (!change_state.empty()) {
-            result = durable_write_file(
-                directory / change_state_name,
-                change_state,
-                {},
-                &io);
-            record_transaction_io(io);
-            if (!result.ok()) {
-                cleanup_failed_transaction();
-                return {status_code::persistence_failed};
-            }
-        }
-
-        // Packed production transactions already persist Build Cache as the
-        // tail of source_manager.bin. Legacy three-artifact transactions keep
-        // their standalone build_cache.bin for backward compatibility.
-        if (!pack_build_state) {
-            result = durable_write_file(
-                directory / build_cache_name,
-                build_cache,
-                {},
-                &io);
-            record_transaction_io(io);
-            if (!result.ok()) {
-                cleanup_failed_transaction();
-                return {status_code::persistence_failed};
-            }
-        }
-
         std::array<std::byte, manifest_size> manifest{};
-        result = create_manifest(
+        auto result = create_manifest(
             fingerprint,
             configuration,
             transaction,
@@ -3003,16 +2945,198 @@ status baseline_store::commit(
             cleanup_failed_transaction();
             return result;
         }
-        result = durable_write_file(
-            directory / manifest_name,
-            manifest,
-            {},
-            &io);
-        record_transaction_io(io);
-        if (!result.ok()) {
-            cleanup_failed_transaction();
-            return {status_code::persistence_failed};
+
+        const auto transaction_io_begin =
+            std::chrono::steady_clock::now();
+
+        if (pack_build_state) {
+            status compiled_result;
+            status build_state_result;
+            status change_state_result;
+            status manifest_result;
+
+            durable_write_telemetry compiled_io;
+            durable_write_telemetry build_state_io;
+            durable_write_telemetry change_state_io;
+            durable_write_telemetry manifest_io;
+
+            try {
+                {
+                    std::vector<std::jthread> workers;
+                    workers.reserve(4);
+
+                    workers.emplace_back(
+                        [&]() noexcept {
+                            compiled_result =
+                                durable_write_file(
+                                    directory / compiled_name,
+                                    compiled,
+                                    {},
+                                    &compiled_io);
+                        });
+
+                    workers.emplace_back(
+                        [&]() noexcept {
+                            build_state_result =
+                                durable_write_file(
+                                    directory / source_manager_name,
+                                    source_manager,
+                                    build_cache,
+                                    &build_state_io);
+                        });
+
+                    workers.emplace_back(
+                        [&]() noexcept {
+                            change_state_result =
+                                durable_write_file(
+                                    directory / change_state_name,
+                                    change_state,
+                                    {},
+                                    &change_state_io);
+                        });
+
+                    workers.emplace_back(
+                        [&]() noexcept {
+                            manifest_result =
+                                durable_write_file(
+                                    directory / manifest_name,
+                                    manifest,
+                                    {},
+                                    &manifest_io);
+                        });
+                }
+            }
+            catch (const std::bad_alloc&) {
+                cleanup_failed_transaction();
+                return {status_code::not_available};
+            }
+            catch (const std::length_error&) {
+                cleanup_failed_transaction();
+                return {status_code::not_available};
+            }
+            catch (const std::system_error&) {
+                cleanup_failed_transaction();
+                return {status_code::persistence_failed};
+            }
+
+            output.telemetry.transaction_io_worker_count = 4;
+
+            output.telemetry.transaction_compiled_write_ns =
+                compiled_io.write_ns;
+            output.telemetry.transaction_compiled_flush_ns =
+                compiled_io.flush_ns;
+            output.telemetry.transaction_build_state_write_ns =
+                build_state_io.write_ns;
+            output.telemetry.transaction_build_state_flush_ns =
+                build_state_io.flush_ns;
+            output.telemetry.transaction_change_state_write_ns =
+                change_state_io.write_ns;
+            output.telemetry.transaction_change_state_flush_ns =
+                change_state_io.flush_ns;
+            output.telemetry.transaction_manifest_write_ns =
+                manifest_io.write_ns;
+            output.telemetry.transaction_manifest_flush_ns =
+                manifest_io.flush_ns;
+
+            record_transaction_io(compiled_io);
+            record_transaction_io(build_state_io);
+            record_transaction_io(change_state_io);
+            record_transaction_io(manifest_io);
+
+            if (!compiled_result.ok() ||
+                !build_state_result.ok() ||
+                !change_state_result.ok() ||
+                !manifest_result.ok()) {
+                cleanup_failed_transaction();
+                return {status_code::persistence_failed};
+            }
         }
+        else {
+            output.telemetry.transaction_io_worker_count = 1;
+
+            result = durable_write_file(
+                directory / compiled_name,
+                compiled,
+                {},
+                &io);
+            output.telemetry.transaction_compiled_write_ns =
+                io.write_ns;
+            output.telemetry.transaction_compiled_flush_ns =
+                io.flush_ns;
+            record_transaction_io(io);
+            if (!result.ok()) {
+                cleanup_failed_transaction();
+                return {status_code::persistence_failed};
+            }
+
+            result = durable_write_file(
+                directory / source_manager_name,
+                source_manager,
+                {},
+                &io);
+            output.telemetry.transaction_build_state_write_ns +=
+                io.write_ns;
+            output.telemetry.transaction_build_state_flush_ns +=
+                io.flush_ns;
+            record_transaction_io(io);
+            if (!result.ok()) {
+                cleanup_failed_transaction();
+                return {status_code::persistence_failed};
+            }
+
+            if (!change_state.empty()) {
+                result = durable_write_file(
+                    directory / change_state_name,
+                    change_state,
+                    {},
+                    &io);
+                output.telemetry.transaction_change_state_write_ns =
+                    io.write_ns;
+                output.telemetry.transaction_change_state_flush_ns =
+                    io.flush_ns;
+                record_transaction_io(io);
+                if (!result.ok()) {
+                    cleanup_failed_transaction();
+                    return {status_code::persistence_failed};
+                }
+            }
+
+            result = durable_write_file(
+                directory / build_cache_name,
+                build_cache,
+                {},
+                &io);
+            output.telemetry.transaction_build_state_write_ns +=
+                io.write_ns;
+            output.telemetry.transaction_build_state_flush_ns +=
+                io.flush_ns;
+            record_transaction_io(io);
+            if (!result.ok()) {
+                cleanup_failed_transaction();
+                return {status_code::persistence_failed};
+            }
+
+            result = durable_write_file(
+                directory / manifest_name,
+                manifest,
+                {},
+                &io);
+            output.telemetry.transaction_manifest_write_ns =
+                io.write_ns;
+            output.telemetry.transaction_manifest_flush_ns =
+                io.flush_ns;
+            record_transaction_io(io);
+            if (!result.ok()) {
+                cleanup_failed_transaction();
+                return {status_code::persistence_failed};
+            }
+        }
+
+        output.telemetry.transaction_io_wall_ns =
+            elapsed_ns(
+                transaction_io_begin,
+                std::chrono::steady_clock::now());
+
         auto directory_flush_begin =
             std::chrono::steady_clock::now();
         result = flush_directory(directory);
