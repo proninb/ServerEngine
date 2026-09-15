@@ -3621,6 +3621,25 @@ struct idempotent_save_timing final {
         << ns_ms(telemetry.transaction_build_cache_write_ns)
         << ",tx_build_cache_flush_ms="
         << ns_ms(telemetry.transaction_build_cache_flush_ns)
+        << ",tx_build_cache_sectioned="
+        << telemetry.transaction_build_cache_sectioned
+        << ",tx_build_cache_link_ms="
+        << ns_ms(telemetry.transaction_build_cache_link_ns)
+        << ",tx_build_cache_io_wall_ms="
+        << ns_ms(telemetry.transaction_build_cache_io_wall_ns)
+        << ",tx_build_cache_io_workers="
+        << telemetry.transaction_build_cache_io_worker_count
+        << ",tx_build_cache_directory_flush_ms="
+        << ns_ms(
+            telemetry.transaction_build_cache_directory_flush_ns)
+        << ",tx_build_cache_written_bytes="
+        << telemetry.transaction_build_cache_written_bytes
+        << ",tx_build_cache_reused_bytes="
+        << telemetry.transaction_build_cache_reused_bytes
+        << ",tx_build_cache_written_sections="
+        << telemetry.transaction_build_cache_written_sections
+        << ",tx_build_cache_reused_sections="
+        << telemetry.transaction_build_cache_reused_sections
         << ",tx_change_state_write_ms="
         << ns_ms(telemetry.transaction_change_state_write_ns)
         << ",tx_change_state_flush_ms="

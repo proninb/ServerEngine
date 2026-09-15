@@ -7,6 +7,7 @@
 #include "../parser/source_environment.hpp"
 #include "../source/source_change_tracker.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -24,6 +25,12 @@ inline constexpr std::uint32_t build_cache_image_format_version = 4;
 inline constexpr std::size_t build_cache_image_header_size = 256;
 inline constexpr std::size_t build_cache_image_directory_count = 25;
 inline constexpr std::size_t build_cache_image_directory_entry_size = 32;
+inline constexpr std::size_t build_cache_image_prefix_size =
+    (build_cache_image_header_size +
+     build_cache_image_directory_count *
+         build_cache_image_directory_entry_size +
+     63u) &
+    ~std::size_t{63u};
 
 enum class build_cache_image_section : std::uint32_t {
     source_directory = 1,
@@ -120,6 +127,16 @@ public:
     build_cache_image_view() noexcept = default;
 
     [[nodiscard]] status bind(std::span<const std::byte> image) noexcept;
+
+    // Binds the same logical Build Cache v4 image from an immutable sectioned
+    // physical store. The prefix contains the canonical header + directory;
+    // each section span contains only that section's logical bytes.
+    [[nodiscard]] status bind_sectioned(
+        std::span<const std::byte> prefix,
+        const std::array<
+            std::span<const std::byte>,
+            build_cache_image_directory_count>& section_images) noexcept;
+
     void reset() noexcept;
 
     [[nodiscard]] bool valid() const noexcept {

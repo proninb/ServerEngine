@@ -1,4 +1,5 @@
 #include "baseline_store.hpp"
+#include "build_cache_image.hpp"
 #include "crc64_ecma.hpp"
 
 #include <algorithm>
@@ -44,6 +45,8 @@ constexpr std::string_view compiled_name = "compiled.bin";
 constexpr std::string_view source_manager_name = "source_manager.bin";
 constexpr std::string_view change_state_name = "change_state.bin";
 constexpr std::string_view build_cache_name = "build_cache.bin";
+constexpr std::string_view build_cache_directory_name = "build_cache";
+constexpr std::string_view build_cache_prefix_name = "prefix.bin";
 constexpr std::string_view manifest_name = "manifest.bin";
 constexpr std::string_view current_name = "CURRENT";
 constexpr std::array<std::byte, 8> current_selector_magic_v2{
@@ -495,6 +498,519 @@ void write_u64(std::array<std::byte, manifest_size>& output, std::size_t offset,
     const auto closed = ::close(handle) == 0;
     return synced && closed ? status{} : status{status_code::io_failed};
 #endif
+}
+
+struct build_cache_storage_section final {
+    std::uint32_t record_size = 0;
+    std::uint64_t count = 0;
+    std::uint64_t offset = 0;
+    std::uint64_t byte_count = 0;
+    std::uint64_t crc64 = 0;
+};
+
+struct sectioned_build_cache_write_telemetry final {
+    std::uint64_t link_ns = 0;
+    std::uint64_t io_wall_ns = 0;
+    std::uint64_t directory_flush_ns = 0;
+    std::uint64_t written_bytes = 0;
+    std::uint64_t reused_bytes = 0;
+    std::uint32_t written_sections = 0;
+    std::uint32_t reused_sections = 0;
+    std::uint32_t io_worker_count = 0;
+    bool sectioned = false;
+};
+
+[[nodiscard]] std::filesystem::path
+build_cache_section_path(
+    const std::filesystem::path& directory,
+    std::size_t index) {
+
+    return directory /
+        ("section-" +
+         std::to_string(index + 1) +
+         ".bin");
+}
+
+[[nodiscard]] bool parse_build_cache_prefix(
+    std::span<const std::byte> prefix,
+    std::uint64_t expected_size,
+    std::array<
+        build_cache_storage_section,
+        build_cache_image_directory_count>&
+        output) noexcept {
+
+    output = {};
+
+    if (prefix.size() !=
+        build_cache_image_prefix_size ||
+        read_u32(prefix, 8) !=
+            build_cache_image_format_version ||
+        read_u32(prefix, 12) != endian_marker ||
+        read_u32(prefix, 16) !=
+            build_cache_image_header_size ||
+        read_u32(prefix, 20) !=
+            build_cache_image_directory_count ||
+        read_u32(prefix, 24) !=
+            build_cache_image_directory_entry_size ||
+        read_u64(prefix, 32) !=
+            build_cache_image_header_size ||
+        read_u64(prefix, 40) !=
+            expected_size) {
+        return false;
+    }
+
+    std::uint64_t previous_end =
+        build_cache_image_prefix_size;
+
+    for (std::size_t index = 0;
+         index <
+            build_cache_image_directory_count;
+         ++index) {
+
+        const auto entry_offset =
+            build_cache_image_header_size +
+            index *
+                build_cache_image_directory_entry_size;
+
+        if (entry_offset +
+                build_cache_image_directory_entry_size >
+            prefix.size()) {
+            return false;
+        }
+
+        const auto raw_kind =
+            read_u32(prefix, entry_offset);
+        const auto record_size =
+            read_u32(prefix, entry_offset + 4);
+        const auto offset =
+            read_u64(prefix, entry_offset + 8);
+        const auto count =
+            read_u64(prefix, entry_offset + 16);
+        const auto crc =
+            read_u64(prefix, entry_offset + 24);
+
+        if (raw_kind != index + 1 ||
+            record_size == 0) {
+            return false;
+        }
+
+        const auto aligned =
+            (previous_end + 63u) &
+            ~std::uint64_t{63u};
+
+        if (offset != aligned)
+            return false;
+
+        if (count != 0 &&
+            record_size >
+                (std::numeric_limits<
+                    std::uint64_t>::max)() /
+                    count) {
+            return false;
+        }
+
+        const auto byte_count =
+            count * record_size;
+
+        if (offset >
+            (std::numeric_limits<
+                std::uint64_t>::max)() -
+                byte_count) {
+            return false;
+        }
+
+        const auto end =
+            offset + byte_count;
+
+        if (end > expected_size)
+            return false;
+
+        output[index] = {
+            record_size,
+            count,
+            offset,
+            byte_count,
+            crc,
+        };
+
+        previous_end = end;
+    }
+
+    return previous_end == expected_size;
+}
+
+[[nodiscard]] status durable_write_sectioned_build_cache(
+    const std::filesystem::path& transaction_directory,
+    const std::filesystem::path& previous_directory,
+    std::span<const std::byte> image,
+    durable_write_telemetry& io,
+    sectioned_build_cache_write_telemetry&
+        detail) noexcept {
+
+    io = {};
+    detail = {};
+
+    const auto total_begin =
+        std::chrono::steady_clock::now();
+
+    if (image.size() <
+        build_cache_image_prefix_size) {
+        return {status_code::not_available};
+    }
+
+    std::array<
+        build_cache_storage_section,
+        build_cache_image_directory_count>
+        current{};
+
+    const auto logical_size =
+        static_cast<std::uint64_t>(
+            image.size());
+
+    const auto prefix =
+        image.first(
+            build_cache_image_prefix_size);
+
+    if (!parse_build_cache_prefix(
+            prefix,
+            logical_size,
+            current)) {
+        return {status_code::not_available};
+    }
+
+    const auto section_directory =
+        transaction_directory /
+        build_cache_directory_name;
+
+    std::error_code error;
+    if (!std::filesystem::create_directory(
+            section_directory,
+            error) ||
+        error) {
+        return {status_code::persistence_failed};
+    }
+
+    const auto cleanup = [&]() noexcept {
+        std::error_code cleanup_error;
+        std::filesystem::remove_all(
+            section_directory,
+            cleanup_error);
+    };
+
+    std::array<
+        build_cache_storage_section,
+        build_cache_image_directory_count>
+        previous{};
+
+    bool previous_available = false;
+
+    if (!previous_directory.empty()) {
+        std::vector<std::byte> previous_prefix;
+
+        const auto previous_result =
+            read_small_file(
+                previous_directory /
+                    build_cache_prefix_name,
+                build_cache_image_prefix_size,
+                previous_prefix);
+
+        if (previous_result.ok() &&
+            previous_prefix.size() ==
+                build_cache_image_prefix_size) {
+
+            const auto previous_size =
+                read_u64(
+                    std::span<const std::byte>{
+                        previous_prefix},
+                    40);
+
+            previous_available =
+                parse_build_cache_prefix(
+                    previous_prefix,
+                    previous_size,
+                    previous);
+        }
+    }
+
+    std::array<
+        std::size_t,
+        build_cache_image_directory_count>
+        pending_sections{};
+
+    std::size_t pending_count = 0;
+
+    for (std::size_t index = 0;
+         index <
+            build_cache_image_directory_count;
+         ++index) {
+
+        const auto& value =
+            current[index];
+
+        if (value.offset >
+                logical_size ||
+            value.byte_count >
+                logical_size -
+                    value.offset ||
+            value.offset >
+                (std::numeric_limits<
+                    std::size_t>::max)() ||
+            value.byte_count >
+                (std::numeric_limits<
+                    std::size_t>::max)()) {
+
+            cleanup();
+            return {status_code::not_available};
+        }
+
+        const auto target =
+            build_cache_section_path(
+                section_directory,
+                index);
+
+        bool reused = false;
+
+        if (previous_available) {
+            const auto& old =
+                previous[index];
+
+            const bool metadata_equal =
+                old.record_size ==
+                    value.record_size &&
+                old.count == value.count &&
+                old.byte_count ==
+                    value.byte_count &&
+                old.crc64 == value.crc64;
+
+            if (metadata_equal) {
+                const auto source =
+                    build_cache_section_path(
+                        previous_directory,
+                        index);
+
+                std::error_code size_error;
+                const auto source_size =
+                    std::filesystem::file_size(
+                        source,
+                        size_error);
+
+                if (!size_error &&
+                    source_size ==
+                        value.byte_count) {
+
+                    const auto link_begin =
+                        std::chrono::
+                            steady_clock::now();
+
+                    std::error_code link_error;
+                    std::filesystem::
+                        create_hard_link(
+                            source,
+                            target,
+                            link_error);
+
+                    detail.link_ns +=
+                        elapsed_ns(
+                            link_begin,
+                            std::chrono::
+                                steady_clock::now());
+
+                    if (!link_error) {
+                        reused = true;
+                        ++detail.reused_sections;
+                        detail.reused_bytes +=
+                            value.byte_count;
+                    }
+                }
+            }
+        }
+
+        if (!reused) {
+            pending_sections[
+                pending_count++] = index;
+
+            ++detail.written_sections;
+            detail.written_bytes +=
+                value.byte_count;
+        }
+    }
+
+    // prefix.bin and changed section files are independent immutable
+    // transaction artifacts. Their writes and durable flushes may overlap;
+    // CURRENT remains unpublished until the complete group succeeds.
+    constexpr std::size_t maximum_workers = 8;
+
+    const auto task_count =
+        pending_count + 1; // prefix.bin
+
+    std::array<
+        durable_write_telemetry,
+        build_cache_image_directory_count + 1>
+        task_io{};
+
+    std::array<
+        status,
+        build_cache_image_directory_count + 1>
+        task_status{};
+
+    for (std::size_t index = 0;
+         index < task_count;
+         ++index) {
+        task_status[index] = {
+            status_code::not_available};
+    }
+
+    const auto hardware_workers =
+        (std::max)(
+            std::size_t{1},
+            static_cast<std::size_t>(
+                std::thread::
+                    hardware_concurrency()));
+
+    const auto worker_count =
+        (std::min)(
+            task_count,
+            (std::min)(
+                maximum_workers,
+                hardware_workers));
+
+    detail.io_worker_count =
+        static_cast<std::uint32_t>(
+            worker_count);
+
+    std::atomic<std::size_t>
+        next_task{0};
+
+    const auto io_begin =
+        std::chrono::steady_clock::now();
+
+    const auto worker = [&]() noexcept {
+        for (;;) {
+            const auto task =
+                next_task.fetch_add(
+                    1,
+                    std::memory_order_relaxed);
+
+            if (task >= task_count)
+                return;
+
+            if (task == 0) {
+                task_status[task] =
+                    durable_write_file(
+                        section_directory /
+                            build_cache_prefix_name,
+                        prefix,
+                        {},
+                        &task_io[task]);
+                continue;
+            }
+
+            const auto section_index =
+                pending_sections[
+                    task - 1];
+
+            const auto& value =
+                current[section_index];
+
+            const auto bytes =
+                image.subspan(
+                    static_cast<std::size_t>(
+                        value.offset),
+                    static_cast<std::size_t>(
+                        value.byte_count));
+
+            task_status[task] =
+                durable_write_file(
+                    build_cache_section_path(
+                        section_directory,
+                        section_index),
+                    bytes,
+                    {},
+                    &task_io[task]);
+        }
+    };
+
+    std::array<
+        std::jthread,
+        maximum_workers - 1>
+        workers{};
+
+    std::size_t launched = 0;
+
+    try {
+        for (std::size_t index = 1;
+             index < worker_count;
+             ++index) {
+
+            workers[launched] =
+                std::jthread(
+                    [&]() noexcept {
+                        worker();
+                    });
+
+            ++launched;
+        }
+    }
+    catch (const std::bad_alloc&) {
+        // The caller thread completes all tasks not already claimed.
+    }
+    catch (const std::system_error&) {
+        // The caller thread completes all tasks not already claimed.
+    }
+
+    worker();
+
+    for (std::size_t index = 0;
+         index < launched;
+         ++index) {
+
+        if (workers[index].joinable())
+            workers[index].join();
+    }
+
+    for (std::size_t index = 0;
+         index < task_count;
+         ++index) {
+
+        io.write_ns +=
+            task_io[index].write_ns;
+        io.flush_ns +=
+            task_io[index].flush_ns;
+
+        if (!task_status[index].ok()) {
+            cleanup();
+            return task_status[index];
+        }
+    }
+
+    detail.written_bytes +=
+        prefix.size();
+
+    const auto directory_flush_begin =
+        std::chrono::steady_clock::now();
+
+    const auto result =
+        flush_directory(
+            section_directory);
+
+    detail.directory_flush_ns =
+        elapsed_ns(
+            directory_flush_begin,
+            std::chrono::steady_clock::now());
+
+    if (!result.ok()) {
+        cleanup();
+        return result;
+    }
+
+    detail.sectioned = true;
+    detail.io_wall_ns =
+        elapsed_ns(
+            total_begin,
+            std::chrono::
+                steady_clock::now());
+
+    return {};
 }
 
 [[nodiscard]] status atomic_replace(
@@ -1528,6 +2044,48 @@ status read_only_file_mapping::map(const std::filesystem::path& path) noexcept {
     }
 }
 
+status baseline_snapshot::bind_build_cache(
+    build_cache_image_view& output) const noexcept {
+
+    output.reset();
+
+    if (sectioned_build_cache) {
+        if (!build_cache_prefix.open())
+            return {status_code::not_found};
+
+        std::array<
+            std::span<const std::byte>,
+            build_cache_image_directory_count>
+            section_images{};
+
+        for (std::size_t index = 0;
+             index <
+                build_cache_image_directory_count;
+             ++index) {
+
+            if (!build_cache_sections[index].open())
+                return {status_code::not_found};
+
+            section_images[index] =
+                build_cache_sections[index].bytes();
+        }
+
+        return output.bind_sectioned(
+            build_cache_prefix.bytes(),
+            section_images);
+    }
+
+    const auto image =
+        artifact(
+            baseline_artifact_kind::
+                build_cache);
+
+    return image.empty()
+        ? status{status_code::not_found}
+        : output.bind(image);
+}
+
+
 std::span<const std::byte> baseline_snapshot::artifact(
     baseline_artifact_kind kind) const noexcept {
 
@@ -1555,6 +2113,9 @@ std::span<const std::byte> baseline_snapshot::artifact(
             : change_state.bytes();
 
     case baseline_artifact_kind::build_cache:
+        if (sectioned_build_cache)
+            return {};
+
         if (packed_build_state &&
             packed_build_cache_enabled &&
             source_manager.open() &&
@@ -1602,6 +2163,7 @@ bool baseline_snapshot::mapped(
             change_state.open();
     case baseline_artifact_kind::build_cache:
         return
+            sectioned_build_cache ||
             (packed_build_state &&
              packed_build_cache_enabled &&
              source_manager.open()) ||
@@ -2381,6 +2943,176 @@ status baseline_store::map_source_manager_cached(
 }
 
 
+status baseline_store::map_build_cache_artifact(
+    const std::filesystem::path& directory,
+    std::uint64_t expected_size,
+    baseline_snapshot& snapshot,
+    baseline_open_telemetry* telemetry) const noexcept {
+
+    const auto map_begin =
+        std::chrono::steady_clock::now();
+
+    const auto legacy_path =
+        directory / build_cache_name;
+
+    std::error_code exists_error;
+    const bool legacy_exists =
+        std::filesystem::exists(
+            legacy_path,
+            exists_error);
+
+    if (exists_error)
+        return {status_code::io_failed};
+
+    if (legacy_exists) {
+        auto result =
+            snapshot.build_cache.map(
+                legacy_path);
+
+        if (telemetry != nullptr) {
+            telemetry->build_cache_map_ns +=
+                elapsed_ns(
+                    map_begin,
+                    std::chrono::
+                        steady_clock::now());
+        }
+
+        if (!result.ok())
+            return result;
+
+        const auto validation_begin =
+            std::chrono::steady_clock::now();
+
+        const bool mismatch =
+            snapshot.build_cache.bytes().size() !=
+                expected_size;
+
+        if (telemetry != nullptr) {
+            telemetry->size_validation_ns +=
+                elapsed_ns(
+                    validation_begin,
+                    std::chrono::
+                        steady_clock::now());
+        }
+
+        if (mismatch) {
+            snapshot.build_cache = {};
+            return {
+                status_code::artifact_corrupt};
+        }
+
+        snapshot.sectioned_build_cache =
+            false;
+        return {};
+    }
+
+    const auto section_directory =
+        directory /
+        build_cache_directory_name;
+
+    auto result =
+        snapshot.build_cache_prefix.map(
+            section_directory /
+                build_cache_prefix_name);
+
+    if (!result.ok()) {
+        if (telemetry != nullptr) {
+            telemetry->build_cache_map_ns +=
+                elapsed_ns(
+                    map_begin,
+                    std::chrono::
+                        steady_clock::now());
+        }
+
+        return {
+            status_code::artifact_corrupt};
+    }
+
+    for (std::size_t index = 0;
+         index <
+            build_cache_image_directory_count;
+         ++index) {
+
+        result =
+            snapshot.build_cache_sections[index].
+                map(
+                    build_cache_section_path(
+                        section_directory,
+                        index));
+
+        if (!result.ok()) {
+            snapshot.build_cache_prefix = {};
+
+            for (auto& mapping :
+                 snapshot.build_cache_sections) {
+                mapping = {};
+            }
+
+            if (telemetry != nullptr) {
+                telemetry->build_cache_map_ns +=
+                    elapsed_ns(
+                        map_begin,
+                        std::chrono::
+                            steady_clock::now());
+            }
+
+            return {
+                status_code::artifact_corrupt};
+        }
+    }
+
+    snapshot.sectioned_build_cache =
+        true;
+
+    build_cache_image_view view;
+    result =
+        snapshot.bind_build_cache(view);
+
+    const auto validation_begin =
+        std::chrono::steady_clock::now();
+
+    const auto prefix =
+        snapshot.build_cache_prefix.bytes();
+
+    const bool size_mismatch =
+        prefix.size() <
+            build_cache_image_header_size ||
+        read_u64(prefix, 40) !=
+            expected_size;
+
+    if (telemetry != nullptr) {
+        telemetry->build_cache_map_ns +=
+            elapsed_ns(
+                map_begin,
+                validation_begin);
+
+        telemetry->size_validation_ns +=
+            elapsed_ns(
+                validation_begin,
+                std::chrono::
+                    steady_clock::now());
+    }
+
+    if (!result.ok() || size_mismatch) {
+        snapshot.sectioned_build_cache =
+            false;
+        snapshot.build_cache_prefix = {};
+
+        for (auto& mapping :
+             snapshot.build_cache_sections) {
+            mapping = {};
+        }
+
+        return result.ok()
+            ? status{
+                status_code::artifact_corrupt}
+            : result;
+    }
+
+    return {};
+}
+
+
 status baseline_store::map_build_cache(
     const baseline_fingerprint& expected,
     std::string_view transaction,
@@ -2469,45 +3201,11 @@ status baseline_store::map_build_cache(
             return {};
         }
 
-        const auto map_begin =
-            std::chrono::steady_clock::now();
-
-        result = snapshot.build_cache.map(
-            directory / build_cache_name);
-
-        if (telemetry != nullptr) {
-            telemetry->build_cache_map_ns =
-                elapsed_ns(
-                    map_begin,
-                    std::chrono::steady_clock::now());
-        }
-
-        if (!result.ok()) {
-            return result.code == status_code::not_found
-                ? status{status_code::artifact_corrupt}
-                : result;
-        }
-
-        const auto validation_begin =
-            std::chrono::steady_clock::now();
-
-        const bool mismatch =
-            snapshot.build_cache.bytes().size() !=
-            manifest.build_cache_size;
-
-        if (telemetry != nullptr) {
-            telemetry->size_validation_ns =
-                elapsed_ns(
-                    validation_begin,
-                    std::chrono::steady_clock::now());
-        }
-
-        if (mismatch) {
-            snapshot.build_cache = {};
-            return {status_code::artifact_corrupt};
-        }
-
-        return {};
+        return map_build_cache_artifact(
+            directory,
+            manifest.build_cache_size,
+            snapshot,
+            telemetry);
     }
     catch (const std::bad_alloc&) {
         return {status_code::not_available};
@@ -2578,41 +3276,15 @@ status baseline_store::map_build_cache_cached(
         const auto directory =
             root_path() / std::string{transaction};
 
-        const auto map_begin =
-            std::chrono::steady_clock::now();
+        auto result =
+            map_build_cache_artifact(
+                directory,
+                expected_build_cache_size,
+                snapshot,
+                telemetry);
 
-        auto result = snapshot.build_cache.map(
-            directory / build_cache_name);
-
-        if (telemetry != nullptr) {
-            telemetry->build_cache_map_ns =
-                elapsed_ns(
-                    map_begin,
-                    std::chrono::steady_clock::now());
-        }
-
-        if (!result.ok()) {
-            return result.code == status_code::not_found
-                ? status{status_code::artifact_corrupt}
-                : result;
-        }
-
-        const auto validation_begin =
-            std::chrono::steady_clock::now();
-
-        const bool mismatch =
-            snapshot.build_cache.bytes().size() !=
-                expected_build_cache_size;
-
-        if (telemetry != nullptr) {
-            telemetry->size_validation_ns =
-                elapsed_ns(
-                    validation_begin,
-                    std::chrono::steady_clock::now());
-        }
-
-        if (mismatch)
-            return {status_code::artifact_corrupt};
+        if (!result.ok())
+            return result;
 
         snapshot.packed_build_cache_enabled = false;
         return {};
@@ -2784,24 +3456,15 @@ status baseline_store::open_selected(
                 candidate.packed_build_cache_enabled = true;
             }
             else {
-                const auto build_cache_map_begin =
-                    std::chrono::steady_clock::now();
+                result =
+                    map_build_cache_artifact(
+                        directory,
+                        manifest.build_cache_size,
+                        candidate,
+                        telemetry);
 
-                result = candidate.build_cache.map(
-                    directory / build_cache_name);
-
-                if (telemetry != nullptr) {
-                    telemetry->build_cache_map_ns =
-                        elapsed_ns(
-                            build_cache_map_begin,
-                            std::chrono::steady_clock::now());
-                }
-
-                if (!result.ok()) {
-                    return result.code == status_code::not_found
-                        ? status{status_code::artifact_corrupt}
-                        : result;
-                }
+                if (!result.ok())
+                    return result;
             }
         }
 
@@ -2816,9 +3479,8 @@ status baseline_store::open_selected(
                  baseline_artifact_kind::source_manager).size() !=
                 manifest.source_manager_size) ||
             (include_build_cache &&
-             candidate.artifact(
-                 baseline_artifact_kind::build_cache).size() !=
-                manifest.build_cache_size);
+             !candidate.mapped(
+                 baseline_artifact_kind::build_cache));
 
         if (telemetry != nullptr) {
             telemetry->size_validation_ns =
@@ -2893,6 +3555,36 @@ status baseline_store::commit(
         if (error)
             return {status_code::persistence_failed};
 
+        std::filesystem::path
+            previous_build_cache_directory;
+
+        std::string previous_transaction;
+        const auto previous_result =
+            read_current_transaction(
+                root,
+                previous_transaction);
+
+        if (previous_result.ok() &&
+            valid_transaction_name(
+                previous_transaction)) {
+
+            const auto candidate =
+                root /
+                previous_transaction /
+                build_cache_directory_name;
+
+            std::error_code previous_error;
+            if (std::filesystem::exists(
+                    candidate /
+                        build_cache_prefix_name,
+                    previous_error) &&
+                !previous_error) {
+
+                previous_build_cache_directory =
+                    candidate;
+            }
+        }
+
         std::string transaction;
         std::filesystem::path directory;
         bool created = false;
@@ -2951,6 +3643,8 @@ status baseline_store::commit(
             durable_write_telemetry compiled_io;
             durable_write_telemetry source_manager_io;
             durable_write_telemetry build_cache_io;
+            sectioned_build_cache_write_telemetry
+                build_cache_detail;
             durable_write_telemetry change_state_io;
             durable_write_telemetry manifest_io;
 
@@ -2981,12 +3675,37 @@ status baseline_store::commit(
 
                     workers.emplace_back(
                         [&]() noexcept {
-                            build_cache_result =
-                                durable_write_file(
-                                    directory / build_cache_name,
-                                    build_cache,
-                                    {},
-                                    &build_cache_io);
+                            if (build_cache.is_contiguous()) {
+                                build_cache_result =
+                                    durable_write_sectioned_build_cache(
+                                        directory,
+                                        previous_build_cache_directory,
+                                        build_cache.contiguous(),
+                                        build_cache_io,
+                                        build_cache_detail);
+                            }
+                            else {
+                                build_cache_result = {
+                                    status_code::not_available};
+                            }
+
+                            if (!build_cache_result.ok()) {
+                                std::error_code cleanup_error;
+                                std::filesystem::remove_all(
+                                    directory /
+                                        build_cache_directory_name,
+                                    cleanup_error);
+
+                                build_cache_detail = {};
+
+                                build_cache_result =
+                                    durable_write_file(
+                                        directory /
+                                            build_cache_name,
+                                        build_cache,
+                                        {},
+                                        &build_cache_io);
+                            }
                         });
 
                     workers.emplace_back(
@@ -3038,6 +3757,24 @@ status baseline_store::commit(
                 build_cache_io.write_ns;
             output.telemetry.transaction_build_cache_flush_ns =
                 build_cache_io.flush_ns;
+            output.telemetry.transaction_build_cache_link_ns =
+                build_cache_detail.link_ns;
+            output.telemetry.transaction_build_cache_io_wall_ns =
+                build_cache_detail.io_wall_ns;
+            output.telemetry.transaction_build_cache_io_worker_count =
+                build_cache_detail.io_worker_count;
+            output.telemetry.transaction_build_cache_directory_flush_ns =
+                build_cache_detail.directory_flush_ns;
+            output.telemetry.transaction_build_cache_written_bytes =
+                build_cache_detail.written_bytes;
+            output.telemetry.transaction_build_cache_reused_bytes =
+                build_cache_detail.reused_bytes;
+            output.telemetry.transaction_build_cache_written_sections =
+                build_cache_detail.written_sections;
+            output.telemetry.transaction_build_cache_reused_sections =
+                build_cache_detail.reused_sections;
+            output.telemetry.transaction_build_cache_sectioned =
+                build_cache_detail.sectioned ? 1u : 0u;
 
             output.telemetry.transaction_build_state_write_ns =
                 source_manager_io.write_ns +

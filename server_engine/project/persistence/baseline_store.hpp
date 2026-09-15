@@ -17,6 +17,8 @@
 
 namespace cw::server {
 
+class build_cache_image_view;
+
 inline constexpr std::uint32_t baseline_format_version = 1;
 inline constexpr std::size_t baseline_fingerprint_size = 32;
 
@@ -174,6 +176,15 @@ struct baseline_commit_telemetry final {
     std::uint64_t transaction_source_manager_flush_ns = 0;
     std::uint64_t transaction_build_cache_write_ns = 0;
     std::uint64_t transaction_build_cache_flush_ns = 0;
+    std::uint64_t transaction_build_cache_link_ns = 0;
+    std::uint64_t transaction_build_cache_io_wall_ns = 0;
+    std::uint32_t transaction_build_cache_io_worker_count = 0;
+    std::uint64_t transaction_build_cache_directory_flush_ns = 0;
+    std::uint64_t transaction_build_cache_written_bytes = 0;
+    std::uint64_t transaction_build_cache_reused_bytes = 0;
+    std::uint32_t transaction_build_cache_written_sections = 0;
+    std::uint32_t transaction_build_cache_reused_sections = 0;
+    std::uint32_t transaction_build_cache_sectioned = 0;
     std::uint64_t transaction_change_state_write_ns = 0;
     std::uint64_t transaction_change_state_flush_ns = 0;
     std::uint64_t transaction_manifest_write_ns = 0;
@@ -267,6 +278,11 @@ public:
     [[nodiscard]] project_generation_segments
     segments() const noexcept;
 
+    // Binds either legacy contiguous/packed Build Cache storage or the new
+    // immutable sectioned physical backend to the same logical v4 view.
+    [[nodiscard]] status bind_build_cache(
+        build_cache_image_view& output) const noexcept;
+
     [[nodiscard]] const baseline_fingerprint& fingerprint() const noexcept {
         return fingerprint_value;
     }
@@ -291,6 +307,15 @@ private:
     std::vector<std::byte> embedded_change_state;
 
     read_only_file_mapping build_cache;
+
+    // Sectioned Build Cache physical backend. The canonical logical v4 header
+    // and directory remain in prefix.bin; sections are independent immutable
+    // files so unchanged sections can be hard-linked across transactions.
+    read_only_file_mapping build_cache_prefix;
+    std::array<
+        read_only_file_mapping,
+        25> build_cache_sections;
+    bool sectioned_build_cache = false;
 
     // New SAVE transactions may physically append the logical Build Cache
     // image to source_manager.bin. Logical artifact spans remain independent.
@@ -441,6 +466,12 @@ private:
         bool include_change_state,
         bool include_build_cache,
         baseline_snapshot& output,
+        baseline_open_telemetry* telemetry) const noexcept;
+
+    [[nodiscard]] status map_build_cache_artifact(
+        const std::filesystem::path& directory,
+        std::uint64_t expected_size,
+        baseline_snapshot& snapshot,
         baseline_open_telemetry* telemetry) const noexcept;
 
     [[nodiscard]] std::filesystem::path root_path() const;

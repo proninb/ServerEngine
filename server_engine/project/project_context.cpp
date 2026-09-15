@@ -77,7 +77,7 @@ status project_context::activate_build_baseline(
     if (!snapshot.valid() ||
         snapshot.artifact(baseline_artifact_kind::compiled).empty() ||
         snapshot.artifact(baseline_artifact_kind::source_manager).empty() ||
-        snapshot.artifact(baseline_artifact_kind::build_cache).empty()) {
+        !snapshot.mapped(baseline_artifact_kind::build_cache)) {
         return {status_code::artifact_corrupt};
     }
 
@@ -94,8 +94,7 @@ status project_context::activate_build_baseline(
         return result;
 
     build_cache_image_view build_view;
-    result = build_view.bind(
-        snapshot.artifact(baseline_artifact_kind::build_cache));
+    result = snapshot.bind_build_cache(build_view);
     if (!result.ok())
         return result;
 

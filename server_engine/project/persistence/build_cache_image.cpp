@@ -34,7 +34,7 @@ constexpr std::size_t directory_offset = build_cache_image_header_size;
 constexpr std::size_t directory_bytes =
     build_cache_image_directory_count * build_cache_image_directory_entry_size;
 constexpr std::size_t first_section_offset =
-    (directory_offset + directory_bytes + 63u) & ~std::size_t{63u};
+    build_cache_image_prefix_size;
 
 constexpr std::size_t header_flags_offset = 28;
 constexpr std::size_t header_source_count_offset = 48;
@@ -746,6 +746,480 @@ status build_cache_image_view::bind(
     frontend_count_value = static_cast<std::size_t>(frontend_count);
     derived_index_entries_value = static_cast<std::size_t>(derived_entries);
     change_checkpoint_value = change_checkpoint;
+    frontend_complete_value = true;
+    contributions_complete_value = true;
+
+    return {};
+}
+
+status build_cache_image_view::bind_sectioned(
+    std::span<const std::byte> prefix,
+    const std::array<
+        std::span<const std::byte>,
+        build_cache_image_directory_count>& section_images) noexcept {
+
+    reset();
+
+    if (prefix.size() != first_section_offset)
+        return {status_code::artifact_corrupt};
+
+    if (!std::equal(
+            image_magic.begin(),
+            image_magic.end(),
+            prefix.begin())) {
+        return {status_code::artifact_corrupt};
+    }
+
+    if (read_u32(prefix.data() + 8) !=
+        build_cache_image_format_version) {
+        return {status_code::rebuild_required};
+    }
+
+    const auto flags =
+        read_u32(prefix.data() + header_flags_offset);
+
+    const auto logical_size =
+        read_u64(prefix.data() + 40);
+
+    if (read_u32(prefix.data() + 12) != endian_marker ||
+        read_u32(prefix.data() + 16) !=
+            build_cache_image_header_size ||
+        read_u32(prefix.data() + 20) !=
+            build_cache_image_directory_count ||
+        read_u32(prefix.data() + 24) !=
+            build_cache_image_directory_entry_size ||
+        (flags & ~known_flags) != 0 ||
+        read_u64(prefix.data() + 32) != directory_offset ||
+        logical_size < first_section_offset) {
+        return {status_code::artifact_corrupt};
+    }
+
+    if ((flags & known_flags) != known_flags)
+        return {status_code::artifact_corrupt};
+
+    const auto raw_change_backend =
+        read_u32(
+            prefix.data() +
+            header_change_backend_offset);
+
+    if (read_u32(
+            prefix.data() +
+            header_change_backend_offset + 4) != 0 ||
+        raw_change_backend >
+            static_cast<std::uint32_t>(
+                source_change_backend::windows_usn)) {
+        return {status_code::artifact_corrupt};
+    }
+
+    source_change_checkpoint change_checkpoint;
+    change_checkpoint.backend =
+        static_cast<source_change_backend>(
+            raw_change_backend);
+    change_checkpoint.volume_serial =
+        read_u64(
+            prefix.data() +
+            header_change_volume_offset);
+    change_checkpoint.journal_id =
+        read_u64(
+            prefix.data() +
+            header_change_journal_offset);
+    change_checkpoint.next_usn =
+        static_cast<std::int64_t>(
+            read_u64(
+                prefix.data() +
+                header_change_usn_offset));
+
+    if (!change_checkpoint &&
+        (change_checkpoint.volume_serial != 0 ||
+         change_checkpoint.journal_id != 0 ||
+         change_checkpoint.next_usn != 0)) {
+        return {status_code::artifact_corrupt};
+    }
+
+    if (change_checkpoint &&
+        (change_checkpoint.volume_serial == 0 ||
+         change_checkpoint.journal_id == 0 ||
+         change_checkpoint.next_usn < 0)) {
+        return {status_code::artifact_corrupt};
+    }
+
+    if (!zero_bytes(
+            prefix.data() +
+                header_reserved_begin,
+            header_directory_crc_offset -
+                header_reserved_begin)) {
+        return {status_code::artifact_corrupt};
+    }
+
+    std::array<
+        std::byte,
+        build_cache_image_header_size>
+        header{};
+
+    std::memcpy(
+        header.data(),
+        prefix.data(),
+        header.size());
+
+    const auto stored_header_crc =
+        read_u64(
+            header.data() +
+            header_crc_offset);
+
+    write_u64(
+        header.data() +
+            header_crc_offset,
+        0);
+
+    if (persistence_crc64(header) !=
+        stored_header_crc) {
+        return {status_code::artifact_corrupt};
+    }
+
+    const auto directory_span =
+        prefix.subspan(
+            directory_offset,
+            directory_bytes);
+
+    if (persistence_crc64(directory_span) !=
+        read_u64(
+            prefix.data() +
+            header_directory_crc_offset)) {
+        return {status_code::artifact_corrupt};
+    }
+
+    if (directory_offset + directory_bytes <
+            first_section_offset &&
+        !zero_bytes(
+            prefix.data() +
+                directory_offset +
+                directory_bytes,
+            first_section_offset -
+                directory_offset -
+                directory_bytes)) {
+        return {status_code::artifact_corrupt};
+    }
+
+    section_view
+        candidate[
+            build_cache_image_directory_count]{};
+
+    std::uint64_t previous_end =
+        first_section_offset;
+
+    for (std::size_t index = 0;
+         index <
+            build_cache_image_directory_count;
+         ++index) {
+
+        const auto* entry =
+            prefix.data() +
+            directory_offset +
+            index *
+                build_cache_image_directory_entry_size;
+
+        const auto raw_kind =
+            read_u32(entry);
+
+        const auto kind =
+            static_cast<
+                build_cache_image_section>(
+                    raw_kind);
+
+        const auto record_size =
+            read_u32(entry + 4);
+        const auto offset =
+            read_u64(entry + 8);
+        const auto count =
+            read_u64(entry + 16);
+        const auto section_crc =
+            read_u64(entry + 24);
+
+        const auto aligned_offset =
+            align64(previous_end);
+
+        if (raw_kind != index + 1 ||
+            record_size !=
+                expected_record_size(kind) ||
+            offset != aligned_offset ||
+            (offset & 63u) != 0 ||
+            offset > logical_size) {
+            return {
+                status_code::artifact_corrupt};
+        }
+
+        std::uint64_t byte_count = 0;
+        std::uint64_t end = 0;
+
+        if (!multiply_u64(
+                count,
+                record_size,
+                byte_count) ||
+            !add_u64(
+                offset,
+                byte_count,
+                end) ||
+            end > logical_size ||
+            byte_count >
+                (std::numeric_limits<
+                    std::size_t>::max)()) {
+            return {
+                status_code::artifact_corrupt};
+        }
+
+        if (section_images[index].size() !=
+            static_cast<std::size_t>(
+                byte_count)) {
+            return {
+                status_code::artifact_corrupt};
+        }
+
+        candidate[index] = {
+            section_images[index].data(),
+            count,
+            record_size,
+            section_crc,
+        };
+
+        previous_end = end;
+    }
+
+    if (previous_end != logical_size)
+        return {status_code::artifact_corrupt};
+
+    const auto source_count =
+        read_u64(
+            prefix.data() +
+            header_source_count_offset);
+
+    const auto frontend_count =
+        read_u64(
+            prefix.data() +
+            header_frontend_count_offset);
+
+    const auto source_bytes =
+        read_u64(
+            prefix.data() +
+            header_source_bytes_offset);
+
+    const auto derived_entries =
+        read_u64(
+            prefix.data() +
+            header_derived_entries_offset);
+
+    const auto& source_directory =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    source_directory)];
+
+    const auto& source_bytes_section =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    source_bytes)];
+
+    const auto& contribution_states =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    contribution_states)];
+
+    const auto& intrinsic_refs =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    graph_intrinsic_refs)];
+
+    const auto& named_refs =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    graph_named_refs)];
+
+    const auto& derived_index =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    graph_derived_index)];
+
+    const auto& dependency_versions =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    graph_dependency_versions)];
+
+    const auto& reverse_heads =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    graph_reverse_dependency_heads)];
+
+    const auto& type_identity_index =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    graph_type_identity_index)];
+
+    const auto& object_identity_index =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    graph_object_identity_index)];
+
+    const auto& link_target_index =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    graph_link_target_index)];
+
+    const auto& source_file_identity_index =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    source_file_identity_index)];
+
+    const auto&
+        tracked_directory_identity_index =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    tracked_directory_identity_index)];
+
+    const auto valid_historical_index =
+        [](std::uint64_t count) noexcept {
+            return count != 0 &&
+                (count & (count - 1)) == 0;
+        };
+
+    const auto valid_optional_index =
+        [](std::uint64_t count) noexcept {
+            return count == 0 ||
+                (count & (count - 1)) == 0;
+        };
+
+    if (source_count >
+            (std::numeric_limits<
+                std::uint32_t>::max)() ||
+        frontend_count > source_count ||
+        source_directory.count != source_count ||
+        source_bytes_section.count !=
+            source_bytes ||
+        contribution_states.count !=
+            source_count + 1 ||
+        intrinsic_refs.count !=
+            graph_intrinsic_type_count ||
+        named_refs.count !=
+            dependency_versions.count + 1 ||
+        reverse_heads.count !=
+            dependency_versions.count ||
+        !valid_historical_index(
+            type_identity_index.count) ||
+        !valid_historical_index(
+            object_identity_index.count) ||
+        !valid_historical_index(
+            link_target_index.count) ||
+        !valid_optional_index(
+            source_file_identity_index.count) ||
+        !valid_optional_index(
+            tracked_directory_identity_index.count) ||
+        (!change_checkpoint &&
+         (source_file_identity_index.count != 0 ||
+          tracked_directory_identity_index.count != 0)) ||
+        (change_checkpoint &&
+         source_count != 0 &&
+         source_file_identity_index.count == 0) ||
+        derived_entries >
+            derived_index.count ||
+        source_count >
+            (std::numeric_limits<
+                std::size_t>::max)() ||
+        frontend_count >
+            (std::numeric_limits<
+                std::size_t>::max)() ||
+        derived_entries >
+            (std::numeric_limits<
+                std::size_t>::max)()) {
+        return {status_code::artifact_corrupt};
+    }
+
+    const std::array<std::uint64_t, 7>
+        raw_statistics{
+            read_u64(
+                prefix.data() +
+                header_statistics_offset),
+            read_u64(
+                prefix.data() +
+                header_statistics_offset + 8),
+            read_u64(
+                prefix.data() +
+                header_statistics_offset + 16),
+            read_u64(
+                prefix.data() +
+                header_statistics_offset + 24),
+            read_u64(
+                prefix.data() +
+                header_statistics_offset + 32),
+            read_u64(
+                prefix.data() +
+                header_statistics_offset + 40),
+            read_u64(
+                prefix.data() +
+                header_statistics_offset + 48),
+        };
+
+    for (const auto value : raw_statistics) {
+        if (value >
+            (std::numeric_limits<
+                std::size_t>::max)()) {
+            return {
+                status_code::artifact_corrupt};
+        }
+    }
+
+    source_contribution_statistics statistics;
+    statistics.sources =
+        static_cast<std::size_t>(
+            raw_statistics[0]);
+    statistics.type_declarations =
+        static_cast<std::size_t>(
+            raw_statistics[1]);
+    statistics.members =
+        static_cast<std::size_t>(
+            raw_statistics[2]);
+    statistics.modifiers =
+        static_cast<std::size_t>(
+            raw_statistics[3]);
+    statistics.enum_values =
+        static_cast<std::size_t>(
+            raw_statistics[4]);
+    statistics.objects =
+        static_cast<std::size_t>(
+            raw_statistics[5]);
+    statistics.links =
+        static_cast<std::size_t>(
+            raw_statistics[6]);
+
+    bytes = prefix;
+
+    std::copy(
+        std::begin(candidate),
+        std::end(candidate),
+        std::begin(sections));
+
+    contribution_statistics_value =
+        statistics;
+    source_count_value =
+        static_cast<std::size_t>(
+            source_count);
+    frontend_count_value =
+        static_cast<std::size_t>(
+            frontend_count);
+    derived_index_entries_value =
+        static_cast<std::size_t>(
+            derived_entries);
+    change_checkpoint_value =
+        change_checkpoint;
     frontend_complete_value = true;
     contributions_complete_value = true;
 
