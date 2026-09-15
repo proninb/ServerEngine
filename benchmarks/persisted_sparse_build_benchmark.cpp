@@ -3280,6 +3280,39 @@ struct idempotent_save_timing final {
         << ",freeze_compiled_ms="
         << ns_ms(
             telemetry.generation_freeze_compiled_ns)
+        << ",compiled_total_ms="
+        << ns_ms(
+            telemetry.generation_freeze_compiled_total_ns)
+        << ",compiled_sizing_layout_ms="
+        << ns_ms(
+            telemetry.generation_freeze_compiled_sizing_layout_ns)
+        << ",compiled_allocate_zero_ms="
+        << ns_ms(
+            telemetry.generation_freeze_compiled_allocate_zero_ns)
+        << ",compiled_strings_ms="
+        << ns_ms(
+            telemetry.generation_freeze_compiled_strings_ns)
+        << ",compiled_identities_ms="
+        << ns_ms(
+            telemetry.generation_freeze_compiled_identities_ns)
+        << ",compiled_graph_arrays_ms="
+        << ns_ms(
+            telemetry.generation_freeze_compiled_graph_arrays_ns)
+        << ",compiled_graph_indexes_ms="
+        << ns_ms(
+            telemetry.generation_freeze_compiled_graph_indexes_ns)
+        << ",compiled_section_crc_ms="
+        << ns_ms(
+            telemetry.generation_freeze_compiled_section_crc_ns)
+        << ",compiled_header_bind_ms="
+        << ns_ms(
+            telemetry.generation_freeze_compiled_header_bind_ns)
+        << ",compiled_baseline_bulk_bytes="
+        << telemetry.generation_freeze_compiled_baseline_bulk_bytes
+        << ",compiled_baseline_bulk_sections="
+        << telemetry.generation_freeze_compiled_baseline_bulk_sections
+        << ",compiled_output_bytes="
+        << telemetry.generation_freeze_compiled_output_bytes
         << ",freeze_roots_ms="
         << ns_ms(
             telemetry.generation_freeze_roots_ns)

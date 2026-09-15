@@ -1307,6 +1307,30 @@ status project_manager::save(
             generation_freeze_detail.materialize_change_peak_owned_bytes;
         output.telemetry.generation_freeze_compiled_ns =
             generation_freeze_detail.compiled_ns;
+        output.telemetry.generation_freeze_compiled_total_ns =
+            generation_freeze_detail.compiled_total_ns;
+        output.telemetry.generation_freeze_compiled_sizing_layout_ns =
+            generation_freeze_detail.compiled_sizing_layout_ns;
+        output.telemetry.generation_freeze_compiled_allocate_zero_ns =
+            generation_freeze_detail.compiled_allocate_zero_ns;
+        output.telemetry.generation_freeze_compiled_strings_ns =
+            generation_freeze_detail.compiled_strings_ns;
+        output.telemetry.generation_freeze_compiled_identities_ns =
+            generation_freeze_detail.compiled_identities_ns;
+        output.telemetry.generation_freeze_compiled_graph_arrays_ns =
+            generation_freeze_detail.compiled_graph_arrays_ns;
+        output.telemetry.generation_freeze_compiled_graph_indexes_ns =
+            generation_freeze_detail.compiled_graph_indexes_ns;
+        output.telemetry.generation_freeze_compiled_section_crc_ns =
+            generation_freeze_detail.compiled_section_crc_ns;
+        output.telemetry.generation_freeze_compiled_header_bind_ns =
+            generation_freeze_detail.compiled_header_bind_ns;
+        output.telemetry.generation_freeze_compiled_baseline_bulk_bytes =
+            generation_freeze_detail.compiled_baseline_bulk_bytes;
+        output.telemetry.generation_freeze_compiled_baseline_bulk_sections =
+            generation_freeze_detail.compiled_baseline_bulk_sections;
+        output.telemetry.generation_freeze_compiled_output_bytes =
+            generation_freeze_detail.compiled_output_bytes;
         output.telemetry.generation_freeze_roots_ns =
             generation_freeze_detail.roots_ns;
         output.telemetry.generation_freeze_source_manager_ns =

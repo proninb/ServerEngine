@@ -279,13 +279,46 @@ status freeze_project_generation(
     const auto compiled_begin =
         std::chrono::steady_clock::now();
 
+    compiled_image_encode_telemetry
+        compiled_detail;
+
     result =
         encode_compiled_image(
             project,
-            output.compiled);
+            output.compiled,
+            telemetry != nullptr
+                ? &compiled_detail
+                : nullptr);
 
-    if (telemetry != nullptr)
-        telemetry->compiled_ns = elapsed(compiled_begin);
+    if (telemetry != nullptr) {
+        telemetry->compiled_ns =
+            elapsed(compiled_begin);
+        telemetry->compiled_total_ns =
+            compiled_detail.total_ns;
+        telemetry->compiled_sizing_layout_ns =
+            compiled_detail.sizing_layout_ns;
+        telemetry->compiled_allocate_zero_ns =
+            compiled_detail.allocate_zero_ns;
+        telemetry->compiled_strings_ns =
+            compiled_detail.strings_ns;
+        telemetry->compiled_identities_ns =
+            compiled_detail.identities_ns;
+        telemetry->compiled_graph_arrays_ns =
+            compiled_detail.graph_arrays_ns;
+        telemetry->compiled_graph_indexes_ns =
+            compiled_detail.graph_indexes_ns;
+        telemetry->compiled_section_crc_ns =
+            compiled_detail.section_crc_ns;
+        telemetry->compiled_header_bind_ns =
+            compiled_detail.header_bind_ns;
+        telemetry->compiled_baseline_bulk_bytes =
+            compiled_detail.baseline_bulk_bytes;
+        telemetry->compiled_baseline_bulk_sections =
+            compiled_detail.baseline_bulk_sections;
+        telemetry->compiled_output_bytes =
+            compiled_detail.output_bytes;
+    }
+
     if (!result.ok())
         return result;
 

@@ -7,6 +7,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -324,6 +325,28 @@ const compiled_image_view::section_view& compiled_image_view::section(
     return index < compiled_image_directory_count
         ? sections[index]
         : empty;
+}
+
+std::span<const std::byte> compiled_image_view::section_bytes(
+    compiled_image_section kind) const noexcept {
+
+    const auto& value = section(kind);
+
+    std::uint64_t byte_count = 0;
+    if (value.data == nullptr ||
+        !multiply_u64(
+            value.count,
+            value.record_size,
+            byte_count) ||
+        byte_count >
+            (std::numeric_limits<std::size_t>::max)()) {
+        return {};
+    }
+
+    return {
+        value.data,
+        static_cast<std::size_t>(byte_count),
+    };
 }
 
 void compiled_image_view::reset() noexcept {
@@ -1932,7 +1955,34 @@ status encode_compiled_image(
     const project_context& project,
     std::vector<std::byte>& output) noexcept {
 
+    return encode_compiled_image(
+        project,
+        output,
+        nullptr);
+}
+
+status encode_compiled_image(
+    const project_context& project,
+    std::vector<std::byte>& output,
+    compiled_image_encode_telemetry* telemetry) noexcept {
+
     output.clear();
+
+    if (telemetry != nullptr)
+        *telemetry = {};
+
+    const auto total_begin =
+        std::chrono::steady_clock::now();
+
+    const auto elapsed = [](
+        std::chrono::steady_clock::time_point begin) noexcept {
+        return static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - begin).count());
+    };
+
+    const auto sizing_layout_begin =
+        std::chrono::steady_clock::now();
 
     const auto string_slots = project.string_slot_count();
     std::uint64_t string_bytes_count = 0;
@@ -2051,6 +2101,13 @@ status encode_compiled_image(
     if (cursor > (std::numeric_limits<std::size_t>::max)())
         return {status_code::not_available};
 
+    if (telemetry != nullptr)
+        telemetry->sizing_layout_ns =
+            elapsed(sizing_layout_begin);
+
+    const auto allocate_zero_begin =
+        std::chrono::steady_clock::now();
+
     try {
         output.assign(
             static_cast<std::size_t>(cursor),
@@ -2063,12 +2120,121 @@ status encode_compiled_image(
         return {status_code::not_available};
     }
 
+    if (telemetry != nullptr) {
+        telemetry->allocate_zero_ns =
+            elapsed(allocate_zero_begin);
+        telemetry->output_bytes =
+            static_cast<std::uint64_t>(output.size());
+    }
+
     auto* base = output.data();
 
     const auto section_data = [&](compiled_image_section kind) noexcept {
         return base + static_cast<std::size_t>(
             layout[section_index(kind)].offset);
     };
+
+    const auto* baseline_compiled =
+        project.compiled_graph().
+            baseline_compiled_image();
+
+    const bool use_baseline_compiled =
+        baseline_compiled != nullptr &&
+        baseline_compiled->valid();
+
+    const auto account_baseline_copy =
+        [&](std::size_t bytes) noexcept {
+            if (telemetry != nullptr) {
+                telemetry->baseline_bulk_bytes +=
+                    static_cast<std::uint64_t>(bytes);
+                ++telemetry->baseline_bulk_sections;
+            }
+        };
+
+    const auto encode_mapped_baseline_section =
+        [&](compiled_image_section kind,
+            const auto& values,
+            std::size_t record_size,
+            const auto& write_record) noexcept {
+
+            if (!use_baseline_compiled)
+                return false;
+
+            const auto baseline_count =
+                values.baseline_size();
+            const auto local_values =
+                values.local_values();
+
+            if (values.size() !=
+                baseline_count +
+                    local_values.size() ||
+                (record_size != 0 &&
+                 baseline_count >
+                    (std::numeric_limits<
+                        std::size_t>::max)() /
+                        record_size)) {
+                return false;
+            }
+
+            const auto baseline_bytes =
+                baseline_compiled->
+                    section_bytes(kind);
+
+            const auto expected_bytes =
+                baseline_count *
+                record_size;
+
+            if (baseline_bytes.size() !=
+                expected_bytes) {
+                return false;
+            }
+
+            bool patches_valid = true;
+
+            values.for_each_materialized(
+                [&](std::size_t index,
+                    const auto&) noexcept {
+                    if (index >= baseline_count)
+                        patches_valid = false;
+                });
+
+            if (!patches_valid)
+                return false;
+
+            auto* target =
+                section_data(kind);
+
+            if (!baseline_bytes.empty()) {
+                std::memcpy(
+                    target,
+                    baseline_bytes.data(),
+                    baseline_bytes.size());
+            }
+
+            values.for_each_materialized(
+                [&](std::size_t index,
+                    const auto& value) noexcept {
+                    write_record(
+                        target +
+                            index * record_size,
+                        value);
+                });
+
+            for (std::size_t index = 0;
+                 index < local_values.size();
+                 ++index) {
+
+                write_record(
+                    target +
+                        (baseline_count + index) *
+                            record_size,
+                    local_values[index]);
+            }
+
+            account_baseline_copy(
+                baseline_bytes.size());
+            return true;
+        };
 
     auto* string_core =
         section_data(compiled_image_section::string_core);
@@ -2083,50 +2249,152 @@ status encode_compiled_image(
         section_data(compiled_image_section::identity_index);
 
     const auto encode_string_sections = [&]() noexcept -> status {
-        std::uint64_t string_offset = 0;
-        const auto string_mask = string_index_count - 1;
+        const auto phase_begin =
+            std::chrono::steady_clock::now();
 
-        for (std::size_t index = 0; index < string_slots; ++index) {
-            const auto id = project.string_at_slot(index);
+        std::uint64_t string_offset = 0;
+        const auto string_mask =
+            string_index_count - 1;
+
+        std::size_t first_slot = 0;
+
+        if (use_baseline_compiled) {
+            const auto baseline_slots =
+                baseline_compiled->
+                    string_slot_count();
+
+            const auto baseline_core =
+                baseline_compiled->section_bytes(
+                    compiled_image_section::
+                        string_core);
+            const auto baseline_index =
+                baseline_compiled->section_bytes(
+                    compiled_image_section::
+                        string_index);
+            const auto baseline_bytes =
+                baseline_compiled->section_bytes(
+                    compiled_image_section::
+                        string_bytes);
+
+            if (baseline_slots <= string_slots &&
+                baseline_core.size() ==
+                    baseline_slots *
+                        string_core_size &&
+                baseline_index.size() ==
+                    string_index_count *
+                        index_record_size &&
+                baseline_bytes.size() <=
+                    string_bytes_count) {
+
+                if (!baseline_core.empty()) {
+                    std::memcpy(
+                        string_core,
+                        baseline_core.data(),
+                        baseline_core.size());
+                }
+
+                if (!baseline_index.empty()) {
+                    std::memcpy(
+                        string_index,
+                        baseline_index.data(),
+                        baseline_index.size());
+                }
+
+                if (!baseline_bytes.empty()) {
+                    std::memcpy(
+                        string_bytes,
+                        baseline_bytes.data(),
+                        baseline_bytes.size());
+                }
+
+                string_offset =
+                    baseline_bytes.size();
+                first_slot =
+                    baseline_slots;
+
+                account_baseline_copy(
+                    baseline_core.size());
+                account_baseline_copy(
+                    baseline_index.size());
+                account_baseline_copy(
+                    baseline_bytes.size());
+            }
+        }
+
+        for (std::size_t index = first_slot;
+             index < string_slots;
+             ++index) {
+
+            const auto id =
+                project.string_at_slot(index);
+
             if (!id)
                 continue;
 
-            const auto value = project.string(id);
+            const auto value =
+                project.string(id);
+
             if (value.empty() ||
                 value.size() >
-                    (std::numeric_limits<std::uint32_t>::max)()) {
-                return {status_code::initialization_failed};
+                    (std::numeric_limits<
+                        std::uint32_t>::max)() ||
+                string_offset >
+                    string_bytes_count ||
+                value.size() >
+                    string_bytes_count -
+                        string_offset) {
+                return {
+                    status_code::
+                        initialization_failed};
             }
 
-            const auto hash = string_hash(value);
+            const auto hash =
+                string_hash(value);
 
             auto* core =
-                string_core + index * string_core_size;
-            write_u64(core, string_offset);
+                string_core +
+                index * string_core_size;
+
+            write_u64(
+                core,
+                string_offset);
             write_u32(
                 core + 8,
-                static_cast<std::uint32_t>(value.size()));
-            write_u32(core + 12, 0);
+                static_cast<std::uint32_t>(
+                    value.size()));
+            write_u32(
+                core + 12,
+                0);
 
             std::memcpy(
                 string_bytes +
-                    static_cast<std::size_t>(string_offset),
+                    static_cast<std::size_t>(
+                        string_offset),
                 value.data(),
                 value.size());
 
-            const auto fingerprint = fold32(hash);
+            const auto fingerprint =
+                fold32(hash);
+
             auto position =
-                static_cast<std::size_t>(hash) &
+                static_cast<std::size_t>(
+                    hash) &
                 string_mask;
 
             for (;;) {
                 auto* slot =
                     string_index +
-                    position * index_record_size;
+                    position *
+                        index_record_size;
 
-                if (read_u32(slot + 4) == 0) {
-                    write_u32(slot, fingerprint);
-                    write_u32(slot + 4, id.value());
+                if (read_u32(
+                        slot + 4) == 0) {
+                    write_u32(
+                        slot,
+                        fingerprint);
+                    write_u32(
+                        slot + 4,
+                        id.value());
                     break;
                 }
 
@@ -2135,21 +2403,86 @@ status encode_compiled_image(
                     string_mask;
             }
 
-            string_offset += value.size();
+            string_offset +=
+                value.size();
         }
 
-        return string_offset == string_bytes_count
+        const auto result =
+            string_offset ==
+                string_bytes_count
             ? status{}
-            : status{status_code::initialization_failed};
+            : status{
+                status_code::
+                    initialization_failed};
+
+        if (telemetry != nullptr)
+            telemetry->strings_ns =
+                elapsed(phase_begin);
+
+        return result;
     };
 
     const auto encode_identity_sections = [&]() noexcept -> status {
+        const auto phase_begin =
+            std::chrono::steady_clock::now();
+
         const auto identity_mask =
             identity_index_count - 1;
 
         std::size_t observed = 0;
+        std::size_t first_slot = 0;
 
-        for (std::size_t index = 0;
+        if (use_baseline_compiled) {
+            const auto baseline_slots =
+                baseline_compiled->
+                    identity_slot_count();
+
+            const auto baseline_core =
+                baseline_compiled->section_bytes(
+                    compiled_image_section::
+                        identity_core);
+            const auto baseline_index =
+                baseline_compiled->section_bytes(
+                    compiled_image_section::
+                        identity_index);
+
+            if (baseline_slots <=
+                    identity_slots &&
+                baseline_core.size() ==
+                    baseline_slots *
+                        identity_core_size &&
+                baseline_index.size() ==
+                    identity_index_count *
+                        index_record_size) {
+
+                if (!baseline_core.empty()) {
+                    std::memcpy(
+                        identity_core,
+                        baseline_core.data(),
+                        baseline_core.size());
+                }
+
+                if (!baseline_index.empty()) {
+                    std::memcpy(
+                        identity_index,
+                        baseline_index.data(),
+                        baseline_index.size());
+                }
+
+                first_slot =
+                    baseline_slots;
+                observed =
+                    baseline_compiled->
+                        identity_count();
+
+                account_baseline_copy(
+                    baseline_core.size());
+                account_baseline_copy(
+                    baseline_index.size());
+            }
+        }
+
+        for (std::size_t index = first_slot;
              index < identity_slots;
              ++index) {
 
@@ -2163,28 +2496,39 @@ status encode_compiled_image(
             string_id name;
 
             if (index == 0) {
-                if (identity.kind() != identity_kind::root ||
+                if (identity.kind() !=
+                        identity_kind::root ||
                     identity.slot() != 1 ||
-                    identity_metadata.parent(identity) ||
-                    identity_metadata.name(identity)) {
+                    identity_metadata.parent(
+                        identity) ||
+                    identity_metadata.name(
+                        identity)) {
                     return {
-                        status_code::initialization_failed};
+                        status_code::
+                            initialization_failed};
                 }
             }
             else {
                 parent =
-                    identity_metadata.parent(identity);
+                    identity_metadata.parent(
+                        identity);
                 name =
-                    identity_metadata.name(identity);
+                    identity_metadata.name(
+                        identity);
 
-                if (identity.slot() != index + 1 ||
-                    identity.kind() == identity_kind::root ||
+                if (identity.slot() !=
+                        index + 1 ||
+                    identity.kind() ==
+                        identity_kind::root ||
                     !parent ||
-                    !identity_metadata.valid(parent) ||
+                    !identity_metadata.valid(
+                        parent) ||
                     !name ||
-                    project.string(name).empty()) {
+                    project.string(
+                        name).empty()) {
                     return {
-                        status_code::initialization_failed};
+                        status_code::
+                            initialization_failed};
                 }
             }
 
@@ -2192,18 +2536,29 @@ status encode_compiled_image(
 
             auto* core =
                 identity_core +
-                index * identity_core_size;
+                index *
+                    identity_core_size;
 
-            write_u32(core, identity.value());
+            write_u32(
+                core,
+                identity.value());
 
             if (index == 0) {
-                write_u32(core + 4, 0);
-                write_u32(core + 8, 0);
+                write_u32(
+                    core + 4,
+                    0);
+                write_u32(
+                    core + 8,
+                    0);
                 continue;
             }
 
-            write_u32(core + 4, parent.value());
-            write_u32(core + 8, name.value());
+            write_u32(
+                core + 4,
+                parent.value());
+            write_u32(
+                core + 8,
+                name.value());
 
             const auto hash =
                 semantic_identity_hash(
@@ -2214,15 +2569,18 @@ status encode_compiled_image(
                 fold32(hash);
 
             auto position =
-                static_cast<std::size_t>(hash) &
+                static_cast<std::size_t>(
+                    hash) &
                 identity_mask;
 
             for (;;) {
                 auto* index_slot =
                     identity_index +
-                    position * index_record_size;
+                    position *
+                        index_record_size;
 
-                if (read_u32(index_slot + 4) == 0) {
+                if (read_u32(
+                        index_slot + 4) == 0) {
                     write_u32(
                         index_slot,
                         fingerprint);
@@ -2238,13 +2596,22 @@ status encode_compiled_image(
             }
         }
 
-        observed_identity_count = observed;
+        observed_identity_count =
+            observed;
 
-        return observed ==
+        const auto result =
+            observed ==
                 expected_identity_count
             ? status{}
             : status{
-                status_code::initialization_failed};
+                status_code::
+                    initialization_failed};
+
+        if (telemetry != nullptr)
+            telemetry->identities_ns =
+                elapsed(phase_begin);
+
+        return result;
     };
 
     status string_encode_result;
@@ -2325,113 +2692,434 @@ status encode_compiled_image(
         }
     }
 
-    auto* type_data =
-        section_data(compiled_image_section::types);
-    auto* type_identity_data =
-        section_data(compiled_image_section::type_identities);
+    const auto graph_arrays_begin =
+        std::chrono::steady_clock::now();
 
-    for (std::size_t index = 0; index < graph.types.size(); ++index) {
-        const auto& value = graph.types[index];
-        auto* record = type_data + index * type_record_size;
+    const auto write_type =
+        [&](std::byte* record,
+            const type_entry& value) noexcept {
 
-        write_u32(record, value.definition.begin);
-        write_u32(record + 4, value.definition.count);
-        record[8] = static_cast<std::byte>(
-            static_cast<std::uint8_t>(value.kind));
-        record[9] = static_cast<std::byte>(
-            static_cast<std::uint8_t>(value.record_kind));
-        record[10] = static_cast<std::byte>(
-            static_cast<std::uint8_t>(value.enum_underlying));
-        record[11] = static_cast<std::byte>(value.flags);
+            write_u32(
+                record,
+                value.definition.begin);
+            write_u32(
+                record + 4,
+                value.definition.count);
+            record[8] =
+                static_cast<std::byte>(
+                    static_cast<std::uint8_t>(
+                        value.kind));
+            record[9] =
+                static_cast<std::byte>(
+                    static_cast<std::uint8_t>(
+                        value.record_kind));
+            record[10] =
+                static_cast<std::byte>(
+                    static_cast<std::uint8_t>(
+                        value.enum_underlying));
+            record[11] =
+                static_cast<std::byte>(
+                    value.flags);
+        };
 
-        write_u32(
-            type_identity_data + index * 4,
-            graph.type_identities[index].value());
+    if (!encode_mapped_baseline_section(
+            compiled_image_section::types,
+            graph.types,
+            type_record_size,
+            write_type)) {
+
+        auto* target =
+            section_data(
+                compiled_image_section::types);
+
+        for (std::size_t index = 0;
+             index < graph.types.size();
+             ++index) {
+            write_type(
+                target +
+                    index * type_record_size,
+                graph.types[index]);
+        }
     }
 
-    auto* member_data =
-        section_data(compiled_image_section::members);
-    for (std::size_t index = 0;
-         index < graph.members.size();
-         ++index) {
+    const auto write_identity =
+        [&](std::byte* record,
+            const identity_ref& value) noexcept {
+            write_u32(
+                record,
+                value.value());
+        };
 
-        const auto& value = graph.members[index];
-        auto* record = member_data + index * member_record_size;
+    if (!encode_mapped_baseline_section(
+            compiled_image_section::
+                type_identities,
+            graph.type_identities,
+            4,
+            write_identity)) {
 
-        write_u32(record, value.name.value());
-        write_u32(record + 4, value.type.value());
-        record[8] = static_cast<std::byte>(
-            static_cast<std::uint8_t>(value.access));
+        auto* target =
+            section_data(
+                compiled_image_section::
+                    type_identities);
+
+        for (std::size_t index = 0;
+             index <
+                graph.type_identities.size();
+             ++index) {
+            write_identity(
+                target + index * 4,
+                graph.type_identities[index]);
+        }
     }
 
-    auto* enum_data =
-        section_data(compiled_image_section::enum_values);
-    for (std::size_t index = 0;
-         index < graph.enum_values.size();
-         ++index) {
+    const auto write_member =
+        [&](std::byte* record,
+            const member_record& value) noexcept {
 
-        const auto& value = graph.enum_values[index];
-        auto* record =
-            enum_data + index * enum_value_record_size;
+            write_u32(
+                record,
+                value.name.value());
+            write_u32(
+                record + 4,
+                value.type.value());
+            record[8] =
+                static_cast<std::byte>(
+                    static_cast<std::uint8_t>(
+                        value.access));
+        };
 
-        write_u64(record, value.bits);
-        write_u32(record + 8, value.name.value());
-        record[12] = static_cast<std::byte>(
-            static_cast<std::uint8_t>(value.intrinsic));
+    if (!encode_mapped_baseline_section(
+            compiled_image_section::members,
+            graph.members,
+            member_record_size,
+            write_member)) {
+
+        auto* target =
+            section_data(
+                compiled_image_section::members);
+
+        for (std::size_t index = 0;
+             index < graph.members.size();
+             ++index) {
+            write_member(
+                target +
+                    index * member_record_size,
+                graph.members[index]);
+        }
     }
 
-    auto* object_data =
-        section_data(compiled_image_section::objects);
-    auto* object_identity_data =
-        section_data(compiled_image_section::object_identities);
+    const auto write_enum =
+        [&](std::byte* record,
+            const enum_value_record& value) noexcept {
 
-    for (std::size_t index = 0;
-         index < graph.objects.size();
-         ++index) {
+            write_u64(
+                record,
+                value.bits);
+            write_u32(
+                record + 8,
+                value.name.value());
+            record[12] =
+                static_cast<std::byte>(
+                    static_cast<std::uint8_t>(
+                        value.intrinsic));
+        };
 
-        const auto& value = graph.objects[index];
-        auto* record =
-            object_data + index * object_record_size;
+    if (!encode_mapped_baseline_section(
+            compiled_image_section::
+                enum_values,
+            graph.enum_values,
+            enum_value_record_size,
+            write_enum)) {
 
-        write_u32(record, value.type.value());
-        write_u32(record + 4, value.flags);
+        auto* target =
+            section_data(
+                compiled_image_section::
+                    enum_values);
 
-        write_u32(
-            object_identity_data + index * 4,
-            graph.object_identities[index].value());
+        for (std::size_t index = 0;
+             index < graph.enum_values.size();
+             ++index) {
+            write_enum(
+                target +
+                    index *
+                        enum_value_record_size,
+                graph.enum_values[index]);
+        }
     }
 
-    auto* link_data =
-        section_data(compiled_image_section::links);
-    for (std::size_t index = 0;
-         index < graph.links.size();
-         ++index) {
+    const auto write_object =
+        [&](std::byte* record,
+            const object_entry& value) noexcept {
 
-        const auto& value = graph.links[index];
-        auto* record = link_data + index * link_record_size;
+            write_u32(
+                record,
+                value.type.value());
+            write_u32(
+                record + 4,
+                value.flags);
+        };
 
-        write_u32(record, value.source.object.value());
-        write_u32(record + 4, value.source.member.value());
-        write_u32(record + 8, value.target.object.value());
-        write_u32(record + 12, value.target.member.value());
+    if (!encode_mapped_baseline_section(
+            compiled_image_section::objects,
+            graph.objects,
+            object_record_size,
+            write_object)) {
+
+        auto* target =
+            section_data(
+                compiled_image_section::objects);
+
+        for (std::size_t index = 0;
+             index < graph.objects.size();
+             ++index) {
+            write_object(
+                target +
+                    index * object_record_size,
+                graph.objects[index]);
+        }
     }
 
-    auto* canonical_data =
-        section_data(compiled_image_section::canonical_types);
-    for (std::size_t index = 0;
-         index < graph.canonical_types.size();
-         ++index) {
+    if (!encode_mapped_baseline_section(
+            compiled_image_section::
+                object_identities,
+            graph.object_identities,
+            4,
+            write_identity)) {
 
-        const auto& value = graph.canonical_types[index];
-        auto* record =
-            canonical_data + index * canonical_type_record_size;
+        auto* target =
+            section_data(
+                compiled_image_section::
+                    object_identities);
 
-        write_u64(record, value.payload);
-        write_u32(record + 8, value.child_or_handle);
-        record[12] = static_cast<std::byte>(
-            static_cast<std::uint8_t>(value.kind));
-        record[13] = static_cast<std::byte>(value.detail);
-        write_u16(record + 14, 0);
+        for (std::size_t index = 0;
+             index <
+                graph.object_identities.size();
+             ++index) {
+            write_identity(
+                target + index * 4,
+                graph.object_identities[
+                    index]);
+        }
+    }
+
+    const auto write_link =
+        [&](std::byte* record,
+            const link_record& value) noexcept {
+
+            write_u32(
+                record,
+                value.source.object.value());
+            write_u32(
+                record + 4,
+                value.source.member.value());
+            write_u32(
+                record + 8,
+                value.target.object.value());
+            write_u32(
+                record + 12,
+                value.target.member.value());
+        };
+
+    if (!encode_mapped_baseline_section(
+            compiled_image_section::links,
+            graph.links,
+            link_record_size,
+            write_link)) {
+
+        auto* target =
+            section_data(
+                compiled_image_section::links);
+
+        for (std::size_t index = 0;
+             index < graph.links.size();
+             ++index) {
+            write_link(
+                target +
+                    index * link_record_size,
+                graph.links[index]);
+        }
+    }
+
+    const auto write_canonical =
+        [&](std::byte* record,
+            const graph_canonical_type_record&
+                value) noexcept {
+
+            write_u64(
+                record,
+                value.payload);
+            write_u32(
+                record + 8,
+                value.child_or_handle);
+            record[12] =
+                static_cast<std::byte>(
+                    static_cast<std::uint8_t>(
+                        value.kind));
+            record[13] =
+                static_cast<std::byte>(
+                    value.detail);
+            write_u16(
+                record + 14,
+                0);
+        };
+
+    if (!encode_mapped_baseline_section(
+            compiled_image_section::
+                canonical_types,
+            graph.canonical_types,
+            canonical_type_record_size,
+            write_canonical)) {
+
+        auto* target =
+            section_data(
+                compiled_image_section::
+                    canonical_types);
+
+        for (std::size_t index = 0;
+             index <
+                graph.canonical_types.size();
+             ++index) {
+            write_canonical(
+                target +
+                    index *
+                        canonical_type_record_size,
+                graph.canonical_types[index]);
+        }
+    }
+
+    if (telemetry != nullptr)
+        telemetry->graph_arrays_ns =
+            elapsed(graph_arrays_begin);
+
+    const auto graph_indexes_begin =
+        std::chrono::steady_clock::now();
+
+    const auto baseline_index_compatible =
+        [&](compiled_image_section kind,
+            std::size_t count) noexcept {
+
+            if (!use_baseline_compiled ||
+                count >
+                    (std::numeric_limits<
+                        std::size_t>::max)() /
+                        index_record_size) {
+                return false;
+            }
+
+            return baseline_compiled->
+                section_bytes(kind).size() ==
+                    count * index_record_size;
+        };
+
+    bool reuse_type_index =
+        use_baseline_compiled &&
+        graph.types.baseline_size() ==
+            graph.types.size() &&
+        graph.types.local_values().empty() &&
+        baseline_compiled->type_slot_count() ==
+            graph.types.size() &&
+        baseline_compiled->type_count() ==
+            graph.live_types &&
+        baseline_index_compatible(
+            compiled_image_section::
+                graph_type_index,
+            graph_type_index_count);
+
+    if (reuse_type_index) {
+        graph.types.for_each_materialized(
+            [&](std::size_t index,
+                const type_entry& value) noexcept {
+
+                if (!reuse_type_index ||
+                    index >=
+                        baseline_compiled->
+                            type_slot_count() ||
+                    index >=
+                        (std::numeric_limits<
+                            std::uint32_t>::max)()) {
+                    reuse_type_index = false;
+                    return;
+                }
+
+                const auto baseline_handle =
+                    baseline_compiled->
+                        type_at(index);
+
+                if (static_cast<bool>(
+                        baseline_handle) !=
+                    value.live()) {
+                    reuse_type_index = false;
+                }
+            });
+    }
+
+    bool reuse_object_index =
+        use_baseline_compiled &&
+        graph.objects.baseline_size() ==
+            graph.objects.size() &&
+        graph.objects.local_values().empty() &&
+        baseline_compiled->
+            object_slot_count() ==
+                graph.objects.size() &&
+        baseline_compiled->object_count() ==
+            graph.live_objects &&
+        baseline_index_compatible(
+            compiled_image_section::
+                graph_object_index,
+            graph_object_index_count);
+
+    if (reuse_object_index) {
+        graph.objects.for_each_materialized(
+            [&](std::size_t index,
+                const object_entry& value) noexcept {
+
+                if (!reuse_object_index ||
+                    index >=
+                        baseline_compiled->
+                            object_slot_count() ||
+                    index >=
+                        (std::numeric_limits<
+                            std::uint32_t>::max)()) {
+                    reuse_object_index = false;
+                    return;
+                }
+
+                const auto baseline_handle =
+                    baseline_compiled->
+                        object_at(index);
+
+                if (static_cast<bool>(
+                        baseline_handle) !=
+                    value.live()) {
+                    reuse_object_index = false;
+                }
+            });
+    }
+
+    bool reuse_link_index =
+        use_baseline_compiled &&
+        graph.links.baseline_size() ==
+            graph.links.size() &&
+        graph.links.local_values().empty() &&
+        baseline_compiled->
+            link_slot_count() ==
+                graph.links.size() &&
+        baseline_compiled->link_count() ==
+            graph.live_links &&
+        baseline_index_compatible(
+            compiled_image_section::
+                graph_link_index,
+            graph_link_index_count);
+
+    if (reuse_link_index) {
+        graph.links.for_each_materialized(
+            [&](std::size_t,
+                const link_record&) noexcept {
+                // A link patch may change either liveness or target. The
+                // persisted query index is keyed by target, so reuse is safe
+                // only when no baseline link slot was materialized.
+                reuse_link_index = false;
+            });
     }
 
     auto* graph_type_index =
@@ -2439,34 +3127,65 @@ status encode_compiled_image(
     const auto graph_type_mask = graph_type_index_count - 1;
     std::size_t inserted_types = 0;
 
-    for (std::size_t index = 0;
-         index < graph.types.size();
-         ++index) {
+    if (reuse_type_index) {
+        const auto baseline_index =
+            baseline_compiled->section_bytes(
+                compiled_image_section::
+                    graph_type_index);
 
-        if (!graph.types[index].live())
-            continue;
+        std::memcpy(
+            graph_type_index,
+            baseline_index.data(),
+            baseline_index.size());
 
-        const auto identity = graph.type_identities[index];
-        if (!identity)
-            return {status_code::initialization_failed};
+        inserted_types =
+            graph.live_types;
+        account_baseline_copy(
+            baseline_index.size());
+    }
+    else {
+        for (std::size_t index = 0;
+             index < graph.types.size();
+             ++index) {
 
-        const auto hash = graph_identity_hash(identity.value());
-        const auto fingerprint = fold32(hash);
-        auto position =
-            static_cast<std::size_t>(hash) & graph_type_mask;
+            if (!graph.types[index].live())
+                continue;
 
-        for (;;) {
-            auto* slot =
-                graph_type_index + position * index_record_size;
-            if (read_u32(slot + 4) == 0) {
-                write_u32(slot, fingerprint);
-                write_u32(
-                    slot + 4,
-                    static_cast<std::uint32_t>(index + 1));
-                ++inserted_types;
-                break;
+            const auto identity =
+                graph.type_identities[index];
+            if (!identity)
+                return {status_code::initialization_failed};
+
+            const auto hash =
+                graph_identity_hash(
+                    identity.value());
+            const auto fingerprint =
+                fold32(hash);
+            auto position =
+                static_cast<std::size_t>(hash) &
+                graph_type_mask;
+
+            for (;;) {
+                auto* slot =
+                    graph_type_index +
+                    position *
+                        index_record_size;
+                if (read_u32(
+                        slot + 4) == 0) {
+                    write_u32(
+                        slot,
+                        fingerprint);
+                    write_u32(
+                        slot + 4,
+                        static_cast<std::uint32_t>(
+                            index + 1));
+                    ++inserted_types;
+                    break;
+                }
+                position =
+                    (position + 1) &
+                    graph_type_mask;
             }
-            position = (position + 1) & graph_type_mask;
         }
     }
 
@@ -2475,34 +3194,65 @@ status encode_compiled_image(
     const auto graph_object_mask = graph_object_index_count - 1;
     std::size_t inserted_objects = 0;
 
-    for (std::size_t index = 0;
-         index < graph.objects.size();
-         ++index) {
+    if (reuse_object_index) {
+        const auto baseline_index =
+            baseline_compiled->section_bytes(
+                compiled_image_section::
+                    graph_object_index);
 
-        if (!graph.objects[index].live())
-            continue;
+        std::memcpy(
+            graph_object_index,
+            baseline_index.data(),
+            baseline_index.size());
 
-        const auto identity = graph.object_identities[index];
-        if (!identity)
-            return {status_code::initialization_failed};
+        inserted_objects =
+            graph.live_objects;
+        account_baseline_copy(
+            baseline_index.size());
+    }
+    else {
+        for (std::size_t index = 0;
+             index < graph.objects.size();
+             ++index) {
 
-        const auto hash = graph_identity_hash(identity.value());
-        const auto fingerprint = fold32(hash);
-        auto position =
-            static_cast<std::size_t>(hash) & graph_object_mask;
+            if (!graph.objects[index].live())
+                continue;
 
-        for (;;) {
-            auto* slot =
-                graph_object_index + position * index_record_size;
-            if (read_u32(slot + 4) == 0) {
-                write_u32(slot, fingerprint);
-                write_u32(
-                    slot + 4,
-                    static_cast<std::uint32_t>(index + 1));
-                ++inserted_objects;
-                break;
+            const auto identity =
+                graph.object_identities[index];
+            if (!identity)
+                return {status_code::initialization_failed};
+
+            const auto hash =
+                graph_identity_hash(
+                    identity.value());
+            const auto fingerprint =
+                fold32(hash);
+            auto position =
+                static_cast<std::size_t>(hash) &
+                graph_object_mask;
+
+            for (;;) {
+                auto* slot =
+                    graph_object_index +
+                    position *
+                        index_record_size;
+                if (read_u32(
+                        slot + 4) == 0) {
+                    write_u32(
+                        slot,
+                        fingerprint);
+                    write_u32(
+                        slot + 4,
+                        static_cast<std::uint32_t>(
+                            index + 1));
+                    ++inserted_objects;
+                    break;
+                }
+                position =
+                    (position + 1) &
+                    graph_object_mask;
             }
-            position = (position + 1) & graph_object_mask;
         }
     }
 
@@ -2511,35 +3261,69 @@ status encode_compiled_image(
     const auto graph_link_mask = graph_link_index_count - 1;
     std::size_t inserted_links = 0;
 
-    for (std::size_t index = 0;
-         index < graph.links.size();
-         ++index) {
+    if (reuse_link_index) {
+        const auto baseline_index =
+            baseline_compiled->section_bytes(
+                compiled_image_section::
+                    graph_link_index);
 
-        const auto& value = graph.links[index];
-        if (!value.live())
-            continue;
+        std::memcpy(
+            graph_link_index,
+            baseline_index.data(),
+            baseline_index.size());
 
-        const auto hash = endpoint_hash(
-            value.target.object.value(),
-            value.target.member.value());
-        const auto fingerprint = fold32(hash);
-        auto position =
-            static_cast<std::size_t>(hash) & graph_link_mask;
+        inserted_links =
+            graph.live_links;
+        account_baseline_copy(
+            baseline_index.size());
+    }
+    else {
+        for (std::size_t index = 0;
+             index < graph.links.size();
+             ++index) {
 
-        for (;;) {
-            auto* slot =
-                graph_link_index + position * index_record_size;
-            if (read_u32(slot + 4) == 0) {
-                write_u32(slot, fingerprint);
-                write_u32(
-                    slot + 4,
-                    static_cast<std::uint32_t>(index + 1));
-                ++inserted_links;
-                break;
+            const auto& value =
+                graph.links[index];
+            if (!value.live())
+                continue;
+
+            const auto hash =
+                endpoint_hash(
+                    value.target.object.value(),
+                    value.target.member.value());
+            const auto fingerprint =
+                fold32(hash);
+            auto position =
+                static_cast<std::size_t>(hash) &
+                graph_link_mask;
+
+            for (;;) {
+                auto* slot =
+                    graph_link_index +
+                    position *
+                        index_record_size;
+                if (read_u32(
+                        slot + 4) == 0) {
+                    write_u32(
+                        slot,
+                        fingerprint);
+                    write_u32(
+                        slot + 4,
+                        static_cast<std::uint32_t>(
+                            index + 1));
+                    ++inserted_links;
+                    break;
+                }
+                position =
+                    (position + 1) &
+                    graph_link_mask;
             }
-            position = (position + 1) & graph_link_mask;
         }
     }
+
+    if (telemetry != nullptr)
+        telemetry->graph_indexes_ns =
+            elapsed(graph_indexes_begin);
 
     // GEN-02C22: string/identity workers and the main Graph encoder write
     // disjoint sections. Join before CRC and before any failure path clears the
@@ -2571,6 +3355,9 @@ status encode_compiled_image(
         output.clear();
         return {status_code::initialization_failed};
     }
+
+    const auto section_crc_begin =
+        std::chrono::steady_clock::now();
 
     // GEN-02C10: compiled sections are independent immutable regions.
     // Validate their byte extents once, then compute CRCs concurrently.
@@ -2661,6 +3448,13 @@ status encode_compiled_image(
         }
     }
 
+    if (telemetry != nullptr)
+        telemetry->section_crc_ns =
+            elapsed(section_crc_begin);
+
+    const auto header_bind_begin =
+        std::chrono::steady_clock::now();
+
     std::copy(image_magic.begin(), image_magic.end(), base);
     write_u32(base + 8, compiled_image_format_version);
     write_u32(base + 12, endian_marker);
@@ -2721,6 +3515,13 @@ status encode_compiled_image(
     if (!bind_result.ok()) {
         output.clear();
         return bind_result;
+    }
+
+    if (telemetry != nullptr) {
+        telemetry->header_bind_ns =
+            elapsed(header_bind_begin);
+        telemetry->total_ns =
+            elapsed(total_begin);
     }
 
     // GEN-02C10: this image was just produced by the canonical encoder above.

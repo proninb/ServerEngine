@@ -109,6 +109,21 @@ static_assert(sizeof(compiled_image_object_record) == 8);
 static_assert(sizeof(compiled_image_link_record) == 16);
 static_assert(sizeof(compiled_image_canonical_type_record) == 16);
 
+struct compiled_image_encode_telemetry final {
+    std::uint64_t total_ns = 0;
+    std::uint64_t sizing_layout_ns = 0;
+    std::uint64_t allocate_zero_ns = 0;
+    std::uint64_t strings_ns = 0;
+    std::uint64_t identities_ns = 0;
+    std::uint64_t graph_arrays_ns = 0;
+    std::uint64_t graph_indexes_ns = 0;
+    std::uint64_t section_crc_ns = 0;
+    std::uint64_t header_bind_ns = 0;
+    std::uint64_t baseline_bulk_bytes = 0;
+    std::uint32_t baseline_bulk_sections = 0;
+    std::uint64_t output_bytes = 0;
+};
+
 // Read-only mmap-native semantic/query view over compiled.bin v1. It owns no
 // Project storage and performs no reconstruction, allocation, or semantic
 // canonicalization after bind().
@@ -235,6 +250,9 @@ public:
         TypeRef type,
         derived_type_record& output) const noexcept;
 
+    [[nodiscard]] std::span<const std::byte> section_bytes(
+        compiled_image_section kind) const noexcept;
+
     // Cold integrity/semantic audit. Fast LOAD needs bind() only.
     [[nodiscard]] status verify_contents() const noexcept;
 
@@ -291,5 +309,10 @@ private:
 [[nodiscard]] status encode_compiled_image(
     const project_context& project,
     std::vector<std::byte>& output) noexcept;
+
+[[nodiscard]] status encode_compiled_image(
+    const project_context& project,
+    std::vector<std::byte>& output,
+    compiled_image_encode_telemetry* telemetry) noexcept;
 
 } // namespace cw::server

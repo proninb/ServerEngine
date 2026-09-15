@@ -408,6 +408,11 @@ public:
         return baseline_compiled != nullptr;
     }
 
+    [[nodiscard]] const compiled_image_view*
+    baseline_compiled_image() const noexcept {
+        return baseline_compiled;
+    }
+
 private:
     [[nodiscard]] status prepare_sparse_publication(
         prepared_graph_update& prepared) noexcept;
