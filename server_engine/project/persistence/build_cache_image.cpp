@@ -2044,6 +2044,7 @@ struct build_cache_image_view::source_validation_access final {
     std::span<const source_generation_physical_record> native_physical;
     std::size_t native_source_count = 0;
     bool content_hash_proven = false;
+    bool historical_index_proven = false;
 
     [[nodiscard]] bool valid() const noexcept {
         return image != nullptr
@@ -2124,15 +2125,191 @@ status build_cache_image_view::verify_against(
 
 status build_cache_image_view::verify_against_encoded_generation(
     const compiled_image_view& compiled,
-    const source_manager& sources) const noexcept {
+    const source_manager& sources,
+    const graph& committed_graph) const noexcept {
 
     const auto native =
         sources.native_generation();
 
     if (!native.complete ||
         native.physical.size() !=
-            sources.source_count()) {
+            sources.source_count() ||
+        committed_graph.baseline_backed()) {
         return {status_code::invalid_state};
+    }
+
+    const auto semantic =
+        committed_graph.data_view();
+    const auto build =
+        committed_graph.build_data_view();
+
+    const auto graph_type_identities =
+        static_cast<std::span<const identity_ref>>(
+            semantic.type_identities);
+    const auto graph_object_identities =
+        static_cast<std::span<const identity_ref>>(
+            semantic.object_identities);
+    const auto graph_links =
+        static_cast<std::span<const link_record>>(
+            semantic.links);
+
+    const auto graph_type_index =
+        static_cast<std::span<
+            const graph_identity_index_slot>>(
+                build.type_identity_index);
+    const auto graph_object_index =
+        static_cast<std::span<
+            const graph_object_identity_index_slot>>(
+                build.object_identity_index);
+    const auto graph_link_index =
+        static_cast<std::span<
+            const graph_link_index_slot>>(
+                build.link_target_index);
+
+    // GEN-02C28: encoder-proven historical indexes.
+    // Fresh G0 owns contiguous Graph arrays. First triangulate compiled.bin
+    // semantic slots against the committed Graph. Then prove the persisted
+    // Build Cache historical tables are the exact canonical serialization of
+    // that same validated Graph. The cold/mapped verifier keeps the original
+    // lookup-by-lookup audit.
+    if (graph_type_identities.size() !=
+            committed_graph.type_slot_count() ||
+        graph_object_identities.size() !=
+            committed_graph.object_slot_count() ||
+        graph_links.size() !=
+            committed_graph.link_slot_count() ||
+        graph_type_index.size() !=
+            build.type_identity_index.size() ||
+        graph_object_index.size() !=
+            build.object_identity_index.size() ||
+        graph_link_index.size() !=
+            build.link_target_index.size() ||
+        compiled.type_slot_count() !=
+            graph_type_identities.size() ||
+        compiled.object_slot_count() !=
+            graph_object_identities.size() ||
+        compiled.link_slot_count() !=
+            graph_links.size()) {
+        return {status_code::artifact_corrupt};
+    }
+
+    for (std::size_t index = 0;
+         index < graph_type_identities.size();
+         ++index) {
+
+        const auto expected =
+            graph_type_identities[index];
+        if (!expected ||
+            compiled.type_identity_at_slot(index) !=
+                expected) {
+            return {status_code::artifact_corrupt};
+        }
+    }
+
+    for (std::size_t index = 0;
+         index < graph_object_identities.size();
+         ++index) {
+
+        const auto expected =
+            graph_object_identities[index];
+        if (!expected ||
+            compiled.object_identity_at_slot(index) !=
+                expected) {
+            return {status_code::artifact_corrupt};
+        }
+    }
+
+    for (std::size_t index = 0;
+         index < graph_links.size();
+         ++index) {
+
+        compiled_image_link_record encoded;
+        if (!compiled.link_raw(
+                link_handle{
+                    static_cast<std::uint32_t>(
+                        index + 1)},
+                encoded).ok()) {
+            return {status_code::artifact_corrupt};
+        }
+
+        const auto& expected =
+            graph_links[index];
+
+        if (!encoded.target.object ||
+            !encoded.target.member ||
+            encoded.source != expected.source ||
+            encoded.target != expected.target) {
+            return {status_code::artifact_corrupt};
+        }
+    }
+
+    const auto verify_index =
+        [&](build_cache_image_section kind,
+            const auto& expected) noexcept {
+
+            const auto& persisted =
+                section(kind);
+
+            if (persisted.record_size !=
+                    historical_index_record_size ||
+                persisted.count !=
+                    expected.size()) {
+                return false;
+            }
+
+            if (expected.empty())
+                return true;
+
+            if constexpr (
+                std::endian::native ==
+                    std::endian::little) {
+
+                static_assert(
+                    sizeof(
+                        typename std::remove_reference_t<
+                            decltype(expected)>::value_type) ==
+                    historical_index_record_size);
+
+                return std::memcmp(
+                    persisted.data,
+                    expected.data(),
+                    expected.size_bytes()) == 0;
+            }
+            else {
+                for (std::size_t index = 0;
+                     index < expected.size();
+                     ++index) {
+
+                    const auto* slot =
+                        persisted.data +
+                        index *
+                            historical_index_record_size;
+
+                    if (read_u32(slot) !=
+                            expected[index].fingerprint ||
+                        read_u32(slot + 4) !=
+                            expected[index].handle) {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+        };
+
+    if (!verify_index(
+            build_cache_image_section::
+                graph_type_identity_index,
+            graph_type_index) ||
+        !verify_index(
+            build_cache_image_section::
+                graph_object_identity_index,
+            graph_object_index) ||
+        !verify_index(
+            build_cache_image_section::
+                graph_link_target_index,
+            graph_link_index)) {
+        return {status_code::artifact_corrupt};
     }
 
     source_validation_access access;
@@ -2141,6 +2318,7 @@ status build_cache_image_view::verify_against_encoded_generation(
     access.native_source_count =
         sources.source_count();
     access.content_hash_proven = true;
+    access.historical_index_proven = true;
 
     return verify_against_impl(
         compiled,
@@ -2551,30 +2729,55 @@ status build_cache_image_view::verify_against_impl(
         }
     }
 
-    for (std::size_t index = 0; index < compiled.type_slot_count(); ++index) {
-        const auto identity = compiled.type_identity_at_slot(index);
-        if (!identity ||
-            find_type_identity(identity, compiled).value() != index + 1) {
-            return {status_code::artifact_corrupt};
-        }
-    }
+    if (!sources.historical_index_proven) {
+        for (std::size_t index = 0;
+             index < compiled.type_slot_count();
+             ++index) {
 
-    for (std::size_t index = 0; index < compiled.object_slot_count(); ++index) {
-        const auto identity = compiled.object_identity_at_slot(index);
-        if (!identity ||
-            find_object_identity(identity, compiled).value() != index + 1) {
-            return {status_code::artifact_corrupt};
+            const auto identity =
+                compiled.type_identity_at_slot(index);
+            if (!identity ||
+                find_type_identity(
+                    identity,
+                    compiled).value() !=
+                        index + 1) {
+                return {status_code::artifact_corrupt};
+            }
         }
-    }
 
-    for (std::size_t index = 0; index < compiled.link_slot_count(); ++index) {
-        compiled_image_link_record link;
-        if (!compiled.link_raw(
-                link_handle{static_cast<std::uint32_t>(index + 1)},
-                link).ok() ||
-            !link.target.object || !link.target.member ||
-            find_link_target(link.target, compiled).value() != index + 1) {
-            return {status_code::artifact_corrupt};
+        for (std::size_t index = 0;
+             index < compiled.object_slot_count();
+             ++index) {
+
+            const auto identity =
+                compiled.object_identity_at_slot(index);
+            if (!identity ||
+                find_object_identity(
+                    identity,
+                    compiled).value() !=
+                        index + 1) {
+                return {status_code::artifact_corrupt};
+            }
+        }
+
+        for (std::size_t index = 0;
+             index < compiled.link_slot_count();
+             ++index) {
+
+            compiled_image_link_record link;
+            if (!compiled.link_raw(
+                    link_handle{
+                        static_cast<std::uint32_t>(
+                            index + 1)},
+                    link).ok() ||
+                !link.target.object ||
+                !link.target.member ||
+                find_link_target(
+                    link.target,
+                    compiled).value() !=
+                        index + 1) {
+                return {status_code::artifact_corrupt};
+            }
         }
     }
 

@@ -545,7 +545,8 @@ status freeze_project_generation(
     result = output.native_sources.valid()
         ? build_cache.verify_against_encoded_generation(
             compiled,
-            project.sources())
+            project.sources(),
+            project.compiled_graph())
         : build_cache.verify_against(
             compiled,
             sources);

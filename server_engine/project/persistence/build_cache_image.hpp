@@ -332,7 +332,8 @@ public:
     // without recomputing Source content hashes.
     [[nodiscard]] status verify_against_encoded_generation(
         const compiled_image_view& compiled,
-        const source_manager& sources) const noexcept;
+        const source_manager& sources,
+        const graph& committed_graph) const noexcept;
 
 private:
     struct source_validation_access;
