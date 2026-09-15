@@ -170,6 +170,10 @@ struct baseline_commit_telemetry final {
     std::uint64_t transaction_compiled_flush_ns = 0;
     std::uint64_t transaction_build_state_write_ns = 0;
     std::uint64_t transaction_build_state_flush_ns = 0;
+    std::uint64_t transaction_source_manager_write_ns = 0;
+    std::uint64_t transaction_source_manager_flush_ns = 0;
+    std::uint64_t transaction_build_cache_write_ns = 0;
+    std::uint64_t transaction_build_cache_flush_ns = 0;
     std::uint64_t transaction_change_state_write_ns = 0;
     std::uint64_t transaction_change_state_flush_ns = 0;
     std::uint64_t transaction_manifest_write_ns = 0;

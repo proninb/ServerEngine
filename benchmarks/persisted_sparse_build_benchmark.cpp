@@ -3090,7 +3090,9 @@ struct idempotent_save_timing final {
         !build.telemetry.dirty_detection_fallback &&
         build.telemetry.dirty_sources == 1 &&
         build.telemetry.journal_matched_sources == 1 &&
-        build.telemetry.baseline_build_cache_map_ns == 0 &&
+        // D4I2 stores Build Cache separately. A dirty BUILD maps it lazily
+        // after Source dirty detection proves that construction is required.
+        build.telemetry.baseline_build_cache_map_ns != 0 &&
         build.telemetry.generation_checkpoint_available &&
         build.telemetry.generation_anchor_available &&
         build.telemetry.generation_change_ready &&
@@ -3103,12 +3105,54 @@ struct idempotent_save_timing final {
             << "D4A_SPARSE_SAVE_MATERIALIZATION,FAIL,"
             << "stage=build,sources="
             << source_count
+            << ",status_code="
+            << static_cast<unsigned>(build_status.code)
+            << ",diagnostic_errors="
+            << (diagnostics.has_errors() ? 1 : 0)
+            << ",manager_ready="
+            << (manager.ready() ? 1 : 0)
+            << ",changed="
+            << (build.changed ? 1 : 0)
+            << ",rebuilt="
+            << (build.rebuilt ? 1 : 0)
+            << ",baseline_sources="
+            << build.telemetry.baseline_sources
+            << ",frontend_dirty="
+            << build.telemetry.frontend.dirty
+            << ",frontend_changed="
+            << build.telemetry.frontend.changed
+            << ",frontend_affected="
+            << build.telemetry.frontend.affected
+            << ",frontend_acquired="
+            << build.telemetry.frontend.acquired
+            << ",frontend_lexed="
+            << build.telemetry.frontend.lexed
+            << ",frontend_parsed="
+            << build.telemetry.frontend.parsed
+            << ",builder_changed_sources="
+            << build.telemetry.builder.changed_sources
+            << ",builder_changed_types="
+            << build.telemetry.builder.changed_types
+            << ",graph_full_scans="
+            << build.telemetry.builder.graph_full_scans
+            << ",contribution_full_scans="
+            << build.telemetry.builder.contribution_full_scans
             << ",backend="
             << build.telemetry.dirty_detection_backend
             << ",fast="
             << (build.telemetry.dirty_detection_fast ? 1 : 0)
             << ",fallback="
             << (build.telemetry.dirty_detection_fallback ? 1 : 0)
+            << ",journal_matched="
+            << build.telemetry.journal_matched_sources
+            << ",build_cache_map_ms="
+            << static_cast<double>(
+                build.telemetry.baseline_build_cache_map_ns) /
+                1'000'000.0
+            << ",path_index_full_rebuilds="
+            << build.telemetry.sources.path_index_full_rebuilds
+            << ",source_graph_full_scans="
+            << build.telemetry.sources.source_graph_full_scans
             << ",dirty_sources="
             << build.telemetry.dirty_sources
             << ",generation_checkpoint="
@@ -3569,6 +3613,14 @@ struct idempotent_save_timing final {
         << ns_ms(telemetry.transaction_build_state_write_ns)
         << ",tx_build_state_flush_ms="
         << ns_ms(telemetry.transaction_build_state_flush_ns)
+        << ",tx_source_manager_write_ms="
+        << ns_ms(telemetry.transaction_source_manager_write_ns)
+        << ",tx_source_manager_flush_ms="
+        << ns_ms(telemetry.transaction_source_manager_flush_ns)
+        << ",tx_build_cache_write_ms="
+        << ns_ms(telemetry.transaction_build_cache_write_ns)
+        << ",tx_build_cache_flush_ms="
+        << ns_ms(telemetry.transaction_build_cache_flush_ns)
         << ",tx_change_state_write_ms="
         << ns_ms(telemetry.transaction_change_state_write_ns)
         << ",tx_change_state_flush_ms="

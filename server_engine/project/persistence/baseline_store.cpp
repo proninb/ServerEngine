@@ -2915,22 +2915,14 @@ status baseline_store::commit(
             std::filesystem::remove_all(directory, cleanup_error);
         };
 
-        // Production sparse SAVE persists four independent immutable
-        // transaction artifacts. They may be written and flushed concurrently;
-        // CURRENT remains the only commit point and is published only after
-        // every worker has completed successfully.
-        const bool pack_build_state =
+        // Production sparse SAVE uses separate physical Source Manager and
+        // Build Cache files. The logical artifact format is unchanged and the
+        // loader remains backward-compatible with previously packed transactions.
+        // Every artifact is durable before CURRENT publishes the transaction.
+        const bool parallel_build_state =
             !change_state.empty() &&
             !source_manager.empty() &&
             !build_cache.empty();
-
-        if (pack_build_state &&
-            source_manager.size() >
-                (std::numeric_limits<std::size_t>::max)() -
-                    build_cache.size()) {
-            cleanup_failed_transaction();
-            return {status_code::not_available};
-        }
 
         std::array<std::byte, manifest_size> manifest{};
         auto result = create_manifest(
@@ -2949,21 +2941,23 @@ status baseline_store::commit(
         const auto transaction_io_begin =
             std::chrono::steady_clock::now();
 
-        if (pack_build_state) {
+        if (parallel_build_state) {
             status compiled_result;
-            status build_state_result;
+            status source_manager_result;
+            status build_cache_result;
             status change_state_result;
             status manifest_result;
 
             durable_write_telemetry compiled_io;
-            durable_write_telemetry build_state_io;
+            durable_write_telemetry source_manager_io;
+            durable_write_telemetry build_cache_io;
             durable_write_telemetry change_state_io;
             durable_write_telemetry manifest_io;
 
             try {
                 {
                     std::vector<std::jthread> workers;
-                    workers.reserve(4);
+                    workers.reserve(5);
 
                     workers.emplace_back(
                         [&]() noexcept {
@@ -2977,12 +2971,22 @@ status baseline_store::commit(
 
                     workers.emplace_back(
                         [&]() noexcept {
-                            build_state_result =
+                            source_manager_result =
                                 durable_write_file(
                                     directory / source_manager_name,
                                     source_manager,
+                                    {},
+                                    &source_manager_io);
+                        });
+
+                    workers.emplace_back(
+                        [&]() noexcept {
+                            build_cache_result =
+                                durable_write_file(
+                                    directory / build_cache_name,
                                     build_cache,
-                                    &build_state_io);
+                                    {},
+                                    &build_cache_io);
                         });
 
                     workers.emplace_back(
@@ -3019,16 +3023,29 @@ status baseline_store::commit(
                 return {status_code::persistence_failed};
             }
 
-            output.telemetry.transaction_io_worker_count = 4;
+            output.telemetry.transaction_io_worker_count = 5;
 
             output.telemetry.transaction_compiled_write_ns =
                 compiled_io.write_ns;
             output.telemetry.transaction_compiled_flush_ns =
                 compiled_io.flush_ns;
+
+            output.telemetry.transaction_source_manager_write_ns =
+                source_manager_io.write_ns;
+            output.telemetry.transaction_source_manager_flush_ns =
+                source_manager_io.flush_ns;
+            output.telemetry.transaction_build_cache_write_ns =
+                build_cache_io.write_ns;
+            output.telemetry.transaction_build_cache_flush_ns =
+                build_cache_io.flush_ns;
+
             output.telemetry.transaction_build_state_write_ns =
-                build_state_io.write_ns;
+                source_manager_io.write_ns +
+                build_cache_io.write_ns;
             output.telemetry.transaction_build_state_flush_ns =
-                build_state_io.flush_ns;
+                source_manager_io.flush_ns +
+                build_cache_io.flush_ns;
+
             output.telemetry.transaction_change_state_write_ns =
                 change_state_io.write_ns;
             output.telemetry.transaction_change_state_flush_ns =
@@ -3039,12 +3056,14 @@ status baseline_store::commit(
                 manifest_io.flush_ns;
 
             record_transaction_io(compiled_io);
-            record_transaction_io(build_state_io);
+            record_transaction_io(source_manager_io);
+            record_transaction_io(build_cache_io);
             record_transaction_io(change_state_io);
             record_transaction_io(manifest_io);
 
             if (!compiled_result.ok() ||
-                !build_state_result.ok() ||
+                !source_manager_result.ok() ||
+                !build_cache_result.ok() ||
                 !change_state_result.ok() ||
                 !manifest_result.ok()) {
                 cleanup_failed_transaction();
@@ -3074,6 +3093,10 @@ status baseline_store::commit(
                 source_manager,
                 {},
                 &io);
+            output.telemetry.transaction_source_manager_write_ns =
+                io.write_ns;
+            output.telemetry.transaction_source_manager_flush_ns =
+                io.flush_ns;
             output.telemetry.transaction_build_state_write_ns +=
                 io.write_ns;
             output.telemetry.transaction_build_state_flush_ns +=
@@ -3106,6 +3129,10 @@ status baseline_store::commit(
                 build_cache,
                 {},
                 &io);
+            output.telemetry.transaction_build_cache_write_ns =
+                io.write_ns;
+            output.telemetry.transaction_build_cache_flush_ns =
+                io.flush_ns;
             output.telemetry.transaction_build_state_write_ns +=
                 io.write_ns;
             output.telemetry.transaction_build_state_flush_ns +=
