@@ -361,13 +361,24 @@ file_snapshot_result acquire_file_snapshot(
     file_snapshot& output) noexcept {
 
 #if defined(_WIN32)
-    if (!baseline.has_value()) {
-        return acquire_fresh_windows_snapshot(
-            path,
-            output);
-    }
-#endif
+    if (baseline.has_value()) {
+        file_snapshot_observation observed{};
+        bool missing = false;
 
+        if (!observe(path, observed, missing))
+            return file_snapshot_result::failed;
+        if (missing)
+            return file_snapshot_result::missing;
+        if (*baseline == observed)
+            return file_snapshot_result::unchanged;
+    }
+
+    // D4B: changed Windows Sources must preserve native identity from the
+    // same stable handle that supplies the bytes published into the Generation.
+    return acquire_fresh_windows_snapshot(
+        path,
+        output);
+#else
     file_snapshot_observation before{};
     bool missing = false;
     if (!observe(path, before, missing))
@@ -408,6 +419,7 @@ file_snapshot_result acquire_file_snapshot(
     catch (const std::length_error&) {
         return file_snapshot_result::allocation_failed;
     }
+#endif
 }
 
 } // namespace cw::server

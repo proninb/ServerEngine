@@ -59,6 +59,65 @@ struct source_manager_image_physical_state final {
     source_content_hash hash{};
 };
 
+
+// D4C_SOURCE_MANAGER_FREEZE_TELEMETRY
+// Diagnostic-only coarse timings for Source Manager persistence freeze.
+// Per-section CRC elapsed values may overlap when native CRC workers run in parallel;
+// crc_wall_ns is the authoritative elapsed cost of the complete CRC phase.
+struct source_manager_freeze_telemetry final {
+    std::uint64_t internal_ns = 0;
+    std::uint64_t preflight_ns = 0;
+    std::uint64_t layout_ns = 0;
+    std::uint64_t allocate_zero_ns = 0;
+    std::uint64_t source_records_ns = 0;
+    std::uint64_t roots_ns = 0;
+    std::uint64_t path_index_ns = 0;
+    std::uint64_t file_identity_ns = 0;
+    std::uint64_t directory_identity_ns = 0;
+
+    std::uint64_t crc_wall_ns = 0;
+    std::uint64_t crc_total_bytes = 0;
+
+    std::uint64_t crc_source_core_ns = 0;
+    std::uint64_t crc_source_core_bytes = 0;
+    std::uint64_t crc_physical_state_ns = 0;
+    std::uint64_t crc_physical_state_bytes = 0;
+    std::uint64_t crc_graph_records_ns = 0;
+    std::uint64_t crc_graph_records_bytes = 0;
+    std::uint64_t crc_forward_edges_ns = 0;
+    std::uint64_t crc_forward_edges_bytes = 0;
+    std::uint64_t crc_reverse_edges_ns = 0;
+    std::uint64_t crc_reverse_edges_bytes = 0;
+    std::uint64_t crc_roots_ns = 0;
+    std::uint64_t crc_roots_bytes = 0;
+    std::uint64_t crc_path_index_ns = 0;
+    std::uint64_t crc_path_index_bytes = 0;
+    std::uint64_t crc_path_bytes_ns = 0;
+    std::uint64_t crc_path_bytes_bytes = 0;
+    std::uint64_t crc_file_identity_ns = 0;
+    std::uint64_t crc_file_identity_bytes = 0;
+    std::uint64_t crc_directory_identity_ns = 0;
+    std::uint64_t crc_directory_identity_bytes = 0;
+
+    std::uint64_t prefix_directory_encode_ns = 0;
+    std::uint64_t directory_crc_ns = 0;
+    std::uint64_t header_crc_ns = 0;
+    std::uint64_t bind_ns = 0;
+    std::uint64_t verify_ns = 0;
+    std::uint64_t segment_validate_ns = 0;
+
+    // 1 = native scatter/gather freeze, 2 = full encoded image.
+    std::uint32_t mode = 0;
+    std::uint32_t crc_worker_count = 0;
+
+    // D4D1_SPARSE_FALLBACK_REASON
+    // 0 none; 1 endian; 2 baseline binding; 3 root proof unavailable;
+    // 4 source count; 5 root count; 6 root mismatch; 7 section layout;
+    // 8 identity capacity; 9 offsets; 10 extent budget;
+    // 11 include count; 12 include identity; 13 segment assembly.
+    std::uint32_t sparse_fallback_reason = 0;
+};
+
 // Owns only the metadata that cannot be borrowed from the committed Source
 // Generation. The large Source arrays remain zero-copy spans into Source Manager
 // storage; segment() assembles the durable file as scatter/gather extents.
@@ -95,8 +154,68 @@ private:
     friend status freeze_source_manager_native_image(
         const source_manager&,
         const source_manager_image_options&,
-        source_manager_native_image_storage&) noexcept;
+        source_manager_native_image_storage&,
+        source_manager_freeze_telemetry*) noexcept;
 };
+
+class source_manager_image_view;
+
+// D4D sparse SAVE owner. It borrows immutable byte-identical baseline sections,
+// owns the new prefix, sparse physical records, and complete materialized
+// identity tables needed through baseline_store::commit().
+class source_manager_sparse_image_storage final {
+public:
+    source_manager_sparse_image_storage() noexcept = default;
+
+    void reset() noexcept;
+
+    [[nodiscard]] bool valid() const noexcept {
+        return valid_value;
+    }
+
+    [[nodiscard]] std::size_t size() const noexcept {
+        return size_value;
+    }
+
+    [[nodiscard]] project_generation_segment
+    segment() const noexcept;
+
+private:
+    std::array<
+        std::byte,
+        source_manager_image_prefix_size> prefix{};
+    std::span<const std::byte> baseline;
+    std::vector<source_id> patch_sources;
+    std::vector<source_generation_physical_record>
+        physical_patches;
+    std::vector<source_change_file_index_slot>
+        file_identity_index;
+    std::vector<source_change_directory_index_slot>
+        directory_identity_index;
+    std::size_t physical_offset = 0;
+    std::size_t file_identity_offset = 0;
+    std::size_t directory_identity_offset = 0;
+    std::size_t size_value = 0;
+    bool valid_value = false;
+
+    friend status freeze_source_manager_sparse_baseline_image(
+        const source_manager&,
+        const source_manager_image_view&,
+        const source_manager_image_options&,
+        std::span<const source_change_file_identity_update>,
+        bool,
+        source_manager_sparse_image_storage&,
+        source_manager_freeze_telemetry*) noexcept;
+};
+
+[[nodiscard]] status freeze_source_manager_sparse_baseline_image(
+    const source_manager& manager,
+    const source_manager_image_view& baseline,
+    const source_manager_image_options& options,
+    std::span<const source_change_file_identity_update> physical_updates,
+    bool roots_baseline_proven,
+    source_manager_sparse_image_storage& output,
+    source_manager_freeze_telemetry* telemetry = nullptr) noexcept;
 
 // Builds only Source image metadata and CRCs. Source records, physical state,
 // graph records, edge arenas, path index/bytes, and change indexes are borrowed
@@ -104,7 +223,8 @@ private:
 [[nodiscard]] status freeze_source_manager_native_image(
     const source_manager& manager,
     const source_manager_image_options& options,
-    source_manager_native_image_storage& output) noexcept;
+    source_manager_native_image_storage& output,
+    source_manager_freeze_telemetry* telemetry = nullptr) noexcept;
 
 // Read-only sequence of source_id values encoded as little-endian uint32_t.
 // It borrows the mapped source_manager.bin image and performs no allocation.
@@ -191,6 +311,15 @@ public:
     [[nodiscard]] status verify_contents() const noexcept;
 
 private:
+    friend status freeze_source_manager_sparse_baseline_image(
+        const source_manager&,
+        const source_manager_image_view&,
+        const source_manager_image_options&,
+        std::span<const source_change_file_identity_update>,
+        bool,
+        source_manager_sparse_image_storage&,
+        source_manager_freeze_telemetry*) noexcept;
+
     struct section_view final {
         const std::byte* data = nullptr;
         std::uint64_t count = 0;
@@ -217,6 +346,7 @@ private:
 [[nodiscard]] status encode_source_manager_image(
     const source_manager& manager,
     const source_manager_image_options& options,
-    std::vector<std::byte>& output) noexcept;
+    std::vector<std::byte>& output,
+    source_manager_freeze_telemetry* telemetry = nullptr) noexcept;
 
 } // namespace cw::server

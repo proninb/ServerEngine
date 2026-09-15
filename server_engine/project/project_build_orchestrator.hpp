@@ -42,6 +42,14 @@ struct project_build_telemetry final {
     bool dirty_detection_fast = false;
     bool dirty_detection_fallback = false;
 
+    std::uint64_t generation_change_file_updates = 0;
+    std::uint64_t generation_change_directory_updates = 0;
+    std::uint32_t generation_change_fallback_reason = 0;
+    bool generation_checkpoint_available = false;
+    bool generation_anchor_available = false;
+    bool generation_change_ready = false;
+    bool generation_change_overlay = false;
+
     std::uint64_t frontend_ns = 0;
     std::uint64_t builder_prepare_ns = 0;
     std::uint64_t source_prepare_publish_ns = 0;

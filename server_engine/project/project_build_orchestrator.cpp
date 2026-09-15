@@ -460,6 +460,14 @@ status project_build_orchestrator::update(
 
         source_change_capture generation_change;
         bool generation_change_ready = false;
+        source_change_overlay_fallback_reason
+            generation_change_fallback =
+                source_change_overlay_fallback_reason::none;
+
+        output.telemetry.generation_checkpoint_available =
+            static_cast<bool>(generation_checkpoint);
+        output.telemetry.generation_anchor_available =
+            !generation_anchor.empty();
 
         if (!generation_anchor.empty()) {
             auto provenance_result =
@@ -467,7 +475,8 @@ status project_build_orchestrator::update(
                     source_update,
                     generation_checkpoint,
                     generation_anchor,
-                    generation_change);
+                    generation_change,
+                    &generation_change_fallback);
 
             if (!provenance_result.ok() &&
                 provenance_result.code ==
@@ -482,6 +491,19 @@ status project_build_orchestrator::update(
                 return provenance_result;
 
             generation_change_ready = true;
+
+            output.telemetry.generation_change_ready = true;
+            output.telemetry.generation_change_overlay =
+                generation_change.baseline_overlay();
+            output.telemetry.generation_change_fallback_reason =
+                static_cast<std::uint32_t>(
+                    generation_change_fallback);
+            output.telemetry.generation_change_file_updates =
+                static_cast<std::uint64_t>(
+                    generation_change.file_updates.size());
+            output.telemetry.generation_change_directory_updates =
+                static_cast<std::uint64_t>(
+                    generation_change.directory_updates.size());
         }
 
         const auto publish_begin = build_clock::now();

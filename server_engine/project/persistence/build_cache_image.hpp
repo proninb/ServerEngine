@@ -335,6 +335,14 @@ public:
         const source_manager& sources,
         const graph& committed_graph) const noexcept;
 
+    // D4D4_SPARSE_GENERATION_VERIFY
+    // Baseline-backed sparse Generation audit. Source physical state is read
+    // through the logical Source Manager, while historical Build Cache indexes
+    // retain the cold lookup-by-lookup verification against compiled.bin.
+    [[nodiscard]] status verify_against_sparse_generation(
+        const compiled_image_view& compiled,
+        const source_manager& sources) const noexcept;
+
 private:
     struct source_validation_access;
 

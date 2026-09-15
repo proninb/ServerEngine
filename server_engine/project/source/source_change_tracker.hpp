@@ -168,13 +168,57 @@ static_assert(sizeof(source_change_journal_candidate) == 24);
     std::string_view journal_anchor_path,
     source_change_capture& output) noexcept;
 
+enum class source_change_overlay_fallback_reason : std::uint32_t {
+    none = 0,
+    checkpoint_unavailable = 1,
+    unsupported_platform = 2,
+    source_identity_unavailable = 3,
+    source_volume_mismatch = 4,
+    directory_identity_unavailable = 5,
+    directory_volume_mismatch = 6,
+    filesystem_error = 7,
+};
+
 // Captures only identities changed by one sparse BUILD. The unchanged identity
 // set remains borrowed from the mmap baseline until the cold SAVE merge.
 [[nodiscard]] status prepare_incremental_generation_source_change_capture(
     const source_manager_update& sources,
     source_change_checkpoint checkpoint,
     std::string_view journal_anchor_path,
-    source_change_capture& output) noexcept;
+    source_change_capture& output,
+    source_change_overlay_fallback_reason* fallback_reason = nullptr) noexcept;
+
+
+struct source_change_materialization_telemetry final {
+    std::uint64_t update_index_allocate_zero_ns = 0;
+    std::uint64_t baseline_file_count_ns = 0;
+    std::uint64_t file_index_allocate_zero_ns = 0;
+    std::uint64_t baseline_file_merge_ns = 0;
+    std::uint64_t sparse_file_updates_ns = 0;
+
+    std::uint64_t baseline_directory_count_ns = 0;
+    std::uint64_t directory_index_allocate_zero_ns = 0;
+    std::uint64_t baseline_directory_merge_ns = 0;
+    std::uint64_t sparse_directory_updates_ns = 0;
+
+    std::uint64_t source_count = 0;
+    std::uint64_t baseline_file_capacity = 0;
+    std::uint64_t baseline_file_occupied = 0;
+    std::uint64_t baseline_directory_capacity = 0;
+    std::uint64_t baseline_directory_occupied = 0;
+    std::uint64_t file_updates = 0;
+    std::uint64_t directory_updates = 0;
+
+    std::uint64_t update_index_bytes = 0;
+    std::uint64_t file_index_bytes = 0;
+    std::uint64_t directory_index_bytes = 0;
+
+    // Scratch excludes the materialized output indexes that survive this call.
+    std::uint64_t peak_temporary_bytes = 0;
+
+    // Peak memory owned by this materialization: scratch + output indexes.
+    std::uint64_t peak_materialization_owned_bytes = 0;
+};
 
 // Cold SAVE materialization. Merges an incremental Generation overlay with its
 // persisted mmap baseline using memory only; it never opens Source files and
@@ -182,7 +226,8 @@ static_assert(sizeof(source_change_journal_candidate) == 24);
 [[nodiscard]] status materialize_generation_source_change_capture(
     const source_manager& sources,
     const source_change_capture& prepared,
-    source_change_capture& output) noexcept;
+    source_change_capture& output,
+    source_change_materialization_telemetry* telemetry = nullptr) noexcept;
 
 // Legacy maintenance helper. Project SAVE must not call this function.
 [[nodiscard]] status prepare_source_change_capture(

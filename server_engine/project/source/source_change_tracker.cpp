@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <iterator>
 #include <filesystem>
@@ -1671,22 +1672,39 @@ status prepare_incremental_generation_source_change_capture(
     const source_manager_update& sources,
     source_change_checkpoint checkpoint,
     std::string_view journal_anchor_path,
-    source_change_capture& output) noexcept {
+    source_change_capture& output,
+    source_change_overlay_fallback_reason* fallback_reason) noexcept {
 
     output.reset();
 
+    if (fallback_reason != nullptr) {
+        *fallback_reason =
+            source_change_overlay_fallback_reason::none;
+    }
+
+    const auto disable =
+        [&](source_change_overlay_fallback_reason reason) noexcept {
+            const auto result =
+                prepare_disabled_generation_source_change_capture(
+                    journal_anchor_path,
+                    output);
+            if (fallback_reason != nullptr)
+                *fallback_reason = reason;
+            return result;
+        };
+
     if (!checkpoint ||
         journal_anchor_path.empty()) {
-        return prepare_disabled_generation_source_change_capture(
-            journal_anchor_path,
-            output);
+        return disable(
+            source_change_overlay_fallback_reason::
+                checkpoint_unavailable);
     }
 
 #ifndef _WIN32
     (void)sources;
-    return prepare_disabled_generation_source_change_capture(
-        journal_anchor_path,
-        output);
+    return disable(
+        source_change_overlay_fallback_reason::
+            unsupported_platform);
 #else
     if (sources.source_count() >
         (std::numeric_limits<std::uint32_t>::max)()) {
@@ -1735,12 +1753,17 @@ status prepare_incremental_generation_source_change_capture(
                 const auto identity =
                     snapshot.identity();
 
-                if (!identity ||
-                    identity.volume_serial !=
-                        checkpoint.volume_serial) {
-                    return prepare_disabled_generation_source_change_capture(
-                        journal_anchor_path,
-                        output);
+                if (!identity) {
+                    return disable(
+                        source_change_overlay_fallback_reason::
+                            source_identity_unavailable);
+                }
+
+                if (identity.volume_serial !=
+                    checkpoint.volume_serial) {
+                    return disable(
+                        source_change_overlay_fallback_reason::
+                            source_volume_mismatch);
                 }
 
                 update.file_reference =
@@ -1807,12 +1830,17 @@ status prepare_incremental_generation_source_change_capture(
             if (!query_file_identity(
                     std::filesystem::path{
                         directory.path},
-                    identity) ||
-                identity.volume_serial !=
-                    checkpoint.volume_serial) {
-                return prepare_disabled_generation_source_change_capture(
-                    journal_anchor_path,
-                    output);
+                    identity)) {
+                return disable(
+                    source_change_overlay_fallback_reason::
+                        directory_identity_unavailable);
+            }
+
+            if (identity.volume_serial !=
+                checkpoint.volume_serial) {
+                return disable(
+                    source_change_overlay_fallback_reason::
+                        directory_volume_mismatch);
             }
 
             output.directory_updates.push_back(
@@ -1833,9 +1861,9 @@ status prepare_incremental_generation_source_change_capture(
         return {status_code::not_available};
     }
     catch (const std::system_error&) {
-        return prepare_disabled_generation_source_change_capture(
-            journal_anchor_path,
-            output);
+        return disable(
+            source_change_overlay_fallback_reason::
+                filesystem_error);
     }
 #endif
 }
@@ -1844,9 +1872,19 @@ status prepare_incremental_generation_source_change_capture(
 status materialize_generation_source_change_capture(
     const source_manager& sources,
     const source_change_capture& prepared,
-    source_change_capture& output) noexcept {
+    source_change_capture& output,
+    source_change_materialization_telemetry* telemetry) noexcept {
 
     output.reset();
+    if (telemetry != nullptr)
+        *telemetry = {};
+
+    const auto elapsed = [](
+        std::chrono::steady_clock::time_point begin) noexcept {
+        return static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - begin).count());
+    };
 
     if (!prepared.baseline_overlay())
         return {status_code::invalid_argument};
@@ -1877,16 +1915,43 @@ status materialize_generation_source_change_capture(
     const auto source_count =
         sources.source_count();
 
+    if (telemetry != nullptr) {
+        telemetry->source_count =
+            static_cast<std::uint64_t>(source_count);
+        telemetry->file_updates =
+            static_cast<std::uint64_t>(
+                prepared.file_updates.size());
+        telemetry->directory_updates =
+            static_cast<std::uint64_t>(
+                prepared.directory_updates.size());
+    }
+
     if (source_count >
         (std::numeric_limits<std::uint32_t>::max)()) {
         return {status_code::not_available};
     }
 
     try {
+        const auto update_index_begin =
+            std::chrono::steady_clock::now();
+
         std::vector<std::uint32_t>
             update_index(
                 source_count + 1,
                 0);
+
+        if (telemetry != nullptr) {
+            telemetry->update_index_allocate_zero_ns =
+                elapsed(update_index_begin);
+            telemetry->update_index_bytes =
+                static_cast<std::uint64_t>(
+                    update_index.capacity()) *
+                sizeof(std::uint32_t);
+            telemetry->peak_temporary_bytes =
+                telemetry->update_index_bytes;
+            telemetry->peak_materialization_owned_bytes =
+                telemetry->update_index_bytes;
+        }
 
         for (std::size_t index = 0;
              index < prepared.file_updates.size();
@@ -1919,6 +1984,8 @@ status materialize_generation_source_change_capture(
         }
 
         std::size_t baseline_identity_count = 0;
+        const auto baseline_file_count_begin =
+            std::chrono::steady_clock::now();
 
         for (std::size_t index = 0;
              index <
@@ -1940,6 +2007,18 @@ status materialize_generation_source_change_capture(
                 ++baseline_identity_count;
         }
 
+        if (telemetry != nullptr) {
+            telemetry->baseline_file_count_ns =
+                elapsed(baseline_file_count_begin);
+            telemetry->baseline_file_capacity =
+                static_cast<std::uint64_t>(
+                    baseline->
+                        source_file_identity_slot_count());
+            telemetry->baseline_file_occupied =
+                static_cast<std::uint64_t>(
+                    baseline_identity_count);
+        }
+
         if (baseline_identity_count >
             (std::numeric_limits<std::size_t>::max)() -
                 prepared.file_updates.size()) {
@@ -1949,6 +2028,9 @@ status materialize_generation_source_change_capture(
         const auto identity_upper_bound =
             baseline_identity_count +
             prepared.file_updates.size();
+
+        const auto file_index_allocate_begin =
+            std::chrono::steady_clock::now();
 
         if (identity_upper_bound != 0) {
             const auto capacity =
@@ -1963,7 +2045,21 @@ status materialize_generation_source_change_capture(
                 source_change_file_index_slot{});
         }
 
+        if (telemetry != nullptr) {
+            telemetry->file_index_allocate_zero_ns =
+                elapsed(file_index_allocate_begin);
+            telemetry->file_index_bytes =
+                static_cast<std::uint64_t>(
+                    output.file_index.capacity()) *
+                sizeof(source_change_file_index_slot);
+            telemetry->peak_materialization_owned_bytes =
+                telemetry->update_index_bytes +
+                telemetry->file_index_bytes;
+        }
+
         std::size_t materialized_identity_count = 0;
+        const auto baseline_file_merge_begin =
+            std::chrono::steady_clock::now();
 
         for (std::size_t index = 0;
              index <
@@ -1999,6 +2095,14 @@ status materialize_generation_source_change_capture(
             ++materialized_identity_count;
         }
 
+        if (telemetry != nullptr) {
+            telemetry->baseline_file_merge_ns =
+                elapsed(baseline_file_merge_begin);
+        }
+
+        const auto sparse_file_updates_begin =
+            std::chrono::steady_clock::now();
+
         for (const auto& update :
              prepared.file_updates) {
 
@@ -2015,6 +2119,11 @@ status materialize_generation_source_change_capture(
             ++materialized_identity_count;
         }
 
+        if (telemetry != nullptr) {
+            telemetry->sparse_file_updates_ns =
+                elapsed(sparse_file_updates_begin);
+        }
+
         if (source_count != 0 &&
             materialized_identity_count == 0) {
             return prepare_disabled_generation_source_change_capture(
@@ -2023,6 +2132,8 @@ status materialize_generation_source_change_capture(
         }
 
         std::size_t baseline_directory_count = 0;
+        const auto baseline_directory_count_begin =
+            std::chrono::steady_clock::now();
 
         for (std::size_t index = 0;
              index <
@@ -2044,74 +2155,142 @@ status materialize_generation_source_change_capture(
                 ++baseline_directory_count;
         }
 
+        if (telemetry != nullptr) {
+            telemetry->baseline_directory_count_ns =
+                elapsed(baseline_directory_count_begin);
+            telemetry->baseline_directory_capacity =
+                static_cast<std::uint64_t>(
+                    baseline->
+                        tracked_directory_identity_slot_count());
+            telemetry->baseline_directory_occupied =
+                static_cast<std::uint64_t>(
+                    baseline_directory_count);
+        }
+
         if (baseline_directory_count >
             (std::numeric_limits<std::size_t>::max)() -
                 prepared.directory_updates.size()) {
             return {status_code::not_available};
         }
 
-        const auto directory_upper_bound =
-            baseline_directory_count +
-            prepared.directory_updates.size();
+        // D4D2_PRESERVE_DIRECTORY_IDENTITY_CAPACITY
+        // Sparse directory updates usually refer to identities already present
+        // in the persisted table. Start with the exact persisted slot count and
+        // grow only if the actual merged set does not fit. This preserves the
+        // byte layout required for zero-copy sparse SAVE without weakening the
+        // open-addressing correctness contract.
+        const auto baseline_directory_capacity =
+            baseline->
+                tracked_directory_identity_slot_count();
 
-        if (directory_upper_bound != 0) {
-            const auto capacity =
+        auto materialize_directories =
+            [&](std::size_t capacity) -> status {
+
+                if (capacity == 0) {
+                    if (baseline_directory_count == 0 &&
+                        prepared.directory_updates.empty()) {
+                        output.directory_index.clear();
+                        return {};
+                    }
+                    return {status_code::not_available};
+                }
+
+                try {
+                    output.directory_index.assign(
+                        capacity,
+                        source_change_directory_index_slot{});
+                }
+                catch (const std::bad_alloc&) {
+                    return {status_code::not_available};
+                }
+                catch (const std::length_error&) {
+                    return {status_code::not_available};
+                }
+
+                for (std::size_t index = 0;
+                     index <
+                         baseline->
+                             tracked_directory_identity_slot_count();
+                     ++index) {
+
+                    source_change_directory_index_slot slot;
+                    const auto slot_result =
+                        baseline->
+                            tracked_directory_identity_slot(
+                                index,
+                                slot);
+
+                    if (!slot_result.ok())
+                        return slot_result;
+
+                    if (slot.file_reference == 0)
+                        continue;
+
+                    if (!insert_directory_identity(
+                            output.directory_index,
+                            slot.file_reference,
+                            slot.flags)) {
+                        return {status_code::not_available};
+                    }
+                }
+
+                for (const auto& slot :
+                     prepared.directory_updates) {
+
+                    if (slot.file_reference == 0 ||
+                        slot.reserved != 0 ||
+                        slot.flags == 0 ||
+                        (slot.flags &
+                         ~source_change_directory_watch_known) != 0) {
+                        return {status_code::invalid_argument};
+                    }
+
+                    if (!insert_directory_identity(
+                            output.directory_index,
+                            slot.file_reference,
+                            slot.flags)) {
+                        return {status_code::not_available};
+                    }
+                }
+
+                return {};
+            };
+
+        auto directory_materialize_result =
+            materialize_directories(
+                baseline_directory_capacity);
+
+        if (!directory_materialize_result.ok() &&
+            directory_materialize_result.code ==
+                status_code::not_available) {
+
+            if (baseline_directory_count >
+                (std::numeric_limits<std::size_t>::max)() -
+                    prepared.directory_updates.size()) {
+                return {status_code::not_available};
+            }
+
+            const auto directory_upper_bound =
+                baseline_directory_count +
+                prepared.directory_updates.size();
+
+            const auto expanded_capacity =
                 next_capacity(
                     directory_upper_bound);
 
-            if (capacity == 0)
-                return {status_code::not_available};
-
-            output.directory_index.assign(
-                capacity,
-                source_change_directory_index_slot{});
-        }
-
-        for (std::size_t index = 0;
-             index <
-                 baseline->
-                     tracked_directory_identity_slot_count();
-             ++index) {
-
-            source_change_directory_index_slot slot;
-            const auto slot_result =
-                baseline->
-                    tracked_directory_identity_slot(
-                        index,
-                        slot);
-
-            if (!slot_result.ok())
-                return slot_result;
-
-            if (slot.file_reference == 0)
-                continue;
-
-            if (!insert_directory_identity(
-                    output.directory_index,
-                    slot.file_reference,
-                    slot.flags)) {
-                return {status_code::artifact_corrupt};
-            }
-        }
-
-        for (const auto& slot :
-             prepared.directory_updates) {
-
-            if (slot.file_reference == 0 ||
-                slot.reserved != 0 ||
-                slot.flags == 0 ||
-                (slot.flags &
-                 ~source_change_directory_watch_known) != 0) {
-                return {status_code::invalid_argument};
+            if (expanded_capacity == 0 ||
+                expanded_capacity <=
+                    baseline_directory_capacity) {
+                return directory_materialize_result;
             }
 
-            if (!insert_directory_identity(
-                    output.directory_index,
-                    slot.file_reference,
-                    slot.flags)) {
-                return {status_code::artifact_corrupt};
-            }
+            directory_materialize_result =
+                materialize_directories(
+                    expanded_capacity);
         }
+
+        if (!directory_materialize_result.ok())
+            return directory_materialize_result;
 
         output.checkpoint =
             prepared.checkpoint;

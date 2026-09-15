@@ -2083,21 +2083,26 @@ status build_cache_image_view::verify_contents(
 
 struct build_cache_image_view::source_validation_access final {
     const source_manager_image_view* image = nullptr;
+    const source_manager* manager = nullptr;
     std::span<const source_generation_physical_record> native_physical;
     std::size_t native_source_count = 0;
     bool content_hash_proven = false;
     bool historical_index_proven = false;
 
     [[nodiscard]] bool valid() const noexcept {
-        return image != nullptr
-            ? image->valid()
-            : native_physical.size() == native_source_count;
+        if (image != nullptr)
+            return image->valid();
+        if (manager != nullptr)
+            return manager->source_count() == native_source_count;
+        return native_physical.size() == native_source_count;
     }
 
     [[nodiscard]] std::size_t source_count() const noexcept {
-        return image != nullptr
-            ? image->source_count()
-            : native_source_count;
+        if (image != nullptr)
+            return image->source_count();
+        if (manager != nullptr)
+            return manager->source_count();
+        return native_source_count;
     }
 
     [[nodiscard]] status physical(
@@ -2108,6 +2113,32 @@ struct build_cache_image_view::source_validation_access final {
 
         if (image != nullptr)
             return image->physical(source, output);
+
+        if (manager != nullptr) {
+            if (!source ||
+                static_cast<std::size_t>(source.value()) >
+                    manager->source_count()) {
+                return {status_code::invalid_argument};
+            }
+
+            const auto snapshot =
+                manager->current(source);
+
+            if (!snapshot)
+                return {};
+
+            const auto observation =
+                snapshot.observation();
+
+            output.present = true;
+            output.write_time_ticks =
+                observation.write_time_ticks;
+            output.size =
+                static_cast<std::uint64_t>(
+                    observation.size);
+            output.hash = snapshot.hash();
+            return {};
+        }
 
         if (!source ||
             static_cast<std::size_t>(source.value()) >
@@ -2159,6 +2190,31 @@ status build_cache_image_view::verify_against(
         native.physical;
     access.native_source_count =
         sources.source_count();
+
+    return verify_against_impl(
+        compiled,
+        access);
+}
+
+status build_cache_image_view::verify_against_sparse_generation(
+    const compiled_image_view& compiled,
+    const source_manager& sources) const noexcept {
+
+    if (!sources.baseline_backed())
+        return {status_code::invalid_state};
+
+    source_validation_access access;
+    access.manager = &sources;
+    access.native_source_count =
+        sources.source_count();
+
+    // Build Cache source bytes were encoded from this same committed
+    // Generation. The physical snapshot hash is therefore an encoder proof,
+    // exactly as in the fresh encoded-generation verifier. Historical indexes
+    // are deliberately NOT marked proven: verify_against_impl() audits them
+    // against compiled.bin without requiring contiguous Graph storage.
+    access.content_hash_proven = true;
+    access.historical_index_proven = false;
 
     return verify_against_impl(
         compiled,

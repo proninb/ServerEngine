@@ -134,6 +134,60 @@ inline constexpr auto persistence_crc64_slicing_table =
     return value;
 }
 
+// D4D_SPARSE_BASELINE_SOURCE_MANAGER
+// Continues CRC-64/ECMA-182 over another immutable extent. This allows a
+// scatter/gather persisted section to be checksummed without assembling a copy.
+[[nodiscard]] constexpr std::uint64_t persistence_crc64_update(
+    std::uint64_t crc,
+    std::span<const std::byte> bytes) noexcept {
+
+    std::size_t offset = 0;
+
+    while (bytes.size() - offset >= 8) {
+        const auto value =
+            crc ^
+            persistence_crc64_load_be64(
+                bytes,
+                offset);
+
+        crc =
+            persistence_crc64_slicing_table[0][
+                static_cast<std::uint8_t>(value >> 56)] ^
+            persistence_crc64_slicing_table[1][
+                static_cast<std::uint8_t>(value >> 48)] ^
+            persistence_crc64_slicing_table[2][
+                static_cast<std::uint8_t>(value >> 40)] ^
+            persistence_crc64_slicing_table[3][
+                static_cast<std::uint8_t>(value >> 32)] ^
+            persistence_crc64_slicing_table[4][
+                static_cast<std::uint8_t>(value >> 24)] ^
+            persistence_crc64_slicing_table[5][
+                static_cast<std::uint8_t>(value >> 16)] ^
+            persistence_crc64_slicing_table[6][
+                static_cast<std::uint8_t>(value >> 8)] ^
+            persistence_crc64_slicing_table[7][
+                static_cast<std::uint8_t>(value)];
+
+        offset += 8;
+    }
+
+    while (offset < bytes.size()) {
+        const auto table_index =
+            static_cast<std::uint8_t>(
+                (crc >> 56) ^
+                std::to_integer<std::uint8_t>(
+                    bytes[offset]));
+
+        crc =
+            (crc << 8) ^
+            persistence_crc64_table[table_index];
+
+        ++offset;
+    }
+
+    return crc;
+}
+
 [[nodiscard]] constexpr std::uint64_t persistence_crc64(
     std::span<const std::byte> bytes) noexcept {
 

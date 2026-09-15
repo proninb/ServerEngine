@@ -206,6 +206,8 @@ status freeze_project_generation(
 
     auto result = status{};
     source_change_capture materialized_change_capture;
+    source_change_materialization_telemetry
+        materialize_change_detail;
 
     if (change_capture->baseline_overlay()) {
         const auto phase_begin =
@@ -215,11 +217,56 @@ status freeze_project_generation(
             materialize_generation_source_change_capture(
                 project.sources(),
                 *change_capture,
-                materialized_change_capture);
+                materialized_change_capture,
+                telemetry != nullptr
+                    ? &materialize_change_detail
+                    : nullptr);
 
         if (telemetry != nullptr) {
             telemetry->materialize_change_ns =
                 elapsed(phase_begin);
+            telemetry->materialize_change_update_index_allocate_zero_ns =
+                materialize_change_detail.update_index_allocate_zero_ns;
+            telemetry->materialize_change_baseline_file_count_ns =
+                materialize_change_detail.baseline_file_count_ns;
+            telemetry->materialize_change_file_index_allocate_zero_ns =
+                materialize_change_detail.file_index_allocate_zero_ns;
+            telemetry->materialize_change_baseline_file_merge_ns =
+                materialize_change_detail.baseline_file_merge_ns;
+            telemetry->materialize_change_sparse_file_updates_ns =
+                materialize_change_detail.sparse_file_updates_ns;
+            telemetry->materialize_change_baseline_directory_count_ns =
+                materialize_change_detail.baseline_directory_count_ns;
+            telemetry->materialize_change_directory_index_allocate_zero_ns =
+                materialize_change_detail.directory_index_allocate_zero_ns;
+            telemetry->materialize_change_baseline_directory_merge_ns =
+                materialize_change_detail.baseline_directory_merge_ns;
+            telemetry->materialize_change_sparse_directory_updates_ns =
+                materialize_change_detail.sparse_directory_updates_ns;
+            telemetry->materialize_change_source_count =
+                materialize_change_detail.source_count;
+            telemetry->materialize_change_baseline_file_capacity =
+                materialize_change_detail.baseline_file_capacity;
+            telemetry->materialize_change_baseline_file_occupied =
+                materialize_change_detail.baseline_file_occupied;
+            telemetry->materialize_change_baseline_directory_capacity =
+                materialize_change_detail.baseline_directory_capacity;
+            telemetry->materialize_change_baseline_directory_occupied =
+                materialize_change_detail.baseline_directory_occupied;
+            telemetry->materialize_change_file_updates =
+                materialize_change_detail.file_updates;
+            telemetry->materialize_change_directory_updates =
+                materialize_change_detail.directory_updates;
+            telemetry->materialize_change_update_index_bytes =
+                materialize_change_detail.update_index_bytes;
+            telemetry->materialize_change_file_index_bytes =
+                materialize_change_detail.file_index_bytes;
+            telemetry->materialize_change_directory_index_bytes =
+                materialize_change_detail.directory_index_bytes;
+            telemetry->materialize_change_peak_temporary_bytes =
+                materialize_change_detail.peak_temporary_bytes;
+            telemetry->materialize_change_peak_owned_bytes =
+                materialize_change_detail.peak_materialization_owned_bytes;
         }
 
         if (!result.ok())
@@ -344,6 +391,9 @@ status freeze_project_generation(
         const auto native_sources =
             project.sources().native_generation();
 
+        source_manager_freeze_telemetry
+            source_manager_detail;
+
         const auto* generation_change_capture =
             project.generation_provenance().
                 source_change();
@@ -353,30 +403,167 @@ status freeze_project_generation(
             change_capture ==
                 generation_change_capture;
 
+        const auto* baseline_source_image =
+            project.sources().baseline_source_image();
+
+        const bool sparse_baseline_candidate =
+            baseline_source_image != nullptr &&
+            generation_change_capture != nullptr &&
+            generation_change_capture->baseline_overlay() &&
+            !change_capture->baseline_overlay();
+
         if (native_borrow_lifetime_safe) {
             // GEN-02C12: use the native Source Manager image only when every
             // borrowed extent is Generation-owned and therefore remains alive
             // through baseline_store::commit().
             output.sources.clear();
+            output.sparse_sources.reset();
 
             result =
                 freeze_source_manager_native_image(
                     project.sources(),
                     options,
-                    output.native_sources);
+                    output.native_sources,
+                    telemetry != nullptr
+                        ? &source_manager_detail
+                        : nullptr);
+        }
+        else if (sparse_baseline_candidate) {
+            output.sources.clear();
+            output.native_sources.reset();
+
+            result =
+                freeze_source_manager_sparse_baseline_image(
+                    project.sources(),
+                    *baseline_source_image,
+                    options,
+                    generation_change_capture->file_updates,
+                    true,
+                    output.sparse_sources,
+                    telemetry != nullptr
+                        ? &source_manager_detail
+                        : nullptr);
+
+            // not_found is an explicit structural ineligibility signal:
+            // topology/source-count/extent constraints fall back to the
+            // established full encoder without weakening correctness.
+            if (!result.ok() &&
+                result.code == status_code::not_found) {
+
+                const auto sparse_fallback_reason =
+                    source_manager_detail.sparse_fallback_reason;
+
+                output.sparse_sources.reset();
+
+                result =
+                    encode_source_manager_image(
+                        project.sources(),
+                        options,
+                        output.sources,
+                        telemetry != nullptr
+                            ? &source_manager_detail
+                            : nullptr);
+
+                source_manager_detail.sparse_fallback_reason =
+                    sparse_fallback_reason;
+            }
         }
         else {
             output.native_sources.reset();
+            output.sparse_sources.reset();
 
             result = encode_source_manager_image(
                 project.sources(),
                 options,
-                output.sources);
+                output.sources,
+                telemetry != nullptr
+                    ? &source_manager_detail
+                    : nullptr);
         }
 
         if (telemetry != nullptr) {
             telemetry->source_manager_ns =
                 elapsed(source_manager_begin);
+            telemetry->source_manager_internal_ns =
+                source_manager_detail.internal_ns;
+            telemetry->source_manager_preflight_ns =
+                source_manager_detail.preflight_ns;
+            telemetry->source_manager_layout_ns =
+                source_manager_detail.layout_ns;
+            telemetry->source_manager_allocate_zero_ns =
+                source_manager_detail.allocate_zero_ns;
+            telemetry->source_manager_source_records_ns =
+                source_manager_detail.source_records_ns;
+            telemetry->source_manager_roots_ns =
+                source_manager_detail.roots_ns;
+            telemetry->source_manager_path_index_ns =
+                source_manager_detail.path_index_ns;
+            telemetry->source_manager_file_identity_ns =
+                source_manager_detail.file_identity_ns;
+            telemetry->source_manager_directory_identity_ns =
+                source_manager_detail.directory_identity_ns;
+            telemetry->source_manager_crc_wall_ns =
+                source_manager_detail.crc_wall_ns;
+            telemetry->source_manager_crc_total_bytes =
+                source_manager_detail.crc_total_bytes;
+            telemetry->source_manager_crc_source_core_ns =
+                source_manager_detail.crc_source_core_ns;
+            telemetry->source_manager_crc_source_core_bytes =
+                source_manager_detail.crc_source_core_bytes;
+            telemetry->source_manager_crc_physical_state_ns =
+                source_manager_detail.crc_physical_state_ns;
+            telemetry->source_manager_crc_physical_state_bytes =
+                source_manager_detail.crc_physical_state_bytes;
+            telemetry->source_manager_crc_graph_records_ns =
+                source_manager_detail.crc_graph_records_ns;
+            telemetry->source_manager_crc_graph_records_bytes =
+                source_manager_detail.crc_graph_records_bytes;
+            telemetry->source_manager_crc_forward_edges_ns =
+                source_manager_detail.crc_forward_edges_ns;
+            telemetry->source_manager_crc_forward_edges_bytes =
+                source_manager_detail.crc_forward_edges_bytes;
+            telemetry->source_manager_crc_reverse_edges_ns =
+                source_manager_detail.crc_reverse_edges_ns;
+            telemetry->source_manager_crc_reverse_edges_bytes =
+                source_manager_detail.crc_reverse_edges_bytes;
+            telemetry->source_manager_crc_roots_ns =
+                source_manager_detail.crc_roots_ns;
+            telemetry->source_manager_crc_roots_bytes =
+                source_manager_detail.crc_roots_bytes;
+            telemetry->source_manager_crc_path_index_ns =
+                source_manager_detail.crc_path_index_ns;
+            telemetry->source_manager_crc_path_index_bytes =
+                source_manager_detail.crc_path_index_bytes;
+            telemetry->source_manager_crc_path_bytes_ns =
+                source_manager_detail.crc_path_bytes_ns;
+            telemetry->source_manager_crc_path_bytes_bytes =
+                source_manager_detail.crc_path_bytes_bytes;
+            telemetry->source_manager_crc_file_identity_ns =
+                source_manager_detail.crc_file_identity_ns;
+            telemetry->source_manager_crc_file_identity_bytes =
+                source_manager_detail.crc_file_identity_bytes;
+            telemetry->source_manager_crc_directory_identity_ns =
+                source_manager_detail.crc_directory_identity_ns;
+            telemetry->source_manager_crc_directory_identity_bytes =
+                source_manager_detail.crc_directory_identity_bytes;
+            telemetry->source_manager_prefix_directory_encode_ns =
+                source_manager_detail.prefix_directory_encode_ns;
+            telemetry->source_manager_directory_crc_ns =
+                source_manager_detail.directory_crc_ns;
+            telemetry->source_manager_header_crc_ns =
+                source_manager_detail.header_crc_ns;
+            telemetry->source_manager_bind_ns =
+                source_manager_detail.bind_ns;
+            telemetry->source_manager_verify_ns =
+                source_manager_detail.verify_ns;
+            telemetry->source_manager_segment_validate_ns =
+                source_manager_detail.segment_validate_ns;
+            telemetry->source_manager_mode =
+                source_manager_detail.mode;
+            telemetry->source_manager_crc_worker_count =
+                source_manager_detail.crc_worker_count;
+            telemetry->source_manager_sparse_fallback_reason =
+                source_manager_detail.sparse_fallback_reason;
         }
 
         if (!result.ok())
@@ -497,7 +684,8 @@ status freeze_project_generation(
     if (!result.ok())
         return result;
 
-    if (!output.native_sources.valid()) {
+    if (!output.native_sources.valid() &&
+        !output.sparse_sources.valid()) {
         const auto source_bytes =
             frozen_segments.sources_segment().
                 contiguous();
@@ -542,14 +730,25 @@ status freeze_project_generation(
     const auto verify_build_begin =
         std::chrono::steady_clock::now();
 
-    result = output.native_sources.valid()
-        ? build_cache.verify_against_encoded_generation(
-            compiled,
-            project.sources(),
-            project.compiled_graph())
-        : build_cache.verify_against(
-            compiled,
-            sources);
+    if (output.native_sources.valid()) {
+        result =
+            build_cache.verify_against_encoded_generation(
+                compiled,
+                project.sources(),
+                project.compiled_graph());
+    }
+    else if (output.sparse_sources.valid()) {
+        result =
+            build_cache.verify_against_sparse_generation(
+                compiled,
+                project.sources());
+    }
+    else {
+        result =
+            build_cache.verify_against(
+                compiled,
+                sources);
+    }
 
     if (telemetry != nullptr) {
         telemetry->verify_build_cache_ns =

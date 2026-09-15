@@ -3008,6 +3008,601 @@ struct idempotent_save_timing final {
 #endif
 }
 
+
+[[nodiscard]] int run_d4a_sparse_save_materialization_profile(
+    std::size_t source_count) {
+
+    if (source_count == 0)
+        return 2;
+
+    temporary_tree tree;
+    std::filesystem::path configuration_path;
+    std::vector<std::filesystem::path> unused_source_paths;
+
+    const auto progress_interval =
+        source_count >= 1'000'000
+            ? std::size_t{100'000}
+            : source_count >= 100'000
+                ? std::size_t{10'000}
+                : std::size_t{0};
+
+    std::cerr
+        << "D4A_SETUP_BEGIN,sources="
+        << source_count
+        << '\n';
+
+    if (!prepare_project(
+            source_count,
+            tree,
+            configuration_path,
+            unused_source_paths,
+            false,
+            progress_interval)) {
+        return 1;
+    }
+
+    baseline_commit_result baseline;
+    if (!create_baseline(
+            configuration_path,
+            baseline,
+            0)) {
+        std::cout
+            << "D4A_SPARSE_SAVE_MATERIALIZATION,FAIL,"
+            << "stage=baseline,sources="
+            << source_count
+            << '\n';
+        return 1;
+    }
+
+    const auto target = source_count / 2;
+    const auto target_path =
+        tree.path / source_name(target);
+    const auto changed_text =
+        "struct " + type_name(target) +
+        " { int value; };\n";
+
+    if (!write_text(
+            target_path,
+            changed_text)) {
+        return 1;
+    }
+
+    project_manager manager;
+    diagnostic_buffer diagnostics;
+    project_build_result build;
+
+    const auto build_status = manager.build(
+        configuration_path,
+        operation_id{4400},
+        diagnostics,
+        build,
+        1);
+
+    const bool build_pass =
+        build_status.ok() &&
+        !diagnostics.has_errors() &&
+        manager.ready() &&
+        validate_sparse_modify(
+            source_count,
+            build) &&
+        build.telemetry.dirty_detection_backend == 1 &&
+        build.telemetry.dirty_detection_fast &&
+        !build.telemetry.dirty_detection_fallback &&
+        build.telemetry.dirty_sources == 1 &&
+        build.telemetry.journal_matched_sources == 1 &&
+        build.telemetry.baseline_build_cache_map_ns == 0 &&
+        build.telemetry.generation_checkpoint_available &&
+        build.telemetry.generation_anchor_available &&
+        build.telemetry.generation_change_ready &&
+        build.telemetry.generation_change_overlay &&
+        build.telemetry.generation_change_fallback_reason == 0 &&
+        build.telemetry.generation_change_file_updates == 1;
+
+    if (!build_pass) {
+        std::cout
+            << "D4A_SPARSE_SAVE_MATERIALIZATION,FAIL,"
+            << "stage=build,sources="
+            << source_count
+            << ",backend="
+            << build.telemetry.dirty_detection_backend
+            << ",fast="
+            << (build.telemetry.dirty_detection_fast ? 1 : 0)
+            << ",fallback="
+            << (build.telemetry.dirty_detection_fallback ? 1 : 0)
+            << ",dirty_sources="
+            << build.telemetry.dirty_sources
+            << ",generation_checkpoint="
+            << (build.telemetry.generation_checkpoint_available ? 1 : 0)
+            << ",generation_anchor="
+            << (build.telemetry.generation_anchor_available ? 1 : 0)
+            << ",generation_change_ready="
+            << (build.telemetry.generation_change_ready ? 1 : 0)
+            << ",generation_change_overlay="
+            << (build.telemetry.generation_change_overlay ? 1 : 0)
+            << ",generation_change_fallback_reason="
+            << build.telemetry.generation_change_fallback_reason
+            << ",generation_change_file_updates="
+            << build.telemetry.generation_change_file_updates
+            << ",generation_change_directory_updates="
+            << build.telemetry.generation_change_directory_updates
+            << '\n';
+
+        if (manager.ready())
+            (void)manager.unload();
+
+        return build.telemetry.dirty_detection_fast
+            ? 1
+            : 3;
+    }
+
+    baseline_commit_result save;
+
+    const auto save_begin =
+        lifecycle_clock::now();
+    const auto save_status =
+        manager.save(save);
+    const auto save_end =
+        lifecycle_clock::now();
+
+    const auto& telemetry = save.telemetry;
+
+    const auto ns_ms =
+        [](std::uint64_t value) noexcept {
+            return static_cast<double>(value) /
+                1'000'000.0;
+        };
+
+    const auto phase_sum_ns =
+        telemetry.generation_freeze_materialize_change_update_index_allocate_zero_ns +
+        telemetry.generation_freeze_materialize_change_baseline_file_count_ns +
+        telemetry.generation_freeze_materialize_change_file_index_allocate_zero_ns +
+        telemetry.generation_freeze_materialize_change_baseline_file_merge_ns +
+        telemetry.generation_freeze_materialize_change_sparse_file_updates_ns +
+        telemetry.generation_freeze_materialize_change_baseline_directory_count_ns +
+        telemetry.generation_freeze_materialize_change_directory_index_allocate_zero_ns +
+        telemetry.generation_freeze_materialize_change_baseline_directory_merge_ns +
+        telemetry.generation_freeze_materialize_change_sparse_directory_updates_ns;
+
+    const auto materialize_unaccounted_ns =
+        telemetry.generation_freeze_materialize_change_ns >
+            phase_sum_ns
+        ? telemetry.generation_freeze_materialize_change_ns -
+            phase_sum_ns
+        : 0;
+
+    const bool save_pass =
+        save_status.ok() &&
+        !save.transaction.empty() &&
+        save.bytes_written != 0 &&
+        telemetry.generation_freeze_materialize_change_ns != 0 &&
+        telemetry.generation_freeze_materialize_change_source_count ==
+            source_count &&
+        telemetry.generation_freeze_materialize_change_file_updates == 1 &&
+        telemetry.generation_freeze_source_manager_mode == 3 &&
+        telemetry.generation_freeze_source_manager_allocate_zero_ns == 0 &&
+        telemetry.generation_freeze_source_manager_source_records_ns == 0 &&
+        telemetry.generation_freeze_source_manager_path_index_ns == 0 &&
+        telemetry.generation_freeze_source_manager_verify_ns == 0;
+
+    std::cout
+        << "D4A_SPARSE_SAVE_MATERIALIZATION,"
+        << (save_pass ? "PASS" : "FAIL")
+        << ",sources=" << source_count
+        << ",dirty_sources=" << build.telemetry.dirty_sources
+        << ",generation_checkpoint="
+        << (build.telemetry.generation_checkpoint_available ? 1 : 0)
+        << ",generation_anchor="
+        << (build.telemetry.generation_anchor_available ? 1 : 0)
+        << ",generation_change_ready="
+        << (build.telemetry.generation_change_ready ? 1 : 0)
+        << ",generation_change_overlay="
+        << (build.telemetry.generation_change_overlay ? 1 : 0)
+        << ",generation_change_fallback_reason="
+        << build.telemetry.generation_change_fallback_reason
+        << ",generation_change_file_updates="
+        << build.telemetry.generation_change_file_updates
+        << ",generation_change_directory_updates="
+        << build.telemetry.generation_change_directory_updates
+        << ",save_wall_ms="
+        << elapsed_ms(save_begin, save_end)
+        << ",save_total_ms="
+        << ns_ms(telemetry.save_total_ns)
+        << ",freeze_ms="
+        << ns_ms(telemetry.generation_freeze_ns)
+        << ",materialize_total_ms="
+        << ns_ms(
+            telemetry.generation_freeze_materialize_change_ns)
+        << ",materialize_accounted_ms="
+        << ns_ms(phase_sum_ns)
+        << ",materialize_unaccounted_ms="
+        << ns_ms(materialize_unaccounted_ns)
+
+        << ",update_index_allocate_zero_ms="
+        << ns_ms(
+            telemetry.generation_freeze_materialize_change_update_index_allocate_zero_ns)
+        << ",baseline_file_count_ms="
+        << ns_ms(
+            telemetry.generation_freeze_materialize_change_baseline_file_count_ns)
+        << ",file_index_allocate_zero_ms="
+        << ns_ms(
+            telemetry.generation_freeze_materialize_change_file_index_allocate_zero_ns)
+        << ",baseline_file_merge_ms="
+        << ns_ms(
+            telemetry.generation_freeze_materialize_change_baseline_file_merge_ns)
+        << ",sparse_file_updates_ms="
+        << ns_ms(
+            telemetry.generation_freeze_materialize_change_sparse_file_updates_ns)
+
+        << ",baseline_directory_count_ms="
+        << ns_ms(
+            telemetry.generation_freeze_materialize_change_baseline_directory_count_ns)
+        << ",directory_index_allocate_zero_ms="
+        << ns_ms(
+            telemetry.generation_freeze_materialize_change_directory_index_allocate_zero_ns)
+        << ",baseline_directory_merge_ms="
+        << ns_ms(
+            telemetry.generation_freeze_materialize_change_baseline_directory_merge_ns)
+        << ",sparse_directory_updates_ms="
+        << ns_ms(
+            telemetry.generation_freeze_materialize_change_sparse_directory_updates_ns)
+
+        << ",baseline_file_capacity="
+        << telemetry.generation_freeze_materialize_change_baseline_file_capacity
+        << ",baseline_file_occupied="
+        << telemetry.generation_freeze_materialize_change_baseline_file_occupied
+        << ",baseline_directory_capacity="
+        << telemetry.generation_freeze_materialize_change_baseline_directory_capacity
+        << ",baseline_directory_occupied="
+        << telemetry.generation_freeze_materialize_change_baseline_directory_occupied
+
+        << ",file_updates="
+        << telemetry.generation_freeze_materialize_change_file_updates
+        << ",directory_updates="
+        << telemetry.generation_freeze_materialize_change_directory_updates
+
+        << ",update_index_bytes="
+        << telemetry.generation_freeze_materialize_change_update_index_bytes
+        << ",file_index_bytes="
+        << telemetry.generation_freeze_materialize_change_file_index_bytes
+        << ",directory_index_bytes="
+        << telemetry.generation_freeze_materialize_change_directory_index_bytes
+        << ",peak_temporary_bytes="
+        << telemetry.generation_freeze_materialize_change_peak_temporary_bytes
+        << ",peak_materialization_owned_bytes="
+        << telemetry.generation_freeze_materialize_change_peak_owned_bytes
+
+        // D4A2_FREEZE_BREAKDOWN: coarse accounting around complete freeze phases.
+        << ",freeze_internal_ms="
+        << ns_ms(
+            telemetry.generation_freeze_internal_ns)
+        << ",freeze_compiled_ms="
+        << ns_ms(
+            telemetry.generation_freeze_compiled_ns)
+        << ",freeze_roots_ms="
+        << ns_ms(
+            telemetry.generation_freeze_roots_ns)
+        << ",freeze_source_manager_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_ns)
+        << ",source_manager_mode="
+        << telemetry.generation_freeze_source_manager_mode
+        << ",source_manager_sparse_fallback_reason="
+        << telemetry.generation_freeze_source_manager_sparse_fallback_reason
+        << ",source_manager_internal_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_internal_ns)
+        << ",source_manager_preflight_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_preflight_ns)
+        << ",source_manager_layout_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_layout_ns)
+        << ",source_manager_allocate_zero_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_allocate_zero_ns)
+        << ",source_manager_source_records_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_source_records_ns)
+        << ",source_manager_roots_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_roots_ns)
+        << ",source_manager_path_index_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_path_index_ns)
+        << ",source_manager_file_identity_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_file_identity_ns)
+        << ",source_manager_directory_identity_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_directory_identity_ns)
+        << ",source_manager_crc_wall_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_crc_wall_ns)
+        << ",source_manager_crc_worker_count="
+        << telemetry.generation_freeze_source_manager_crc_worker_count
+        << ",source_manager_crc_total_bytes="
+        << telemetry.generation_freeze_source_manager_crc_total_bytes
+        << ",source_manager_crc_section_elapsed_sum_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_crc_source_core_ns +
+            telemetry.generation_freeze_source_manager_crc_physical_state_ns +
+            telemetry.generation_freeze_source_manager_crc_graph_records_ns +
+            telemetry.generation_freeze_source_manager_crc_forward_edges_ns +
+            telemetry.generation_freeze_source_manager_crc_reverse_edges_ns +
+            telemetry.generation_freeze_source_manager_crc_roots_ns +
+            telemetry.generation_freeze_source_manager_crc_path_index_ns +
+            telemetry.generation_freeze_source_manager_crc_path_bytes_ns +
+            telemetry.generation_freeze_source_manager_crc_file_identity_ns +
+            telemetry.generation_freeze_source_manager_crc_directory_identity_ns)
+
+        << ",sm_crc_source_core_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_crc_source_core_ns)
+        << ",sm_crc_source_core_bytes="
+        << telemetry.generation_freeze_source_manager_crc_source_core_bytes
+        << ",sm_crc_physical_state_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_crc_physical_state_ns)
+        << ",sm_crc_physical_state_bytes="
+        << telemetry.generation_freeze_source_manager_crc_physical_state_bytes
+        << ",sm_crc_graph_records_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_crc_graph_records_ns)
+        << ",sm_crc_graph_records_bytes="
+        << telemetry.generation_freeze_source_manager_crc_graph_records_bytes
+        << ",sm_crc_forward_edges_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_crc_forward_edges_ns)
+        << ",sm_crc_forward_edges_bytes="
+        << telemetry.generation_freeze_source_manager_crc_forward_edges_bytes
+        << ",sm_crc_reverse_edges_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_crc_reverse_edges_ns)
+        << ",sm_crc_reverse_edges_bytes="
+        << telemetry.generation_freeze_source_manager_crc_reverse_edges_bytes
+        << ",sm_crc_roots_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_crc_roots_ns)
+        << ",sm_crc_roots_bytes="
+        << telemetry.generation_freeze_source_manager_crc_roots_bytes
+        << ",sm_crc_path_index_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_crc_path_index_ns)
+        << ",sm_crc_path_index_bytes="
+        << telemetry.generation_freeze_source_manager_crc_path_index_bytes
+        << ",sm_crc_path_bytes_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_crc_path_bytes_ns)
+        << ",sm_crc_path_bytes_bytes="
+        << telemetry.generation_freeze_source_manager_crc_path_bytes_bytes
+        << ",sm_crc_file_identity_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_crc_file_identity_ns)
+        << ",sm_crc_file_identity_bytes="
+        << telemetry.generation_freeze_source_manager_crc_file_identity_bytes
+        << ",sm_crc_directory_identity_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_crc_directory_identity_ns)
+        << ",sm_crc_directory_identity_bytes="
+        << telemetry.generation_freeze_source_manager_crc_directory_identity_bytes
+
+        << ",source_manager_prefix_directory_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_prefix_directory_encode_ns)
+        << ",source_manager_directory_crc_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_directory_crc_ns)
+        << ",source_manager_header_crc_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_header_crc_ns)
+        << ",source_manager_bind_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_bind_ns)
+        << ",source_manager_verify_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_verify_ns)
+        << ",source_manager_segment_validate_ms="
+        << ns_ms(
+            telemetry.generation_freeze_source_manager_segment_validate_ns)
+        << ",freeze_change_state_ms="
+        << ns_ms(
+            telemetry.generation_freeze_change_state_ns)
+        << ",freeze_build_cache_ms="
+        << ns_ms(
+            telemetry.generation_freeze_build_cache_ns)
+        << ",freeze_bind_ms="
+        << ns_ms(
+            telemetry.generation_freeze_bind_ns)
+        << ",freeze_verify_change_state_ms="
+        << ns_ms(
+            telemetry.generation_freeze_verify_change_state_ns)
+        << ",freeze_verify_build_cache_ms="
+        << ns_ms(
+            telemetry.generation_freeze_verify_build_cache_ns)
+
+        << ",build_cache_layout_allocate_ms="
+        << ns_ms(
+            telemetry.generation_freeze_build_cache_layout_allocate_ns)
+        << ",build_cache_source_frontend_ms="
+        << ns_ms(
+            telemetry.generation_freeze_build_cache_source_frontend_ns)
+        << ",build_cache_source_directory_text_ms="
+        << ns_ms(
+            telemetry.generation_freeze_build_cache_source_directory_text_ns)
+        << ",build_cache_frontend_record_ranges_ms="
+        << ns_ms(
+            telemetry.generation_freeze_build_cache_frontend_record_ranges_ns)
+        << ",build_cache_frontend_local_types_ms="
+        << ns_ms(
+            telemetry.generation_freeze_build_cache_frontend_local_types_ns)
+        << ",build_cache_frontend_type_slots_ms="
+        << ns_ms(
+            telemetry.generation_freeze_build_cache_frontend_type_slots_ns)
+        << ",build_cache_frontend_object_slots_ms="
+        << ns_ms(
+            telemetry.generation_freeze_build_cache_frontend_object_slots_ns)
+        << ",build_cache_frontend_member_slots_ms="
+        << ns_ms(
+            telemetry.generation_freeze_build_cache_frontend_member_slots_ns)
+        << ",build_cache_contribution_ms="
+        << ns_ms(
+            telemetry.generation_freeze_build_cache_contribution_ns)
+        << ",build_cache_graph_ms="
+        << ns_ms(
+            telemetry.generation_freeze_build_cache_graph_ns)
+        << ",build_cache_change_identity_ms="
+        << ns_ms(
+            telemetry.generation_freeze_build_cache_change_identity_ns)
+        << ",build_cache_section_crc_ms="
+        << ns_ms(
+            telemetry.generation_freeze_build_cache_section_crc_ns)
+        << ",build_cache_header_directory_ms="
+        << ns_ms(
+            telemetry.generation_freeze_build_cache_header_directory_ns)
+        << ",build_cache_bind_ms="
+        << ns_ms(
+            telemetry.generation_freeze_build_cache_bind_ns)
+        << ",build_cache_verify_ms="
+        << ns_ms(
+            telemetry.generation_freeze_build_cache_verify_ns)
+
+        << ",freeze_accounted_ms="
+        << ns_ms(
+            telemetry.generation_freeze_materialize_change_ns +
+            telemetry.generation_freeze_compiled_ns +
+            telemetry.generation_freeze_roots_ns +
+            telemetry.generation_freeze_source_manager_ns +
+            telemetry.generation_freeze_change_state_ns +
+            telemetry.generation_freeze_build_cache_ns +
+            telemetry.generation_freeze_bind_ns +
+            telemetry.generation_freeze_verify_change_state_ns +
+            telemetry.generation_freeze_verify_build_cache_ns)
+        << ",freeze_unaccounted_ms="
+        << ns_ms(
+            telemetry.generation_freeze_internal_ns >
+                telemetry.generation_freeze_materialize_change_ns +
+                telemetry.generation_freeze_compiled_ns +
+                telemetry.generation_freeze_roots_ns +
+                telemetry.generation_freeze_source_manager_ns +
+                telemetry.generation_freeze_change_state_ns +
+                telemetry.generation_freeze_build_cache_ns +
+                telemetry.generation_freeze_bind_ns +
+                telemetry.generation_freeze_verify_change_state_ns +
+                telemetry.generation_freeze_verify_build_cache_ns
+            ? telemetry.generation_freeze_internal_ns -
+                (telemetry.generation_freeze_materialize_change_ns +
+                 telemetry.generation_freeze_compiled_ns +
+                 telemetry.generation_freeze_roots_ns +
+                 telemetry.generation_freeze_source_manager_ns +
+                 telemetry.generation_freeze_change_state_ns +
+                 telemetry.generation_freeze_build_cache_ns +
+                 telemetry.generation_freeze_bind_ns +
+                 telemetry.generation_freeze_verify_change_state_ns +
+                 telemetry.generation_freeze_verify_build_cache_ns)
+            : 0)
+
+        << ",persisted_bytes_written="
+        << save.bytes_written
+        << ",store_commit_ms="
+        << ns_ms(telemetry.store_commit_ns)
+        << ",transaction_write_ms="
+        << ns_ms(telemetry.transaction_write_ns)
+        << ",transaction_flush_ms="
+        << ns_ms(telemetry.transaction_flush_ns)
+        << ",directory_flush_ms="
+        << ns_ms(telemetry.directory_flush_ns)
+        << ",current_write_ms="
+        << ns_ms(telemetry.current_write_ns)
+        << ",current_flush_ms="
+        << ns_ms(telemetry.current_flush_ns)
+        << ",current_replace_ms="
+        << ns_ms(telemetry.current_replace_ns)
+        << '\n';
+
+    if (!save_pass) {
+        if (manager.ready())
+            (void)manager.unload();
+        return 1;
+    }
+
+    if (!manager.ready() ||
+        !manager.unload().ok()) {
+        return 1;
+    }
+
+    project_manager post_save_manager;
+    diagnostic_buffer post_save_diagnostics;
+    project_build_result post_save_build;
+
+    const auto post_save_status =
+        post_save_manager.build(
+            configuration_path,
+            operation_id{4401},
+            post_save_diagnostics,
+            post_save_build,
+            1);
+
+    const bool post_save_pass =
+        post_save_status.ok() &&
+        !post_save_diagnostics.has_errors() &&
+        post_save_manager.ready() &&
+        validate_no_change(
+            source_count,
+            post_save_build) &&
+        post_save_build.telemetry.dirty_detection_backend == 1 &&
+        post_save_build.telemetry.dirty_detection_fast &&
+        !post_save_build.telemetry.dirty_detection_fallback &&
+        post_save_build.telemetry.dirty_sources == 0 &&
+        post_save_build.telemetry.journal_matched_sources == 0 &&
+        post_save_build.telemetry.baseline_source_manager_map_ns == 0 &&
+        post_save_build.telemetry.baseline_build_cache_map_ns == 0 &&
+        post_save_build.telemetry.sources.path_index_full_rebuilds == 0 &&
+        post_save_build.telemetry.sources.source_graph_full_scans == 0 &&
+        post_save_build.telemetry.builder.graph_full_scans == 0 &&
+        post_save_build.telemetry.builder.contribution_full_scans == 0;
+
+    std::cout
+        << "D4B_POST_SAVE_FAST_BUILD,"
+        << (post_save_pass ? "PASS" : "FAIL")
+        << ",sources=" << source_count
+        << ",manager_ms="
+        << ns_ms(post_save_build.telemetry.manager_total_ns)
+        << ",baseline_open_ms="
+        << ns_ms(post_save_build.telemetry.baseline_open_ns)
+        << ",dirty_ms="
+        << ns_ms(post_save_build.telemetry.dirty_detection_ns)
+        << ",backend="
+        << post_save_build.telemetry.dirty_detection_backend
+        << ",fast="
+        << (post_save_build.telemetry.dirty_detection_fast ? 1 : 0)
+        << ",fallback="
+        << (post_save_build.telemetry.dirty_detection_fallback ? 1 : 0)
+        << ",journal_records="
+        << post_save_build.telemetry.journal_records
+        << ",journal_matched="
+        << post_save_build.telemetry.journal_matched_sources
+        << ",dirty_sources="
+        << post_save_build.telemetry.dirty_sources
+        << ",source_manager_map_ms="
+        << ns_ms(
+            post_save_build.telemetry.baseline_source_manager_map_ns)
+        << ",build_cache_map_ms="
+        << ns_ms(
+            post_save_build.telemetry.baseline_build_cache_map_ns)
+        << ",graph_full_scans="
+        << post_save_build.telemetry.builder.graph_full_scans
+        << ",contribution_full_scans="
+        << post_save_build.telemetry.builder.contribution_full_scans
+        << '\n';
+
+    if (post_save_manager.ready() &&
+        !post_save_manager.unload().ok()) {
+        return 1;
+    }
+
+    return post_save_pass ? 0 : 1;
+}
+
 [[nodiscard]] bool run_matrix() {
     constexpr std::size_t matrix[]{
         1'000,
@@ -3174,6 +3769,34 @@ int main(int argc, char** argv) {
             return run_lifecycle_scale(
                 count,
                 workers);
+        }
+        catch (...) {
+            return 2;
+        }
+    }
+
+    if (argc == 2 &&
+        std::string_view{argv[1]} == "--d4a") {
+
+        const auto first =
+            run_d4a_sparse_save_materialization_profile(
+                100'000);
+        if (first != 0)
+            return first;
+
+        return run_d4a_sparse_save_materialization_profile(
+            1'000'000);
+    }
+
+    if (argc == 3 &&
+        std::string_view{argv[1]} ==
+            "--d4a-sparse-save") {
+        try {
+            const auto count =
+                static_cast<std::size_t>(
+                    std::stoull(argv[2]));
+            return run_d4a_sparse_save_materialization_profile(
+                count);
         }
         catch (...) {
             return 2;

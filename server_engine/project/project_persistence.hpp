@@ -20,9 +20,70 @@ class project_context;
 struct project_generation_freeze_telemetry final {
     std::uint64_t internal_ns = 0;
     std::uint64_t materialize_change_ns = 0;
+    std::uint64_t materialize_change_update_index_allocate_zero_ns = 0;
+    std::uint64_t materialize_change_baseline_file_count_ns = 0;
+    std::uint64_t materialize_change_file_index_allocate_zero_ns = 0;
+    std::uint64_t materialize_change_baseline_file_merge_ns = 0;
+    std::uint64_t materialize_change_sparse_file_updates_ns = 0;
+    std::uint64_t materialize_change_baseline_directory_count_ns = 0;
+    std::uint64_t materialize_change_directory_index_allocate_zero_ns = 0;
+    std::uint64_t materialize_change_baseline_directory_merge_ns = 0;
+    std::uint64_t materialize_change_sparse_directory_updates_ns = 0;
+    std::uint64_t materialize_change_source_count = 0;
+    std::uint64_t materialize_change_baseline_file_capacity = 0;
+    std::uint64_t materialize_change_baseline_file_occupied = 0;
+    std::uint64_t materialize_change_baseline_directory_capacity = 0;
+    std::uint64_t materialize_change_baseline_directory_occupied = 0;
+    std::uint64_t materialize_change_file_updates = 0;
+    std::uint64_t materialize_change_directory_updates = 0;
+    std::uint64_t materialize_change_update_index_bytes = 0;
+    std::uint64_t materialize_change_file_index_bytes = 0;
+    std::uint64_t materialize_change_directory_index_bytes = 0;
+    std::uint64_t materialize_change_peak_temporary_bytes = 0;
+    std::uint64_t materialize_change_peak_owned_bytes = 0;
     std::uint64_t compiled_ns = 0;
     std::uint64_t roots_ns = 0;
     std::uint64_t source_manager_ns = 0;
+    std::uint64_t source_manager_internal_ns = 0;
+    std::uint64_t source_manager_preflight_ns = 0;
+    std::uint64_t source_manager_layout_ns = 0;
+    std::uint64_t source_manager_allocate_zero_ns = 0;
+    std::uint64_t source_manager_source_records_ns = 0;
+    std::uint64_t source_manager_roots_ns = 0;
+    std::uint64_t source_manager_path_index_ns = 0;
+    std::uint64_t source_manager_file_identity_ns = 0;
+    std::uint64_t source_manager_directory_identity_ns = 0;
+    std::uint64_t source_manager_crc_wall_ns = 0;
+    std::uint64_t source_manager_crc_total_bytes = 0;
+    std::uint64_t source_manager_crc_source_core_ns = 0;
+    std::uint64_t source_manager_crc_source_core_bytes = 0;
+    std::uint64_t source_manager_crc_physical_state_ns = 0;
+    std::uint64_t source_manager_crc_physical_state_bytes = 0;
+    std::uint64_t source_manager_crc_graph_records_ns = 0;
+    std::uint64_t source_manager_crc_graph_records_bytes = 0;
+    std::uint64_t source_manager_crc_forward_edges_ns = 0;
+    std::uint64_t source_manager_crc_forward_edges_bytes = 0;
+    std::uint64_t source_manager_crc_reverse_edges_ns = 0;
+    std::uint64_t source_manager_crc_reverse_edges_bytes = 0;
+    std::uint64_t source_manager_crc_roots_ns = 0;
+    std::uint64_t source_manager_crc_roots_bytes = 0;
+    std::uint64_t source_manager_crc_path_index_ns = 0;
+    std::uint64_t source_manager_crc_path_index_bytes = 0;
+    std::uint64_t source_manager_crc_path_bytes_ns = 0;
+    std::uint64_t source_manager_crc_path_bytes_bytes = 0;
+    std::uint64_t source_manager_crc_file_identity_ns = 0;
+    std::uint64_t source_manager_crc_file_identity_bytes = 0;
+    std::uint64_t source_manager_crc_directory_identity_ns = 0;
+    std::uint64_t source_manager_crc_directory_identity_bytes = 0;
+    std::uint64_t source_manager_prefix_directory_encode_ns = 0;
+    std::uint64_t source_manager_directory_crc_ns = 0;
+    std::uint64_t source_manager_header_crc_ns = 0;
+    std::uint64_t source_manager_bind_ns = 0;
+    std::uint64_t source_manager_verify_ns = 0;
+    std::uint64_t source_manager_segment_validate_ns = 0;
+    std::uint32_t source_manager_mode = 0;
+    std::uint32_t source_manager_crc_worker_count = 0;
+    std::uint32_t source_manager_sparse_fallback_reason = 0;
     std::uint64_t change_state_ns = 0;
     std::uint64_t build_cache_ns = 0;
     std::uint64_t build_cache_layout_allocate_ns = 0;
@@ -83,10 +144,12 @@ public:
         const auto source_segment =
             native_sources.valid()
             ? native_sources.segment()
-            : project_generation_segment{
-                std::span<const std::byte>{
-                    sources.data(),
-                    sources.size()}};
+            : sparse_sources.valid()
+                ? sparse_sources.segment()
+                : project_generation_segment{
+                    std::span<const std::byte>{
+                        sources.data(),
+                        sources.size()}};
 
         return {
             project_generation_segment{
@@ -106,6 +169,7 @@ public:
         compiled.clear();
         sources.clear();
         native_sources.reset();
+        sparse_sources.reset();
         change_fallback.clear();
         native_change = {};
         build.clear();
@@ -115,6 +179,7 @@ private:
     std::vector<std::byte> compiled;
     std::vector<std::byte> sources;
     source_manager_native_image_storage native_sources;
+    source_manager_sparse_image_storage sparse_sources;
     std::vector<std::byte> change_fallback;
     std::span<const std::byte> native_change;
     std::vector<std::byte> build;

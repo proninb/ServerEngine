@@ -1263,12 +1263,134 @@ status project_manager::save(
             generation_freeze_detail.internal_ns;
         output.telemetry.generation_freeze_materialize_change_ns =
             generation_freeze_detail.materialize_change_ns;
+        output.telemetry.generation_freeze_materialize_change_update_index_allocate_zero_ns =
+            generation_freeze_detail.materialize_change_update_index_allocate_zero_ns;
+        output.telemetry.generation_freeze_materialize_change_baseline_file_count_ns =
+            generation_freeze_detail.materialize_change_baseline_file_count_ns;
+        output.telemetry.generation_freeze_materialize_change_file_index_allocate_zero_ns =
+            generation_freeze_detail.materialize_change_file_index_allocate_zero_ns;
+        output.telemetry.generation_freeze_materialize_change_baseline_file_merge_ns =
+            generation_freeze_detail.materialize_change_baseline_file_merge_ns;
+        output.telemetry.generation_freeze_materialize_change_sparse_file_updates_ns =
+            generation_freeze_detail.materialize_change_sparse_file_updates_ns;
+        output.telemetry.generation_freeze_materialize_change_baseline_directory_count_ns =
+            generation_freeze_detail.materialize_change_baseline_directory_count_ns;
+        output.telemetry.generation_freeze_materialize_change_directory_index_allocate_zero_ns =
+            generation_freeze_detail.materialize_change_directory_index_allocate_zero_ns;
+        output.telemetry.generation_freeze_materialize_change_baseline_directory_merge_ns =
+            generation_freeze_detail.materialize_change_baseline_directory_merge_ns;
+        output.telemetry.generation_freeze_materialize_change_sparse_directory_updates_ns =
+            generation_freeze_detail.materialize_change_sparse_directory_updates_ns;
+        output.telemetry.generation_freeze_materialize_change_source_count =
+            generation_freeze_detail.materialize_change_source_count;
+        output.telemetry.generation_freeze_materialize_change_baseline_file_capacity =
+            generation_freeze_detail.materialize_change_baseline_file_capacity;
+        output.telemetry.generation_freeze_materialize_change_baseline_file_occupied =
+            generation_freeze_detail.materialize_change_baseline_file_occupied;
+        output.telemetry.generation_freeze_materialize_change_baseline_directory_capacity =
+            generation_freeze_detail.materialize_change_baseline_directory_capacity;
+        output.telemetry.generation_freeze_materialize_change_baseline_directory_occupied =
+            generation_freeze_detail.materialize_change_baseline_directory_occupied;
+        output.telemetry.generation_freeze_materialize_change_file_updates =
+            generation_freeze_detail.materialize_change_file_updates;
+        output.telemetry.generation_freeze_materialize_change_directory_updates =
+            generation_freeze_detail.materialize_change_directory_updates;
+        output.telemetry.generation_freeze_materialize_change_update_index_bytes =
+            generation_freeze_detail.materialize_change_update_index_bytes;
+        output.telemetry.generation_freeze_materialize_change_file_index_bytes =
+            generation_freeze_detail.materialize_change_file_index_bytes;
+        output.telemetry.generation_freeze_materialize_change_directory_index_bytes =
+            generation_freeze_detail.materialize_change_directory_index_bytes;
+        output.telemetry.generation_freeze_materialize_change_peak_temporary_bytes =
+            generation_freeze_detail.materialize_change_peak_temporary_bytes;
+        output.telemetry.generation_freeze_materialize_change_peak_owned_bytes =
+            generation_freeze_detail.materialize_change_peak_owned_bytes;
         output.telemetry.generation_freeze_compiled_ns =
             generation_freeze_detail.compiled_ns;
         output.telemetry.generation_freeze_roots_ns =
             generation_freeze_detail.roots_ns;
         output.telemetry.generation_freeze_source_manager_ns =
             generation_freeze_detail.source_manager_ns;
+        output.telemetry.generation_freeze_source_manager_internal_ns =
+            generation_freeze_detail.source_manager_internal_ns;
+        output.telemetry.generation_freeze_source_manager_preflight_ns =
+            generation_freeze_detail.source_manager_preflight_ns;
+        output.telemetry.generation_freeze_source_manager_layout_ns =
+            generation_freeze_detail.source_manager_layout_ns;
+        output.telemetry.generation_freeze_source_manager_allocate_zero_ns =
+            generation_freeze_detail.source_manager_allocate_zero_ns;
+        output.telemetry.generation_freeze_source_manager_source_records_ns =
+            generation_freeze_detail.source_manager_source_records_ns;
+        output.telemetry.generation_freeze_source_manager_roots_ns =
+            generation_freeze_detail.source_manager_roots_ns;
+        output.telemetry.generation_freeze_source_manager_path_index_ns =
+            generation_freeze_detail.source_manager_path_index_ns;
+        output.telemetry.generation_freeze_source_manager_file_identity_ns =
+            generation_freeze_detail.source_manager_file_identity_ns;
+        output.telemetry.generation_freeze_source_manager_directory_identity_ns =
+            generation_freeze_detail.source_manager_directory_identity_ns;
+        output.telemetry.generation_freeze_source_manager_crc_wall_ns =
+            generation_freeze_detail.source_manager_crc_wall_ns;
+        output.telemetry.generation_freeze_source_manager_crc_total_bytes =
+            generation_freeze_detail.source_manager_crc_total_bytes;
+        output.telemetry.generation_freeze_source_manager_crc_source_core_ns =
+            generation_freeze_detail.source_manager_crc_source_core_ns;
+        output.telemetry.generation_freeze_source_manager_crc_source_core_bytes =
+            generation_freeze_detail.source_manager_crc_source_core_bytes;
+        output.telemetry.generation_freeze_source_manager_crc_physical_state_ns =
+            generation_freeze_detail.source_manager_crc_physical_state_ns;
+        output.telemetry.generation_freeze_source_manager_crc_physical_state_bytes =
+            generation_freeze_detail.source_manager_crc_physical_state_bytes;
+        output.telemetry.generation_freeze_source_manager_crc_graph_records_ns =
+            generation_freeze_detail.source_manager_crc_graph_records_ns;
+        output.telemetry.generation_freeze_source_manager_crc_graph_records_bytes =
+            generation_freeze_detail.source_manager_crc_graph_records_bytes;
+        output.telemetry.generation_freeze_source_manager_crc_forward_edges_ns =
+            generation_freeze_detail.source_manager_crc_forward_edges_ns;
+        output.telemetry.generation_freeze_source_manager_crc_forward_edges_bytes =
+            generation_freeze_detail.source_manager_crc_forward_edges_bytes;
+        output.telemetry.generation_freeze_source_manager_crc_reverse_edges_ns =
+            generation_freeze_detail.source_manager_crc_reverse_edges_ns;
+        output.telemetry.generation_freeze_source_manager_crc_reverse_edges_bytes =
+            generation_freeze_detail.source_manager_crc_reverse_edges_bytes;
+        output.telemetry.generation_freeze_source_manager_crc_roots_ns =
+            generation_freeze_detail.source_manager_crc_roots_ns;
+        output.telemetry.generation_freeze_source_manager_crc_roots_bytes =
+            generation_freeze_detail.source_manager_crc_roots_bytes;
+        output.telemetry.generation_freeze_source_manager_crc_path_index_ns =
+            generation_freeze_detail.source_manager_crc_path_index_ns;
+        output.telemetry.generation_freeze_source_manager_crc_path_index_bytes =
+            generation_freeze_detail.source_manager_crc_path_index_bytes;
+        output.telemetry.generation_freeze_source_manager_crc_path_bytes_ns =
+            generation_freeze_detail.source_manager_crc_path_bytes_ns;
+        output.telemetry.generation_freeze_source_manager_crc_path_bytes_bytes =
+            generation_freeze_detail.source_manager_crc_path_bytes_bytes;
+        output.telemetry.generation_freeze_source_manager_crc_file_identity_ns =
+            generation_freeze_detail.source_manager_crc_file_identity_ns;
+        output.telemetry.generation_freeze_source_manager_crc_file_identity_bytes =
+            generation_freeze_detail.source_manager_crc_file_identity_bytes;
+        output.telemetry.generation_freeze_source_manager_crc_directory_identity_ns =
+            generation_freeze_detail.source_manager_crc_directory_identity_ns;
+        output.telemetry.generation_freeze_source_manager_crc_directory_identity_bytes =
+            generation_freeze_detail.source_manager_crc_directory_identity_bytes;
+        output.telemetry.generation_freeze_source_manager_prefix_directory_encode_ns =
+            generation_freeze_detail.source_manager_prefix_directory_encode_ns;
+        output.telemetry.generation_freeze_source_manager_directory_crc_ns =
+            generation_freeze_detail.source_manager_directory_crc_ns;
+        output.telemetry.generation_freeze_source_manager_header_crc_ns =
+            generation_freeze_detail.source_manager_header_crc_ns;
+        output.telemetry.generation_freeze_source_manager_bind_ns =
+            generation_freeze_detail.source_manager_bind_ns;
+        output.telemetry.generation_freeze_source_manager_verify_ns =
+            generation_freeze_detail.source_manager_verify_ns;
+        output.telemetry.generation_freeze_source_manager_segment_validate_ns =
+            generation_freeze_detail.source_manager_segment_validate_ns;
+        output.telemetry.generation_freeze_source_manager_mode =
+            generation_freeze_detail.source_manager_mode;
+        output.telemetry.generation_freeze_source_manager_crc_worker_count =
+            generation_freeze_detail.source_manager_crc_worker_count;
+        output.telemetry.generation_freeze_source_manager_sparse_fallback_reason =
+            generation_freeze_detail.source_manager_sparse_fallback_reason;
         output.telemetry.generation_freeze_change_state_ns =
             generation_freeze_detail.change_state_ns;
         output.telemetry.generation_freeze_build_cache_ns =

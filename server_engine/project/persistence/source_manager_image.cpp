@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -280,6 +281,52 @@ void write_i64(std::byte* target, std::int64_t value) noexcept {
 
 [[nodiscard]] bool valid_role(std::uint8_t value) noexcept {
     return value <= static_cast<std::uint8_t>(project_item_role::project);
+}
+
+using source_manager_freeze_clock = std::chrono::steady_clock;
+
+[[nodiscard]] std::uint64_t source_manager_elapsed_ns(
+    source_manager_freeze_clock::time_point begin) noexcept {
+
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            source_manager_freeze_clock::now() - begin).count());
+}
+
+void publish_source_manager_crc_sections(
+    source_manager_freeze_telemetry* telemetry,
+    const std::array<std::span<const std::byte>, 10>& sections,
+    const std::array<std::uint64_t, 10>& elapsed) noexcept {
+
+    if (telemetry == nullptr)
+        return;
+
+    std::uint64_t total_bytes = 0;
+    for (const auto section : sections)
+        total_bytes += static_cast<std::uint64_t>(section.size());
+
+    telemetry->crc_total_bytes = total_bytes;
+
+    telemetry->crc_source_core_ns = elapsed[0];
+    telemetry->crc_source_core_bytes = sections[0].size();
+    telemetry->crc_physical_state_ns = elapsed[1];
+    telemetry->crc_physical_state_bytes = sections[1].size();
+    telemetry->crc_graph_records_ns = elapsed[2];
+    telemetry->crc_graph_records_bytes = sections[2].size();
+    telemetry->crc_forward_edges_ns = elapsed[3];
+    telemetry->crc_forward_edges_bytes = sections[3].size();
+    telemetry->crc_reverse_edges_ns = elapsed[4];
+    telemetry->crc_reverse_edges_bytes = sections[4].size();
+    telemetry->crc_roots_ns = elapsed[5];
+    telemetry->crc_roots_bytes = sections[5].size();
+    telemetry->crc_path_index_ns = elapsed[6];
+    telemetry->crc_path_index_bytes = sections[6].size();
+    telemetry->crc_path_bytes_ns = elapsed[7];
+    telemetry->crc_path_bytes_bytes = sections[7].size();
+    telemetry->crc_file_identity_ns = elapsed[8];
+    telemetry->crc_file_identity_bytes = sections[8].size();
+    telemetry->crc_directory_identity_ns = elapsed[9];
+    telemetry->crc_directory_identity_bytes = sections[9].size();
 }
 
 } // namespace
@@ -1247,12 +1294,151 @@ source_manager_native_image_storage::segment() const noexcept {
         : project_generation_segment{};
 }
 
+void source_manager_sparse_image_storage::reset() noexcept {
+    prefix = {};
+    baseline = {};
+    patch_sources.clear();
+    physical_patches.clear();
+    file_identity_index.clear();
+    directory_identity_index.clear();
+    physical_offset = 0;
+    file_identity_offset = 0;
+    directory_identity_offset = 0;
+    size_value = 0;
+    valid_value = false;
+}
+
+project_generation_segment
+source_manager_sparse_image_storage::segment() const noexcept {
+
+    project_generation_segment output;
+
+    if (!valid_value ||
+        patch_sources.size() !=
+            physical_patches.size() ||
+        baseline.size() != size_value ||
+        physical_offset < prefix.size() ||
+        file_identity_offset < physical_offset ||
+        directory_identity_offset < file_identity_offset) {
+        return output;
+    }
+
+    if (!output.append(prefix))
+        return {};
+
+    std::size_t cursor = prefix.size();
+
+    for (std::size_t index = 0;
+         index < patch_sources.size();
+         ++index) {
+
+        const auto source = patch_sources[index];
+        if (!source)
+            return {};
+
+        const auto patch_offset =
+            physical_offset +
+            static_cast<std::size_t>(
+                source.value() - 1) *
+                sizeof(source_generation_physical_record);
+
+        if (patch_offset < cursor ||
+            patch_offset >
+                file_identity_offset ||
+            sizeof(source_generation_physical_record) >
+                file_identity_offset - patch_offset) {
+            return {};
+        }
+
+        if (!output.append(
+                baseline.subspan(
+                    cursor,
+                    patch_offset - cursor))) {
+            return {};
+        }
+
+        const auto patch_bytes =
+            std::as_bytes(
+                std::span<
+                    const source_generation_physical_record>{
+                    &physical_patches[index],
+                    1});
+
+        if (!output.append(patch_bytes))
+            return {};
+
+        cursor =
+            patch_offset +
+            patch_bytes.size();
+    }
+
+    if (cursor > file_identity_offset ||
+        !output.append(
+            baseline.subspan(
+                cursor,
+                file_identity_offset - cursor))) {
+        return {};
+    }
+
+    const auto file_bytes =
+        std::as_bytes(
+            std::span<const source_change_file_index_slot>{
+                file_identity_index});
+
+    if (!output.append(file_bytes))
+        return {};
+
+    cursor =
+        file_identity_offset +
+        file_bytes.size();
+
+    if (cursor > directory_identity_offset ||
+        !output.append(
+            baseline.subspan(
+                cursor,
+                directory_identity_offset - cursor))) {
+        return {};
+    }
+
+    const auto directory_bytes_value =
+        std::as_bytes(
+            std::span<const source_change_directory_index_slot>{
+                directory_identity_index});
+
+    if (!output.append(directory_bytes_value))
+        return {};
+
+    cursor =
+        directory_identity_offset +
+        directory_bytes_value.size();
+
+    if (cursor > baseline.size() ||
+        !output.append(
+            baseline.subspan(cursor))) {
+        return {};
+    }
+
+    return output.size() == size_value
+        ? output
+        : project_generation_segment{};
+}
+
 status freeze_source_manager_native_image(
     const source_manager& manager,
     const source_manager_image_options& options,
-    source_manager_native_image_storage& output) noexcept {
+    source_manager_native_image_storage& output,
+    source_manager_freeze_telemetry* telemetry) noexcept {
 
     output.reset();
+    if (telemetry != nullptr) {
+        *telemetry = {};
+        telemetry->mode = 1;
+    }
+
+    const auto internal_begin =
+        source_manager_freeze_clock::now();
+    const auto preflight_begin =
+        source_manager_freeze_clock::now();
 
     if constexpr (std::endian::native != std::endian::little)
         return {status_code::not_available};
@@ -1308,10 +1494,18 @@ status freeze_source_manager_native_image(
         return {status_code::invalid_argument};
     }
 
+    if (telemetry != nullptr) {
+        telemetry->preflight_ns =
+            source_manager_elapsed_ns(preflight_begin);
+    }
+
     // GEN-02C9: native.graph and native.physical are fresh Generation-owned
     // publication records. source_generation_storage constructs their reserved
     // fields, flags, and arena ranges; rescanning all Sources here duplicates
     // that publication contract. Persisted/mapped input keeps its cold verifier.
+
+    const auto roots_begin =
+        source_manager_freeze_clock::now();
 
     try {
         output.roots.assign(
@@ -1344,6 +1538,14 @@ status freeze_source_manager_native_image(
                 static_cast<std::uint8_t>(
                     root.role));
     }
+
+    if (telemetry != nullptr) {
+        telemetry->roots_ns =
+            source_manager_elapsed_ns(roots_begin);
+    }
+
+    const auto layout_begin =
+        source_manager_freeze_clock::now();
 
     output.native = native;
     output.file_identity_index =
@@ -1467,8 +1669,19 @@ status freeze_source_manager_native_image(
         return {status_code::artifact_corrupt};
     }
 
+    if (telemetry != nullptr) {
+        telemetry->layout_ns =
+            source_manager_elapsed_ns(layout_begin);
+    }
+
+    std::array<std::uint64_t, 10>
+        crc_section_elapsed{};
+
     // GEN-02C9: Source Manager sections are immutable and independent.
     // Compute their CRCs concurrently; the persisted CRC contract is unchanged.
+    const auto crc_wall_begin =
+        source_manager_freeze_clock::now();
+
     const auto crc_worker_count =
         (std::min)(
             sections.size(),
@@ -1489,9 +1702,16 @@ status freeze_source_manager_native_image(
             if (index >= sections.size())
                 return;
 
+            const auto section_begin =
+                source_manager_freeze_clock::now();
+
             layout[index].crc64 =
                 persistence_crc64(
                     sections[index]);
+
+            crc_section_elapsed[index] =
+                source_manager_elapsed_ns(
+                    section_begin);
         }
     };
 
@@ -1526,6 +1746,22 @@ status freeze_source_manager_native_image(
             return {status_code::not_available};
         }
     }
+
+    if (telemetry != nullptr) {
+        telemetry->crc_wall_ns =
+            source_manager_elapsed_ns(crc_wall_begin);
+        telemetry->crc_worker_count =
+            static_cast<std::uint32_t>(
+                crc_worker_count);
+    }
+
+    publish_source_manager_crc_sections(
+        telemetry,
+        sections,
+        crc_section_elapsed);
+
+    const auto prefix_begin =
+        source_manager_freeze_clock::now();
 
     auto* base =
         output.prefix.data();
@@ -1630,6 +1866,14 @@ status freeze_source_manager_native_image(
             item.crc64);
     }
 
+    if (telemetry != nullptr) {
+        telemetry->prefix_directory_encode_ns =
+            source_manager_elapsed_ns(prefix_begin);
+    }
+
+    const auto directory_crc_begin =
+        source_manager_freeze_clock::now();
+
     const auto directory_crc =
         persistence_crc64(
             std::span<const std::byte>{
@@ -1639,6 +1883,15 @@ status freeze_source_manager_native_image(
     write_u64(
         base + header_directory_crc_offset,
         directory_crc);
+
+    if (telemetry != nullptr) {
+        telemetry->directory_crc_ns =
+            source_manager_elapsed_ns(
+                directory_crc_begin);
+    }
+
+    const auto header_crc_begin =
+        source_manager_freeze_clock::now();
 
     std::array<
         std::byte,
@@ -1658,9 +1911,18 @@ status freeze_source_manager_native_image(
         base + header_crc_offset,
         persistence_crc64(header));
 
+    if (telemetry != nullptr) {
+        telemetry->header_crc_ns =
+            source_manager_elapsed_ns(
+                header_crc_begin);
+    }
+
     output.size_value =
         static_cast<std::size_t>(cursor);
     output.valid_value = true;
+
+    const auto segment_validate_begin =
+        source_manager_freeze_clock::now();
 
     const auto segment =
         output.segment();
@@ -1671,15 +1933,619 @@ status freeze_source_manager_native_image(
         return {status_code::not_available};
     }
 
+    if (telemetry != nullptr) {
+        telemetry->segment_validate_ns =
+            source_manager_elapsed_ns(
+                segment_validate_begin);
+        telemetry->internal_ns =
+            source_manager_elapsed_ns(
+                internal_begin);
+    }
+
+    return {};
+}
+
+status freeze_source_manager_sparse_baseline_image(
+    const source_manager& manager,
+    const source_manager_image_view& baseline,
+    const source_manager_image_options& options,
+    std::span<const source_change_file_identity_update> physical_updates,
+    bool roots_baseline_proven,
+    source_manager_sparse_image_storage& output,
+    source_manager_freeze_telemetry* telemetry) noexcept {
+
+    output.reset();
+
+    if (telemetry != nullptr) {
+        *telemetry = {};
+        // D4D mode 3 = sparse baseline scatter/gather.
+        telemetry->mode = 3;
+        telemetry->crc_worker_count = 1;
+    }
+
+    const auto internal_begin =
+        source_manager_freeze_clock::now();
+    const auto preflight_begin =
+        source_manager_freeze_clock::now();
+
+    if constexpr (std::endian::native != std::endian::little) {
+        if (telemetry != nullptr)
+            telemetry->sparse_fallback_reason = 1;
+        return {status_code::not_found};
+    }
+
+    if (!baseline.valid() ||
+        manager.baseline_source_image() != &baseline) {
+        if (telemetry != nullptr)
+            telemetry->sparse_fallback_reason = 2;
+        return {status_code::not_found};
+    }
+
+    if (!roots_baseline_proven) {
+        if (telemetry != nullptr)
+            telemetry->sparse_fallback_reason = 3;
+        return {status_code::not_found};
+    }
+
+    if (manager.source_count() != baseline.source_count()) {
+        if (telemetry != nullptr)
+            telemetry->sparse_fallback_reason = 4;
+        return {status_code::not_found};
+    }
+
+    if (options.roots.size() != baseline.root_count()) {
+        if (telemetry != nullptr)
+            telemetry->sparse_fallback_reason = 5;
+        return {status_code::not_found};
+    }
+
+    // Incremental BUILD may own a freshly published root vector even when the
+    // root set is byte-for-byte identical to the pinned baseline. Reuse the
+    // baseline roots section only after proving every identity/role pair equal.
+    for (std::size_t index = 0;
+         index < options.roots.size();
+         ++index) {
+
+        source_manager_image_root baseline_root;
+        const auto root_result =
+            baseline.root(
+                index,
+                baseline_root);
+
+        if (!root_result.ok()) {
+            output.reset();
+            return root_result;
+        }
+
+        const auto& current_root =
+            options.roots[index];
+
+        if (current_root.source !=
+                baseline_root.source ||
+            current_root.role !=
+                baseline_root.role) {
+            if (telemetry != nullptr)
+                telemetry->sparse_fallback_reason = 6;
+            output.reset();
+            return {status_code::not_found};
+        }
+    }
+
+    // A baseline-backed sparse Source Manager cannot reuse path/topology sections
+    // if Source identity count changed.
+    const auto source_count =
+        manager.source_count();
+
+    if (source_count == 0)
+        return {status_code::not_found};
+
+    const auto& physical =
+        baseline.section(
+            source_manager_image_section::physical_state);
+    const auto& file_identity =
+        baseline.section(
+            source_manager_image_section::source_file_identity_index);
+    const auto& directory_identity =
+        baseline.section(
+            source_manager_image_section::tracked_directory_identity_index);
+
+    if (physical.data == nullptr ||
+        physical.record_size !=
+            sizeof(source_generation_physical_record) ||
+        physical.count != source_count ||
+        file_identity.data == nullptr ||
+        file_identity.record_size !=
+            sizeof(source_change_file_index_slot) ||
+        directory_identity.data == nullptr ||
+        directory_identity.record_size !=
+            sizeof(source_change_directory_index_slot)) {
+        if (telemetry != nullptr)
+            telemetry->sparse_fallback_reason = 7;
+        return {status_code::not_found};
+    }
+
+    const auto file_bytes =
+        std::as_bytes(
+            options.file_identity_index);
+    const auto directory_bytes_value =
+        std::as_bytes(
+            options.directory_identity_index);
+
+    const auto baseline_file_bytes =
+        static_cast<std::size_t>(
+            file_identity.count) *
+            file_identity.record_size;
+    const auto baseline_directory_bytes =
+        static_cast<std::size_t>(
+            directory_identity.count) *
+            directory_identity.record_size;
+
+    if (file_bytes.size() !=
+            baseline_file_bytes ||
+        directory_bytes_value.size() !=
+            baseline_directory_bytes) {
+        if (telemetry != nullptr)
+            telemetry->sparse_fallback_reason = 8;
+        return {status_code::not_found};
+    }
+
+    const auto physical_offset_value =
+        static_cast<std::size_t>(
+            physical.data -
+            baseline.bytes.data());
+    const auto file_identity_offset_value =
+        static_cast<std::size_t>(
+            file_identity.data -
+            baseline.bytes.data());
+    const auto directory_identity_offset_value =
+        static_cast<std::size_t>(
+            directory_identity.data -
+            baseline.bytes.data());
+
+    if (baseline.bytes.size() <
+            source_manager_image_prefix_size ||
+        physical_offset_value <
+            source_manager_image_prefix_size ||
+        file_identity_offset_value <
+            physical_offset_value +
+                static_cast<std::size_t>(
+                    physical.count) *
+                    physical.record_size ||
+        directory_identity_offset_value <
+            file_identity_offset_value +
+                baseline_file_bytes) {
+        if (telemetry != nullptr)
+            telemetry->sparse_fallback_reason = 9;
+        return {status_code::not_found};
+    }
+
+    // Each physical patch adds at most two scatter/gather extents. Keep the
+    // storage-neutral Generation segment inside its fixed extent budget.
+    constexpr std::size_t maximum_sparse_physical_updates = 13;
+    if (physical_updates.size() >
+        maximum_sparse_physical_updates) {
+        if (telemetry != nullptr)
+            telemetry->sparse_fallback_reason = 10;
+        return {status_code::not_found};
+    }
+
+    try {
+        output.patch_sources.reserve(
+            physical_updates.size());
+        output.physical_patches.reserve(
+            physical_updates.size());
+
+        // Order by persisted record position. This does not assign or canonicalize
+        // Source identity; it only makes scatter/gather extents monotonic.
+        for (const auto& update : physical_updates) {
+            if (!update.source ||
+                static_cast<std::size_t>(
+                    update.source.value()) >
+                    source_count) {
+                output.reset();
+                return {status_code::invalid_argument};
+            }
+
+            const auto position =
+                std::lower_bound(
+                    output.patch_sources.begin(),
+                    output.patch_sources.end(),
+                    update.source,
+                    [](source_id left, source_id right) noexcept {
+                        return left.value() < right.value();
+                    });
+
+            if (position !=
+                    output.patch_sources.end() &&
+                position->value() ==
+                    update.source.value()) {
+                output.reset();
+                return {status_code::invalid_argument};
+            }
+
+            output.patch_sources.insert(
+                position,
+                update.source);
+        }
+
+        // Only include topology can change Source Manager graph topology.
+        // Every changed physical Source is proven against the baseline before
+        // byte-identical graph/edge sections are borrowed.
+        for (const auto source :
+             output.patch_sources) {
+
+            const auto baseline_includes =
+                baseline.includes(source);
+            const auto current_count =
+                manager.include_count(source);
+
+            if (current_count !=
+                baseline_includes.size()) {
+                if (telemetry != nullptr)
+                    telemetry->sparse_fallback_reason = 11;
+                output.reset();
+                return {status_code::not_found};
+            }
+
+            for (std::size_t index = 0;
+                 index < current_count;
+                 ++index) {
+                if (manager.include_at(
+                        source,
+                        index) !=
+                    baseline_includes[index]) {
+                    if (telemetry != nullptr)
+                        telemetry->sparse_fallback_reason = 12;
+                    output.reset();
+                    return {status_code::not_found};
+                }
+            }
+        }
+
+        output.physical_patches.resize(
+            output.patch_sources.size());
+
+        for (std::size_t index = 0;
+             index < output.patch_sources.size();
+             ++index) {
+
+            auto& record =
+                output.physical_patches[index];
+            record = {};
+
+            const auto snapshot =
+                manager.current(
+                    output.patch_sources[index]);
+
+            if (!snapshot)
+                continue;
+
+            const auto observation =
+                snapshot.observation();
+
+            if (observation.size >
+                (std::numeric_limits<std::uint64_t>::max)()) {
+                output.reset();
+                return {status_code::not_available};
+            }
+
+            record.flags =
+                source_generation_physical_present;
+            record.write_time_ticks =
+                observation.write_time_ticks;
+            record.size =
+                static_cast<std::uint64_t>(
+                    observation.size);
+            record.hash = snapshot.hash();
+        }
+    }
+    catch (const std::bad_alloc&) {
+        output.reset();
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        output.reset();
+        return {status_code::not_available};
+    }
+
+    if (telemetry != nullptr) {
+        telemetry->preflight_ns =
+            source_manager_elapsed_ns(
+                preflight_begin);
+    }
+
+    const auto crc_wall_begin =
+        source_manager_freeze_clock::now();
+
+    std::uint64_t physical_crc =
+        physical.crc64;
+
+    if (!output.patch_sources.empty()) {
+        const auto physical_bytes =
+            std::span<const std::byte>{
+                physical.data,
+                static_cast<std::size_t>(
+                    physical.count) *
+                    physical.record_size};
+
+        const auto physical_crc_begin =
+            source_manager_freeze_clock::now();
+
+        physical_crc = 0;
+        std::size_t cursor = 0;
+
+        for (std::size_t index = 0;
+             index < output.patch_sources.size();
+             ++index) {
+
+            const auto patch_offset =
+                static_cast<std::size_t>(
+                    output.patch_sources[index].
+                        value() - 1) *
+                sizeof(
+                    source_generation_physical_record);
+
+            physical_crc =
+                persistence_crc64_update(
+                    physical_crc,
+                    physical_bytes.subspan(
+                        cursor,
+                        patch_offset - cursor));
+
+            physical_crc =
+                persistence_crc64_update(
+                    physical_crc,
+                    std::as_bytes(
+                        std::span<
+                            const source_generation_physical_record>{
+                            &output.physical_patches[index],
+                            1}));
+
+            cursor =
+                patch_offset +
+                sizeof(
+                    source_generation_physical_record);
+        }
+
+        physical_crc =
+            persistence_crc64_update(
+                physical_crc,
+                physical_bytes.subspan(cursor));
+
+        if (telemetry != nullptr) {
+            telemetry->crc_physical_state_ns =
+                source_manager_elapsed_ns(
+                    physical_crc_begin);
+            telemetry->crc_physical_state_bytes =
+                physical_bytes.size();
+        }
+    }
+
+    const auto file_crc_begin =
+        source_manager_freeze_clock::now();
+    const auto file_crc =
+        persistence_crc64(file_bytes);
+
+    if (telemetry != nullptr) {
+        telemetry->crc_file_identity_ns =
+            source_manager_elapsed_ns(
+                file_crc_begin);
+        telemetry->crc_file_identity_bytes =
+            file_bytes.size();
+    }
+
+    const auto directory_crc_section_begin =
+        source_manager_freeze_clock::now();
+    const auto directory_section_crc =
+        persistence_crc64(
+            directory_bytes_value);
+
+    if (telemetry != nullptr) {
+        telemetry->crc_directory_identity_ns =
+            source_manager_elapsed_ns(
+                directory_crc_section_begin);
+        telemetry->crc_directory_identity_bytes =
+            directory_bytes_value.size();
+        telemetry->crc_total_bytes =
+            telemetry->crc_physical_state_bytes +
+            telemetry->crc_file_identity_bytes +
+            telemetry->crc_directory_identity_bytes;
+        telemetry->crc_wall_ns =
+            source_manager_elapsed_ns(
+                crc_wall_begin);
+    }
+
+    const auto prefix_begin =
+        source_manager_freeze_clock::now();
+
+    std::memcpy(
+        output.prefix.data(),
+        baseline.bytes.data(),
+        output.prefix.size());
+
+    auto* base =
+        output.prefix.data();
+
+    write_u64(
+        base + 48,
+        options.generation);
+    write_u64(
+        base + 56,
+        source_count);
+    write_u64(
+        base + 64,
+        options.roots.size());
+
+    write_u32(
+        base + header_change_backend_offset,
+        static_cast<std::uint32_t>(
+            options.change_checkpoint.backend));
+    write_u32(
+        base + header_change_backend_offset + 4,
+        0);
+    write_u64(
+        base + header_change_volume_offset,
+        options.change_checkpoint.volume_serial);
+    write_u64(
+        base + header_change_journal_offset,
+        options.change_checkpoint.journal_id);
+    write_u64(
+        base + header_change_usn_offset,
+        static_cast<std::uint64_t>(
+            options.change_checkpoint.next_usn));
+
+    const auto patch_section_crc =
+        [&](source_manager_image_section kind,
+            std::uint64_t crc) noexcept {
+
+            const auto index =
+                section_index(kind);
+            auto* entry =
+                base +
+                directory_offset +
+                index *
+                    source_manager_image_directory_entry_size;
+            write_u64(
+                entry + 24,
+                crc);
+        };
+
+    patch_section_crc(
+        source_manager_image_section::physical_state,
+        physical_crc);
+    patch_section_crc(
+        source_manager_image_section::source_file_identity_index,
+        file_crc);
+    patch_section_crc(
+        source_manager_image_section::tracked_directory_identity_index,
+        directory_section_crc);
+
+    if (telemetry != nullptr) {
+        telemetry->prefix_directory_encode_ns =
+            source_manager_elapsed_ns(
+                prefix_begin);
+    }
+
+    const auto directory_crc_begin =
+        source_manager_freeze_clock::now();
+
+    const auto directory_crc =
+        persistence_crc64(
+            std::span<const std::byte>{
+                base + directory_offset,
+                directory_bytes});
+
+    write_u64(
+        base + header_directory_crc_offset,
+        directory_crc);
+
+    if (telemetry != nullptr) {
+        telemetry->directory_crc_ns =
+            source_manager_elapsed_ns(
+                directory_crc_begin);
+    }
+
+    const auto header_crc_begin =
+        source_manager_freeze_clock::now();
+
+    std::array<
+        std::byte,
+        source_manager_image_header_size>
+        header{};
+
+    std::memcpy(
+        header.data(),
+        base,
+        header.size());
+
+    write_u64(
+        header.data() + header_crc_offset,
+        0);
+
+    write_u64(
+        base + header_crc_offset,
+        persistence_crc64(header));
+
+    if (telemetry != nullptr) {
+        telemetry->header_crc_ns =
+            source_manager_elapsed_ns(
+                header_crc_begin);
+    }
+
+    try {
+        output.file_identity_index.assign(
+            options.file_identity_index.begin(),
+            options.file_identity_index.end());
+        output.directory_identity_index.assign(
+            options.directory_identity_index.begin(),
+            options.directory_identity_index.end());
+    }
+    catch (const std::bad_alloc&) {
+        output.reset();
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        output.reset();
+        return {status_code::not_available};
+    }
+
+    output.baseline = baseline.bytes;
+    output.physical_offset =
+        physical_offset_value;
+    output.file_identity_offset =
+        file_identity_offset_value;
+    output.directory_identity_offset =
+        directory_identity_offset_value;
+    output.size_value =
+        baseline.bytes.size();
+    output.valid_value = true;
+
+    const auto segment_begin =
+        source_manager_freeze_clock::now();
+
+    const auto segment =
+        output.segment();
+
+    if (telemetry != nullptr) {
+        telemetry->segment_validate_ns =
+            source_manager_elapsed_ns(
+                segment_begin);
+    }
+
+    if (segment.empty() ||
+        segment.size() != output.size_value) {
+        if (telemetry != nullptr)
+            telemetry->sparse_fallback_reason = 13;
+        output.reset();
+        return {status_code::not_found};
+    }
+
+    if (telemetry != nullptr) {
+        telemetry->internal_ns =
+            source_manager_elapsed_ns(
+                internal_begin);
+    }
+
     return {};
 }
 
 status encode_source_manager_image(
     const source_manager& manager,
     const source_manager_image_options& options,
-    std::vector<std::byte>& output) noexcept {
+    std::vector<std::byte>& output,
+    source_manager_freeze_telemetry* telemetry) noexcept {
 
     output.clear();
+    if (telemetry != nullptr) {
+        *telemetry = {};
+        telemetry->mode = 2;
+        telemetry->crc_worker_count = 1;
+    }
+
+    const auto internal_begin =
+        source_manager_freeze_clock::now();
+    const auto preflight_begin =
+        source_manager_freeze_clock::now();
 
     const auto source_count =
         manager.source_count();
@@ -1778,6 +2644,14 @@ status encode_source_manager_image(
     if (index_capacity == 0)
         return {status_code::not_available};
 
+    if (telemetry != nullptr) {
+        telemetry->preflight_ns =
+            source_manager_elapsed_ns(preflight_begin);
+    }
+
+    const auto layout_begin =
+        source_manager_freeze_clock::now();
+
     std::array<
         layout_section,
         source_manager_image_directory_count> layout{{
@@ -1851,6 +2725,14 @@ status encode_source_manager_image(
         return {status_code::not_available};
     }
 
+    if (telemetry != nullptr) {
+        telemetry->layout_ns =
+            source_manager_elapsed_ns(layout_begin);
+    }
+
+    const auto allocate_begin =
+        source_manager_freeze_clock::now();
+
     try {
         output.assign(
             static_cast<std::size_t>(cursor),
@@ -1861,6 +2743,12 @@ status encode_source_manager_image(
     }
     catch (const std::length_error&) {
         return {status_code::not_available};
+    }
+
+    if (telemetry != nullptr) {
+        telemetry->allocate_zero_ns =
+            source_manager_elapsed_ns(
+                allocate_begin);
     }
 
     auto* base = output.data();
@@ -1958,6 +2846,9 @@ status encode_source_manager_image(
                     source_manager_image_section::
                         tracked_directory_identity_index)]
                 .offset);
+
+    const auto source_records_begin =
+        source_manager_freeze_clock::now();
 
     for (std::size_t index = 0;
          index < source_count;
@@ -2123,6 +3014,15 @@ status encode_source_manager_image(
             0);
     }
 
+    if (telemetry != nullptr) {
+        telemetry->source_records_ns =
+            source_manager_elapsed_ns(
+                source_records_begin);
+    }
+
+    const auto roots_begin =
+        source_manager_freeze_clock::now();
+
     for (std::size_t index = 0;
          index < options.roots.size();
          ++index) {
@@ -2143,6 +3043,15 @@ status encode_source_manager_image(
                 static_cast<std::uint8_t>(
                     root.role));
     }
+
+    if (telemetry != nullptr) {
+        telemetry->roots_ns =
+            source_manager_elapsed_ns(
+                roots_begin);
+    }
+
+    const auto path_index_begin =
+        source_manager_freeze_clock::now();
 
     const auto index_mask =
         index_capacity - 1;
@@ -2189,6 +3098,15 @@ status encode_source_manager_image(
             source.value());
     }
 
+    if (telemetry != nullptr) {
+        telemetry->path_index_ns =
+            source_manager_elapsed_ns(
+                path_index_begin);
+    }
+
+    const auto file_identity_begin =
+        source_manager_freeze_clock::now();
+
     for (std::size_t index = 0;
          index <
             options.file_identity_index.size();
@@ -2226,6 +3144,15 @@ status encode_source_manager_image(
             item.reserved);
     }
 
+    if (telemetry != nullptr) {
+        telemetry->file_identity_ns =
+            source_manager_elapsed_ns(
+                file_identity_begin);
+    }
+
+    const auto directory_identity_begin =
+        source_manager_freeze_clock::now();
+
     for (std::size_t index = 0;
          index <
             options.directory_identity_index.size();
@@ -2262,7 +3189,22 @@ status encode_source_manager_image(
             item.reserved);
     }
 
-    for (auto& item : layout) {
+    if (telemetry != nullptr) {
+        telemetry->directory_identity_ns =
+            source_manager_elapsed_ns(
+                directory_identity_begin);
+    }
+
+    std::array<std::span<const std::byte>, 10>
+        crc_sections{};
+    std::array<std::uint64_t, 10>
+        crc_section_elapsed{};
+
+    for (std::size_t index = 0;
+         index < layout.size();
+         ++index) {
+
+        const auto& item = layout[index];
         std::uint64_t byte_count = 0;
 
         if (!multiply_u64(
@@ -2275,15 +3217,47 @@ status encode_source_manager_image(
             return {status_code::not_available};
         }
 
+        crc_sections[index] =
+            std::span<const std::byte>{
+                base +
+                    static_cast<std::size_t>(
+                        item.offset),
+                static_cast<std::size_t>(
+                    byte_count)};
+    }
+
+    const auto crc_wall_begin =
+        source_manager_freeze_clock::now();
+
+    for (std::size_t index = 0;
+         index < layout.size();
+         ++index) {
+
+        auto& item = layout[index];
+        const auto section_begin =
+            source_manager_freeze_clock::now();
+
         item.crc64 =
             persistence_crc64(
-                std::span<const std::byte>{
-                    base +
-                        static_cast<std::size_t>(
-                            item.offset),
-                    static_cast<std::size_t>(
-                        byte_count)});
+                crc_sections[index]);
+
+        crc_section_elapsed[index] =
+            source_manager_elapsed_ns(
+                section_begin);
     }
+
+    if (telemetry != nullptr) {
+        telemetry->crc_wall_ns =
+            source_manager_elapsed_ns(crc_wall_begin);
+    }
+
+    publish_source_manager_crc_sections(
+        telemetry,
+        crc_sections,
+        crc_section_elapsed);
+
+    const auto prefix_begin =
+        source_manager_freeze_clock::now();
 
     std::copy(
         image_magic.begin(),
@@ -2397,6 +3371,14 @@ status encode_source_manager_image(
             item.crc64);
     }
 
+    if (telemetry != nullptr) {
+        telemetry->prefix_directory_encode_ns =
+            source_manager_elapsed_ns(prefix_begin);
+    }
+
+    const auto directory_crc_begin =
+        source_manager_freeze_clock::now();
+
     const auto directory_crc =
         persistence_crc64(
             std::span<const std::byte>{
@@ -2406,6 +3388,15 @@ status encode_source_manager_image(
     write_u64(
         base + header_directory_crc_offset,
         directory_crc);
+
+    if (telemetry != nullptr) {
+        telemetry->directory_crc_ns =
+            source_manager_elapsed_ns(
+                directory_crc_begin);
+    }
+
+    const auto header_crc_begin =
+        source_manager_freeze_clock::now();
 
     std::array<
         std::byte,
@@ -2427,22 +3418,51 @@ status encode_source_manager_image(
         base + header_crc_offset,
         header_crc);
 
+    if (telemetry != nullptr) {
+        telemetry->header_crc_ns =
+            source_manager_elapsed_ns(
+                header_crc_begin);
+    }
+
     source_manager_image_view validation;
+
+    const auto bind_begin =
+        source_manager_freeze_clock::now();
 
     const auto bind_result =
         validation.bind(output);
+
+    if (telemetry != nullptr) {
+        telemetry->bind_ns =
+            source_manager_elapsed_ns(bind_begin);
+    }
 
     if (!bind_result.ok()) {
         output.clear();
         return bind_result;
     }
 
+    const auto verify_begin =
+        source_manager_freeze_clock::now();
+
     const auto verify_result =
         validation.verify_contents();
+
+    if (telemetry != nullptr) {
+        telemetry->verify_ns =
+            source_manager_elapsed_ns(
+                verify_begin);
+    }
 
     if (!verify_result.ok()) {
         output.clear();
         return verify_result;
+    }
+
+    if (telemetry != nullptr) {
+        telemetry->internal_ns =
+            source_manager_elapsed_ns(
+                internal_begin);
     }
 
     return {};
