@@ -543,7 +543,7 @@ status freeze_project_generation(
         std::chrono::steady_clock::now();
 
     result = output.native_sources.valid()
-        ? build_cache.verify_against(
+        ? build_cache.verify_against_encoded_generation(
             compiled,
             project.sources())
         : build_cache.verify_against(

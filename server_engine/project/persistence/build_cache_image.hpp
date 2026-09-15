@@ -325,6 +325,15 @@ public:
         const compiled_image_view& compiled,
         const source_manager& sources) const noexcept;
 
+    // Fresh SAVE-only audit. encode_build_cache_image() has already proven that
+    // every immutable Source snapshot hash matches the native Generation
+    // physical hash before copying Source bytes into this image. This audit
+    // therefore validates the copied ranges and all cross-artifact references
+    // without recomputing Source content hashes.
+    [[nodiscard]] status verify_against_encoded_generation(
+        const compiled_image_view& compiled,
+        const source_manager& sources) const noexcept;
+
 private:
     struct source_validation_access;
 

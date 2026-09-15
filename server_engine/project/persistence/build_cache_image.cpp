@@ -2043,6 +2043,7 @@ struct build_cache_image_view::source_validation_access final {
     const source_manager_image_view* image = nullptr;
     std::span<const source_generation_physical_record> native_physical;
     std::size_t native_source_count = 0;
+    bool content_hash_proven = false;
 
     [[nodiscard]] bool valid() const noexcept {
         return image != nullptr
@@ -2121,6 +2122,31 @@ status build_cache_image_view::verify_against(
         access);
 }
 
+status build_cache_image_view::verify_against_encoded_generation(
+    const compiled_image_view& compiled,
+    const source_manager& sources) const noexcept {
+
+    const auto native =
+        sources.native_generation();
+
+    if (!native.complete ||
+        native.physical.size() !=
+            sources.source_count()) {
+        return {status_code::invalid_state};
+    }
+
+    source_validation_access access;
+    access.native_physical =
+        native.physical;
+    access.native_source_count =
+        sources.source_count();
+    access.content_hash_proven = true;
+
+    return verify_against_impl(
+        compiled,
+        access);
+}
+
 status build_cache_image_view::verify_against_impl(
     const compiled_image_view& compiled,
     const source_validation_access& sources) const noexcept {
@@ -2153,7 +2179,8 @@ status build_cache_image_view::verify_against_impl(
                 const auto text = source_text(source_value);
                 if (text.size() != record.text_length ||
                     physical.size != text.size() ||
-                    hash_source_content(text) != physical.hash) {
+                    (!sources.content_hash_proven &&
+                     hash_source_content(text) != physical.hash)) {
                     return false;
                 }
             }
@@ -2251,11 +2278,10 @@ status build_cache_image_view::verify_against_impl(
         };
 
     // GEN-02C25: coarse-grained Source verification scheduler.
-    // The verification contract is unchanged: every persisted Source is decoded,
-    // its bytes are hashed again, and Frontend references are checked against the
-    // compiled image. Scheduling uses bounded workers and coarse Source batches so
-    // large projects avoid one atomic operation per Source and excessive thread
-    // creation while retaining load balancing for uneven Source sizes.
+    // Mapped/cold audits still rehash every Source. GEN-02C27 freshly encoded
+    // native Generations consume the encoder's immutable snapshot-hash proof and
+    // avoid only that redundant content pass. All Source shape and Frontend
+    // cross-artifact checks remain unchanged.
     constexpr std::size_t max_source_verify_workers = 8;
     constexpr std::size_t minimum_sources_per_verify_worker = 8192;
     constexpr std::size_t source_verify_batch_size = 256;
@@ -2854,6 +2880,10 @@ status encode_build_cache_image(
     const auto native_sources =
         project.sources().native_generation();
 
+    const bool native_source_proof_available =
+        native_sources.complete &&
+        native_sources.physical.size() == source_count;
+
     const auto hardware_workers =
         (std::max)(
             std::size_t{1},
@@ -2876,8 +2906,7 @@ status encode_build_cache_image(
 
     const bool use_parallel_native_sources =
         use_native_storage &&
-        native_sources.complete &&
-        native_sources.physical.size() == source_count &&
+        native_source_proof_available &&
         native_worker_count > 1;
 
     if (use_parallel_native_sources) {
@@ -3065,7 +3094,12 @@ status encode_build_cache_image(
                         const auto text =
                             snapshot.text();
 
-                        if (text.size() != physical.size ||
+                        // GEN-02C27: encoder-proven native Source content.
+                        // The immutable snapshot owns the exact digest produced
+                        // during acquisition. Prove it still matches the dense
+                        // Generation physical record before copying bytes.
+                        if (snapshot.hash() != physical.hash ||
+                            text.size() != physical.size ||
                             text.size() >
                                 (std::numeric_limits<
                                     std::uint32_t>::max)() ||
@@ -3263,6 +3297,23 @@ status encode_build_cache_image(
 
         std::uint32_t flags = 0;
         const auto snapshot = project.sources().current(source_value);
+
+        if (native_source_proof_available) {
+            const auto& physical =
+                native_sources.physical[index];
+
+            if (physical.present() !=
+                static_cast<bool>(snapshot)) {
+                return {status_code::initialization_failed};
+            }
+
+            if (snapshot &&
+                (snapshot.hash() != physical.hash ||
+                 snapshot.text().size() != physical.size)) {
+                return {status_code::initialization_failed};
+            }
+        }
+
         if (snapshot) {
             flags |= source_flag_snapshot;
             const auto text = snapshot.text();
