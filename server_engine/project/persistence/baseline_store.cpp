@@ -2926,14 +2926,14 @@ status baseline_store::commit(
             return {status_code::persistence_failed};
         }
 
-        // Packed Source+Build is a contiguous-image optimization. A native
-        // multi-extent Source Generation is persisted as its own immutable
-        // artifact; Build Cache remains a separate artifact so its mapping
-        // boundary never depends on scatter/gather Source extent layout.
+        // GEN-D3E: packing is a physical-layout optimization, not a
+        // contiguity requirement. durable_write_file() writes every immutable
+        // Source extent in order and then the Build Cache, so a native
+        // multi-extent Source Generation can use one physical file without
+        // assembling a second contiguous Source copy.
         const bool pack_build_state =
             !change_state.empty() &&
             !source_manager.empty() &&
-            source_manager.is_contiguous() &&
             !build_cache.empty();
 
         if (pack_build_state &&
