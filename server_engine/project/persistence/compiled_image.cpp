@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -93,12 +94,26 @@ struct layout_section final {
     return true;
 }
 
+// GEN-02C30: persisted integers are little-endian. Native little-endian hosts
+// load/store complete scalars with alignment-safe memcpy. Other hosts retain
+// the explicit canonical byte representation, so the persisted format is
+// unchanged across architectures.
 void write_u16(std::byte* target, std::uint16_t value) noexcept {
+    if constexpr (std::endian::native == std::endian::little) {
+        std::memcpy(target, &value, sizeof(value));
+        return;
+    }
+
     target[0] = static_cast<std::byte>(value & 0xffu);
     target[1] = static_cast<std::byte>((value >> 8) & 0xffu);
 }
 
 void write_u32(std::byte* target, std::uint32_t value) noexcept {
+    if constexpr (std::endian::native == std::endian::little) {
+        std::memcpy(target, &value, sizeof(value));
+        return;
+    }
+
     target[0] = static_cast<std::byte>(value & 0xffu);
     target[1] = static_cast<std::byte>((value >> 8) & 0xffu);
     target[2] = static_cast<std::byte>((value >> 16) & 0xffu);
@@ -106,18 +121,36 @@ void write_u32(std::byte* target, std::uint32_t value) noexcept {
 }
 
 void write_u64(std::byte* target, std::uint64_t value) noexcept {
-    for (std::size_t index = 0; index < 8; ++index)
+    if constexpr (std::endian::native == std::endian::little) {
+        std::memcpy(target, &value, sizeof(value));
+        return;
+    }
+
+    for (std::size_t index = 0; index < 8; ++index) {
         target[index] =
             static_cast<std::byte>((value >> (index * 8)) & 0xffu);
+    }
 }
 
 [[nodiscard]] std::uint16_t read_u16(const std::byte* source) noexcept {
+    if constexpr (std::endian::native == std::endian::little) {
+        std::uint16_t value = 0;
+        std::memcpy(&value, source, sizeof(value));
+        return value;
+    }
+
     return static_cast<std::uint16_t>(
         static_cast<std::uint16_t>(source[0]) |
         (static_cast<std::uint16_t>(source[1]) << 8));
 }
 
 [[nodiscard]] std::uint32_t read_u32(const std::byte* source) noexcept {
+    if constexpr (std::endian::native == std::endian::little) {
+        std::uint32_t value = 0;
+        std::memcpy(&value, source, sizeof(value));
+        return value;
+    }
+
     return
         static_cast<std::uint32_t>(source[0]) |
         (static_cast<std::uint32_t>(source[1]) << 8) |
@@ -126,6 +159,12 @@ void write_u64(std::byte* target, std::uint64_t value) noexcept {
 }
 
 [[nodiscard]] std::uint64_t read_u64(const std::byte* source) noexcept {
+    if constexpr (std::endian::native == std::endian::little) {
+        std::uint64_t value = 0;
+        std::memcpy(&value, source, sizeof(value));
+        return value;
+    }
+
     std::uint64_t value = 0;
     for (std::size_t index = 0; index < 8; ++index)
         value |= static_cast<std::uint64_t>(source[index]) << (index * 8);
