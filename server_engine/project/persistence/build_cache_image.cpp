@@ -136,6 +136,48 @@ static_assert(offsetof(
 static_assert(offsetof(
     source_interface_member_slot, index) == 8);
 
+// GEN-02C29 native Graph persistence layout. Fresh G0 may bulk-copy these
+// arrays only when their in-memory representation is exactly Build Cache v4.
+static_assert(sizeof(TypeRef) == type_ref_record_size);
+static_assert(std::is_trivially_copyable_v<TypeRef>);
+static_assert(std::is_standard_layout_v<TypeRef>);
+
+static_assert(sizeof(graph_derived_index_slot) == derived_index_record_size);
+static_assert(std::is_trivially_copyable_v<graph_derived_index_slot>);
+static_assert(std::is_standard_layout_v<graph_derived_index_slot>);
+static_assert(offsetof(graph_derived_index_slot, fingerprint) == 0);
+static_assert(offsetof(graph_derived_index_slot, type_ref) == 4);
+
+static_assert(sizeof(graph_dependency_edge) == dependency_edge_record_size);
+static_assert(std::is_trivially_copyable_v<graph_dependency_edge>);
+static_assert(std::is_standard_layout_v<graph_dependency_edge>);
+static_assert(offsetof(graph_dependency_edge, owner_handle) == 0);
+static_assert(offsetof(graph_dependency_edge, next_for_target) == 4);
+static_assert(offsetof(graph_dependency_edge, owner_version) == 8);
+
+static_assert(sizeof(graph_identity_index_slot) == historical_index_record_size);
+static_assert(std::is_trivially_copyable_v<graph_identity_index_slot>);
+static_assert(std::is_standard_layout_v<graph_identity_index_slot>);
+static_assert(offsetof(graph_identity_index_slot, fingerprint) == 0);
+static_assert(offsetof(graph_identity_index_slot, handle) == 4);
+
+static_assert(sizeof(graph_object_identity_index_slot) ==
+    historical_index_record_size);
+static_assert(std::is_trivially_copyable_v<
+    graph_object_identity_index_slot>);
+static_assert(std::is_standard_layout_v<
+    graph_object_identity_index_slot>);
+static_assert(offsetof(
+    graph_object_identity_index_slot, fingerprint) == 0);
+static_assert(offsetof(
+    graph_object_identity_index_slot, handle) == 4);
+
+static_assert(sizeof(graph_link_index_slot) == historical_index_record_size);
+static_assert(std::is_trivially_copyable_v<graph_link_index_slot>);
+static_assert(std::is_standard_layout_v<graph_link_index_slot>);
+static_assert(offsetof(graph_link_index_slot, fingerprint) == 0);
+static_assert(offsetof(graph_link_index_slot, handle) == 4);
+
 struct layout_section final {
     build_cache_image_section kind{};
     std::uint32_t record_size = 0;
@@ -4006,93 +4048,162 @@ status encode_build_cache_image(
 
     auto* intrinsic_refs =
         section_data(build_cache_image_section::graph_intrinsic_refs);
-    for (std::size_t index = 0;
-         index < graph.intrinsic_refs.size();
-         ++index) {
-        write_u32(
-            intrinsic_refs + index * 4,
-            graph.intrinsic_refs[index].value());
-    }
-
     auto* named_refs =
         section_data(build_cache_image_section::graph_named_refs);
-    for (std::size_t index = 0;
-         index < graph.named_refs.size();
-         ++index) {
-        write_u32(
-            named_refs + index * 4,
-            graph.named_refs[index].value());
-    }
-
     auto* derived_index =
         section_data(build_cache_image_section::graph_derived_index);
-    for (std::size_t index = 0;
-         index < graph.derived_index.size();
-         ++index) {
-
-        const auto& value = graph.derived_index[index];
-        auto* target =
-            derived_index + index * derived_index_record_size;
-        write_u32(target, value.fingerprint);
-        write_u32(target + 4, value.type_ref);
-    }
-
     auto* dependency_versions =
         section_data(build_cache_image_section::graph_dependency_versions);
-    for (std::size_t index = 0;
-         index < graph.dependency_versions.size();
-         ++index) {
-        write_u32(
-            dependency_versions + index * 4,
-            graph.dependency_versions[index]);
-    }
-
     auto* reverse_heads =
         section_data(build_cache_image_section::graph_reverse_dependency_heads);
-    for (std::size_t index = 0;
-         index < graph.reverse_dependency_heads.size();
-         ++index) {
-        write_u32(
-            reverse_heads + index * 4,
-            graph.reverse_dependency_heads[index]);
-    }
-
     auto* dependency_edges =
         section_data(build_cache_image_section::graph_dependency_edges);
-    for (std::size_t index = 0;
-         index < graph.dependency_edges.size();
-         ++index) {
 
-        const auto& value = graph.dependency_edges[index];
-        auto* target =
-            dependency_edges + index * dependency_edge_record_size;
-        write_u32(target, value.owner_handle);
-        write_u32(target + 4, value.next_for_target);
-        write_u32(target + 8, value.owner_version);
-    }
+    const auto native_named_refs =
+        static_cast<std::span<const TypeRef>>(graph.named_refs);
+    const auto native_derived_index =
+        static_cast<std::span<const graph_derived_index_slot>>(
+            graph.derived_index);
+    const auto native_dependency_versions =
+        static_cast<std::span<const std::uint32_t>>(
+            graph.dependency_versions);
+    const auto native_reverse_heads =
+        static_cast<std::span<const std::uint32_t>>(
+            graph.reverse_dependency_heads);
+    const auto native_dependency_edges =
+        static_cast<std::span<const graph_dependency_edge>>(
+            graph.dependency_edges);
+    const auto native_type_identity_index =
+        static_cast<std::span<const graph_identity_index_slot>>(
+            graph.type_identity_index);
+    const auto native_object_identity_index =
+        static_cast<std::span<const graph_object_identity_index_slot>>(
+            graph.object_identity_index);
+    const auto native_link_target_index =
+        static_cast<std::span<const graph_link_index_slot>>(
+            graph.link_target_index);
 
-    const auto write_historical_index = [&](build_cache_image_section kind, const auto& values) noexcept {
-        auto* data = section_data(kind);
-        for (std::size_t index = 0; index < values.size(); ++index) {
-            write_u32(data + index * historical_index_record_size, values[index].fingerprint);
-            write_u32(data + index * historical_index_record_size + 4, values[index].handle);
+    // GEN-02C29: fresh-G0 native Graph bulk serialization.
+    // Fresh Graph owns contiguous canonical arrays. On little-endian their
+    // proven layouts are byte-identical to Build Cache v4. Baseline/sparse and
+    // non-little-endian paths retain the field-wise encoder below.
+    const bool use_native_graph_storage =
+        std::endian::native == std::endian::little &&
+        !project.compiled_graph().baseline_backed() &&
+        native_named_refs.size() == graph.named_refs.size() &&
+        native_derived_index.size() == graph.derived_index.size() &&
+        native_dependency_versions.size() ==
+            graph.dependency_versions.size() &&
+        native_reverse_heads.size() ==
+            graph.reverse_dependency_heads.size() &&
+        native_dependency_edges.size() ==
+            graph.dependency_edges.size() &&
+        native_type_identity_index.size() ==
+            graph.type_identity_index.size() &&
+        native_object_identity_index.size() ==
+            graph.object_identity_index.size() &&
+        native_link_target_index.size() ==
+            graph.link_target_index.size();
+
+    const auto copy_native_graph_section =
+        [&](build_cache_image_section kind, const auto& values) noexcept {
+            if (!values.empty()) {
+                std::memcpy(
+                    section_data(kind),
+                    values.data(),
+                    values.size_bytes());
+            }
+        };
+
+    if (use_native_graph_storage) {
+        copy_native_graph_section(
+            build_cache_image_section::graph_intrinsic_refs,
+            graph.intrinsic_refs);
+        copy_native_graph_section(
+            build_cache_image_section::graph_named_refs,
+            native_named_refs);
+        copy_native_graph_section(
+            build_cache_image_section::graph_derived_index,
+            native_derived_index);
+        copy_native_graph_section(
+            build_cache_image_section::graph_dependency_versions,
+            native_dependency_versions);
+        copy_native_graph_section(
+            build_cache_image_section::graph_reverse_dependency_heads,
+            native_reverse_heads);
+        copy_native_graph_section(
+            build_cache_image_section::graph_dependency_edges,
+            native_dependency_edges);
+        copy_native_graph_section(
+            build_cache_image_section::graph_type_identity_index,
+            native_type_identity_index);
+        copy_native_graph_section(
+            build_cache_image_section::graph_object_identity_index,
+            native_object_identity_index);
+        copy_native_graph_section(
+            build_cache_image_section::graph_link_target_index,
+            native_link_target_index);
+    } else {
+        for (std::size_t index = 0; index < graph.intrinsic_refs.size(); ++index)
+            write_u32(intrinsic_refs + index * 4,
+                      graph.intrinsic_refs[index].value());
+
+        for (std::size_t index = 0; index < graph.named_refs.size(); ++index)
+            write_u32(named_refs + index * 4,
+                      graph.named_refs[index].value());
+
+        for (std::size_t index = 0; index < graph.derived_index.size(); ++index) {
+            const auto& value = graph.derived_index[index];
+            auto* target = derived_index + index * derived_index_record_size;
+            write_u32(target, value.fingerprint);
+            write_u32(target + 4, value.type_ref);
         }
-    };
 
-    write_historical_index(
-        build_cache_image_section::graph_type_identity_index,
-        graph.type_identity_index);
-    write_historical_index(
-        build_cache_image_section::graph_object_identity_index,
-        graph.object_identity_index);
-    write_historical_index(
-        build_cache_image_section::graph_link_target_index,
-        graph.link_target_index);
+        for (std::size_t index = 0;
+             index < graph.dependency_versions.size(); ++index)
+            write_u32(dependency_versions + index * 4,
+                      graph.dependency_versions[index]);
+
+        for (std::size_t index = 0;
+             index < graph.reverse_dependency_heads.size(); ++index)
+            write_u32(reverse_heads + index * 4,
+                      graph.reverse_dependency_heads[index]);
+
+        for (std::size_t index = 0; index < graph.dependency_edges.size(); ++index) {
+            const auto& value = graph.dependency_edges[index];
+            auto* target = dependency_edges + index * dependency_edge_record_size;
+            write_u32(target, value.owner_handle);
+            write_u32(target + 4, value.next_for_target);
+            write_u32(target + 8, value.owner_version);
+        }
+
+        const auto write_historical_index =
+            [&](build_cache_image_section kind, const auto& values) noexcept {
+                auto* data = section_data(kind);
+                for (std::size_t index = 0; index < values.size(); ++index) {
+                    write_u32(
+                        data + index * historical_index_record_size,
+                        values[index].fingerprint);
+                    write_u32(
+                        data + index * historical_index_record_size + 4,
+                        values[index].handle);
+                }
+            };
+
+        write_historical_index(
+            build_cache_image_section::graph_type_identity_index,
+            graph.type_identity_index);
+        write_historical_index(
+            build_cache_image_section::graph_object_identity_index,
+            graph.object_identity_index);
+        write_historical_index(
+            build_cache_image_section::graph_link_target_index,
+            graph.link_target_index);
+    }
 
     if (telemetry != nullptr)
         telemetry->graph_ns =
             elapsed(graph_begin);
-
     const auto change_identity_begin =
         std::chrono::steady_clock::now();
 
