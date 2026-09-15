@@ -2794,7 +2794,419 @@ status encode_build_cache_image(
         }
     }
 
-    for (std::size_t index = 0; index < source_count; ++index) {
+    // GEN-02C24.1: production cleanup keeps the C24 fast path while removing
+    // temporary C23 phase timing from the SAVE hot path.
+    // GEN-02C24: parallel native Source persistence is enabled only for a
+    // complete fresh G0. Sparse/baseline-backed Generations remain on the
+    // canonical sequential path below.
+    constexpr std::size_t max_native_source_workers = 8;
+    constexpr std::size_t minimum_sources_per_worker = 8192;
+
+    bool native_source_encoded = false;
+
+    const auto native_sources =
+        project.sources().native_generation();
+
+    const auto hardware_workers =
+        (std::max)(
+            std::size_t{1},
+            static_cast<std::size_t>(
+                std::thread::hardware_concurrency()));
+
+    const auto desired_native_workers =
+        source_count == 0
+        ? std::size_t{1}
+        : (std::min)(
+            max_native_source_workers,
+            std::size_t{1} +
+                (source_count - 1) /
+                    minimum_sources_per_worker);
+
+    const auto native_worker_count =
+        (std::min)(
+            hardware_workers,
+            desired_native_workers);
+
+    const bool use_parallel_native_sources =
+        use_native_storage &&
+        native_sources.complete &&
+        native_sources.physical.size() == source_count &&
+        native_worker_count > 1;
+
+    if (use_parallel_native_sources) {
+        std::array<std::size_t, max_native_source_workers>
+            chunk_begin{};
+        std::array<std::size_t, max_native_source_workers>
+            chunk_end{};
+        std::array<std::uint64_t, max_native_source_workers>
+            chunk_text_begin{};
+        std::array<std::uint64_t, max_native_source_workers>
+            chunk_text_end{};
+
+        const auto base_chunk =
+            source_count / native_worker_count;
+        const auto extra_sources =
+            source_count % native_worker_count;
+
+        std::size_t source_cursor = 0;
+        for (std::size_t worker = 0;
+             worker < native_worker_count;
+             ++worker) {
+
+            const auto chunk_size =
+                base_chunk +
+                (worker < extra_sources ? 1u : 0u);
+
+            chunk_begin[worker] = source_cursor;
+            source_cursor += chunk_size;
+            chunk_end[worker] = source_cursor;
+        }
+
+        if (source_cursor != source_count)
+            return {status_code::initialization_failed};
+
+        // One cheap metadata pass proves the same global contiguity invariants
+        // as the old sequential encoder and computes one text prefix per chunk.
+        std::uint64_t native_text_cursor = 0;
+        std::uint32_t native_local_type_cursor = 0;
+        std::uint32_t native_type_slot_cursor = 0;
+        std::uint32_t native_object_slot_cursor = 0;
+        std::uint32_t native_member_slot_cursor = 0;
+        std::size_t native_frontend_count = 0;
+
+        for (std::size_t worker = 0;
+             worker < native_worker_count;
+             ++worker) {
+
+            chunk_text_begin[worker] =
+                native_text_cursor;
+
+            for (std::size_t index = chunk_begin[worker];
+                 index < chunk_end[worker];
+                 ++index) {
+
+                const auto& physical =
+                    native_sources.physical[index];
+
+                if (physical.reserved != 0 ||
+                    (physical.flags &
+                        ~source_generation_physical_present) != 0) {
+                    return {status_code::initialization_failed};
+                }
+
+                if (physical.present()) {
+                    if (physical.size >
+                        (std::numeric_limits<std::uint32_t>::max)()) {
+                        return {status_code::initialization_failed};
+                    }
+
+                    if (!add_u64(
+                            native_text_cursor,
+                            physical.size,
+                            native_text_cursor) ||
+                        native_text_cursor >
+                            source_bytes_count) {
+                        return {status_code::initialization_failed};
+                    }
+                }
+
+                const auto& record =
+                    native_storage.records[index];
+
+                if (record.present > 1)
+                    return {status_code::initialization_failed};
+
+                if (record.present == 0)
+                    continue;
+
+                ++native_frontend_count;
+
+                if (record.local_types.begin !=
+                        native_local_type_cursor ||
+                    record.local_types.count >
+                        local_type_count -
+                            static_cast<std::size_t>(
+                                native_local_type_cursor) ||
+                    record.type_slots.begin !=
+                        native_type_slot_cursor ||
+                    record.type_slots.count >
+                        type_slot_count -
+                            static_cast<std::size_t>(
+                                native_type_slot_cursor) ||
+                    record.object_slots.begin !=
+                        native_object_slot_cursor ||
+                    record.object_slots.count >
+                        object_slot_count -
+                            static_cast<std::size_t>(
+                                native_object_slot_cursor) ||
+                    record.member_slots.begin !=
+                        native_member_slot_cursor ||
+                    record.member_slots.count >
+                        member_slot_count -
+                            static_cast<std::size_t>(
+                                native_member_slot_cursor)) {
+                    return {status_code::initialization_failed};
+                }
+
+                native_local_type_cursor +=
+                    record.local_types.count;
+                native_type_slot_cursor +=
+                    record.type_slots.count;
+                native_object_slot_cursor +=
+                    record.object_slots.count;
+                native_member_slot_cursor +=
+                    record.member_slots.count;
+            }
+
+            chunk_text_end[worker] =
+                native_text_cursor;
+        }
+
+        if (native_text_cursor != source_bytes_count ||
+            static_cast<std::size_t>(
+                native_local_type_cursor) != local_type_count ||
+            static_cast<std::size_t>(
+                native_type_slot_cursor) != type_slot_count ||
+            static_cast<std::size_t>(
+                native_object_slot_cursor) != object_slot_count ||
+            static_cast<std::size_t>(
+                native_member_slot_cursor) != member_slot_count ||
+            native_frontend_count != frontend_count) {
+            return {status_code::initialization_failed};
+        }
+
+        const auto encode_native_chunk =
+            [&](std::size_t worker) noexcept -> status {
+
+                auto chunk_text_cursor =
+                    chunk_text_begin[worker];
+                const auto chunk_text_limit =
+                    chunk_text_end[worker];
+
+                for (std::size_t index = chunk_begin[worker];
+                     index < chunk_end[worker];
+                     ++index) {
+
+                    const source_id source_value{
+                        static_cast<std::uint32_t>(
+                            index + 1)};
+
+                    auto* directory_record =
+                        source_directory +
+                        index *
+                            source_directory_record_size;
+
+                    write_u32(
+                        directory_record,
+                        source_value.value());
+
+                    std::uint32_t flags = 0;
+
+                    const auto& physical =
+                        native_sources.physical[index];
+
+                    const auto snapshot =
+                        project.sources().current(
+                            source_value);
+
+                    if (physical.present()) {
+                        if (!snapshot)
+                            return {
+                                status_code::
+                                    initialization_failed};
+
+                        const auto text =
+                            snapshot.text();
+
+                        if (text.size() != physical.size ||
+                            text.size() >
+                                (std::numeric_limits<
+                                    std::uint32_t>::max)() ||
+                            chunk_text_cursor >
+                                chunk_text_limit ||
+                            static_cast<std::uint64_t>(
+                                text.size()) >
+                                chunk_text_limit -
+                                    chunk_text_cursor) {
+                            return {
+                                status_code::
+                                    initialization_failed};
+                        }
+
+                        flags |= source_flag_snapshot;
+
+                        write_u64(
+                            directory_record + 8,
+                            chunk_text_cursor);
+                        write_u32(
+                            directory_record + 16,
+                            static_cast<std::uint32_t>(
+                                text.size()));
+
+                        if (!text.empty()) {
+                            std::memcpy(
+                                source_bytes +
+                                    static_cast<std::size_t>(
+                                        chunk_text_cursor),
+                                text.data(),
+                                text.size());
+                        }
+
+                        chunk_text_cursor +=
+                            text.size();
+                    }
+                    else if (snapshot) {
+                        return {
+                            status_code::
+                                initialization_failed};
+                    }
+
+                    const auto& record =
+                        native_storage.records[index];
+
+                    if (record.present != 0) {
+                        if ((flags &
+                                source_flag_snapshot) == 0) {
+                            return {
+                                status_code::
+                                    initialization_failed};
+                        }
+
+                        flags |= source_flag_frontend;
+
+                        write_u32(
+                            directory_record + 24,
+                            record.local_types.begin);
+                        write_u32(
+                            directory_record + 28,
+                            record.local_types.count);
+
+                        write_u32(
+                            directory_record + 32,
+                            record.type_slots.begin);
+                        write_u32(
+                            directory_record + 36,
+                            record.type_slots.count);
+
+                        write_u32(
+                            directory_record + 40,
+                            record.object_slots.begin);
+                        write_u32(
+                            directory_record + 44,
+                            record.object_slots.count);
+
+                        write_u32(
+                            directory_record + 48,
+                            record.member_slots.begin);
+                        write_u32(
+                            directory_record + 52,
+                            record.member_slots.count);
+                    }
+
+                    write_u32(
+                        directory_record + 4,
+                        flags);
+                }
+
+                return chunk_text_cursor ==
+                        chunk_text_limit
+                    ? status{}
+                    : status{
+                        status_code::
+                            initialization_failed};
+            };
+
+        std::array<status, max_native_source_workers>
+            native_results{};
+        std::array<std::jthread,
+            max_native_source_workers - 1>
+            native_workers{};
+
+        std::size_t launched_workers = 0;
+        bool thread_launch_failed = false;
+
+        try {
+            for (std::size_t worker = 1;
+                 worker < native_worker_count;
+                 ++worker) {
+
+                native_workers[launched_workers] =
+                    std::jthread(
+                        [&, worker]() noexcept {
+                            native_results[worker] =
+                                encode_native_chunk(
+                                    worker);
+                        });
+
+                ++launched_workers;
+            }
+
+            native_results[0] =
+                encode_native_chunk(0);
+        }
+        catch (const std::bad_alloc&) {
+            thread_launch_failed = true;
+        }
+        catch (const std::system_error&) {
+            thread_launch_failed = true;
+        }
+
+        for (std::size_t worker = 0;
+             worker < launched_workers;
+             ++worker) {
+
+            if (native_workers[worker].joinable())
+                native_workers[worker].join();
+        }
+
+        if (thread_launch_failed) {
+            // A partially launched batch may already have written complete
+            // chunks. Re-encode every chunk sequentially; writes are
+            // deterministic and target disjoint canonical ranges.
+            for (std::size_t worker = 0;
+                 worker < native_worker_count;
+                 ++worker) {
+
+                native_results[worker] =
+                    encode_native_chunk(worker);
+
+                if (!native_results[worker].ok())
+                    return native_results[worker];
+            }
+        }
+        else {
+            for (std::size_t worker = 0;
+                 worker < native_worker_count;
+                 ++worker) {
+
+                if (!native_results[worker].ok())
+                    return native_results[worker];
+            }
+        }
+
+        text_cursor = source_bytes_count;
+        local_type_cursor =
+            static_cast<std::uint32_t>(
+                local_type_count);
+        type_slot_cursor =
+            static_cast<std::uint32_t>(
+                type_slot_count);
+        object_slot_cursor =
+            static_cast<std::uint32_t>(
+                object_slot_count);
+        member_slot_cursor =
+            static_cast<std::uint32_t>(
+                member_slot_count);
+        observed_frontends =
+            native_frontend_count;
+
+        native_source_encoded = true;
+    }
+
+    if (!native_source_encoded) {
+        for (std::size_t index = 0;
+             index < source_count;
+             ++index) {
         const source_id source_value{
             static_cast<std::uint32_t>(index + 1)};
         auto* directory_record =
@@ -3114,7 +3526,8 @@ status encode_build_cache_image(
             return {status_code::initialization_failed};
         }
 
-        write_u32(directory_record + 4, flags);
+            write_u32(directory_record + 4, flags);
+        }
     }
 
     if (text_cursor != source_bytes_count ||
