@@ -2250,6 +2250,16 @@ status build_cache_image_view::verify_against_impl(
             return true;
         };
 
+    // GEN-02C25: coarse-grained Source verification scheduler.
+    // The verification contract is unchanged: every persisted Source is decoded,
+    // its bytes are hashed again, and Frontend references are checked against the
+    // compiled image. Scheduling uses bounded workers and coarse Source batches so
+    // large projects avoid one atomic operation per Source and excessive thread
+    // creation while retaining load balancing for uneven Source sizes.
+    constexpr std::size_t max_source_verify_workers = 8;
+    constexpr std::size_t minimum_sources_per_verify_worker = 8192;
+    constexpr std::size_t source_verify_batch_size = 256;
+
     const auto parallel_verify_source_count =
         source_count_value;
 
@@ -2266,75 +2276,112 @@ status build_cache_image_view::verify_against_impl(
     };
 
     if (parallel_verify_source_count != 0) {
-        auto worker_count =
-            static_cast<std::size_t>(
-                std::thread::hardware_concurrency());
+        const auto hardware_workers =
+            (std::max)(
+                std::size_t{1},
+                static_cast<std::size_t>(
+                    std::thread::hardware_concurrency()));
 
-        if (worker_count == 0)
-            worker_count = 1;
+        const auto desired_workers =
+            std::size_t{1} +
+            (parallel_verify_source_count - 1) /
+                minimum_sources_per_verify_worker;
 
-        worker_count =
+        const auto worker_count =
             (std::min)(
-                worker_count,
-                parallel_verify_source_count);
+                max_source_verify_workers,
+                (std::min)(
+                    hardware_workers,
+                    desired_workers));
 
-        if (worker_count == 1) {
+        if (worker_count <= 1) {
             if (!verify_sources_serial())
                 return {status_code::artifact_corrupt};
         }
         else {
             std::atomic<std::size_t> next_source{0};
             std::atomic<bool> source_failed{false};
-            bool parallel_started = false;
+
+            const auto verify_worker = [&]() noexcept {
+                for (;;) {
+                    if (source_failed.load(
+                            std::memory_order_relaxed)) {
+                        return;
+                    }
+
+                    const auto begin =
+                        next_source.fetch_add(
+                            source_verify_batch_size,
+                            std::memory_order_relaxed);
+
+                    if (begin >=
+                        parallel_verify_source_count) {
+                        return;
+                    }
+
+                    const auto end =
+                        (std::min)(
+                            begin +
+                                source_verify_batch_size,
+                            parallel_verify_source_count);
+
+                    for (std::size_t index = begin;
+                         index < end;
+                         ++index) {
+
+                        if (!verify_source(index)) {
+                            source_failed.store(
+                                true,
+                                std::memory_order_relaxed);
+                            return;
+                        }
+                    }
+                }
+            };
+
+            std::array<std::jthread,
+                max_source_verify_workers - 1>
+                workers{};
+
+            std::size_t launched_workers = 0;
+            bool parallel_started = true;
 
             try {
-                std::vector<std::jthread> workers;
-                workers.reserve(worker_count);
-
-                for (std::size_t worker = 0;
+                for (std::size_t worker = 1;
                      worker < worker_count;
                      ++worker) {
 
-                    workers.emplace_back([&]() noexcept {
-                        for (;;) {
-                            if (source_failed.load(
-                                    std::memory_order_relaxed)) {
-                                return;
-                            }
+                    workers[launched_workers] =
+                        std::jthread(
+                            [&]() noexcept {
+                                verify_worker();
+                            });
 
-                            const auto index =
-                                next_source.fetch_add(
-                                    1,
-                                    std::memory_order_relaxed);
-
-                            if (index >=
-                                parallel_verify_source_count) {
-                                return;
-                            }
-
-                            if (!verify_source(index)) {
-                                source_failed.store(
-                                    true,
-                                    std::memory_order_relaxed);
-                                return;
-                            }
-                        }
-                    });
+                    ++launched_workers;
                 }
-
-                parallel_started = true;
             }
             catch (const std::bad_alloc&) {
-                parallel_started = false;
-            }
-            catch (const std::length_error&) {
                 parallel_started = false;
             }
             catch (const std::system_error&) {
                 parallel_started = false;
             }
 
+            if (parallel_started)
+                verify_worker();
+
+            for (std::size_t worker = 0;
+                 worker < launched_workers;
+                 ++worker) {
+
+                if (workers[worker].joinable())
+                    workers[worker].join();
+            }
+
             if (!parallel_started) {
+                // Partially launched workers may already have completed some
+                // checks. Restart the complete deterministic validation
+                // serially rather than accepting a partial proof.
                 if (!verify_sources_serial())
                     return {status_code::artifact_corrupt};
             }
