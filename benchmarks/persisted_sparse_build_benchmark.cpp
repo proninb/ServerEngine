@@ -147,7 +147,8 @@ struct sparse_case_result final {
 
 [[nodiscard]] bool create_baseline(
     const std::filesystem::path& configuration_path,
-    baseline_commit_result& committed) {
+    baseline_commit_result& committed,
+    std::size_t worker_limit = 1) {
 
     project_manager manager;
     diagnostic_buffer diagnostics;
@@ -158,7 +159,7 @@ struct sparse_case_result final {
         operation_id{3100},
         diagnostics,
         rebuild,
-        1);
+        worker_limit);
 
     if (!rebuild_result.ok() ||
         diagnostics.has_errors() ||
@@ -2469,6 +2470,544 @@ struct idempotent_save_timing final {
 #endif
 }
 
+[[nodiscard]] int run_million_fast_build_gate() {
+#ifdef _WIN32
+    constexpr std::size_t source_count = 1'000'000;
+    constexpr std::size_t sample_count = 5;
+
+    constexpr double no_change_manager_median_limit_ms = 5.0;
+    constexpr double no_change_baseline_median_limit_ms = 3.0;
+    constexpr double no_change_dirty_median_limit_ms = 2.0;
+    constexpr double no_change_manager_max_limit_ms = 8.0;
+
+    constexpr double modify_manager_median_limit_ms = 5.0;
+    constexpr double modify_baseline_median_limit_ms = 3.0;
+    constexpr double modify_dirty_median_limit_ms = 2.0;
+    constexpr double modify_orchestrator_median_limit_ms = 0.5;
+    constexpr double modify_frontend_median_limit_ms = 0.4;
+    constexpr double modify_builder_median_limit_ms = 0.1;
+    constexpr double modify_manager_max_limit_ms = 8.0;
+
+    struct timing_summary final {
+        double minimum_ms = 0.0;
+        double median_ms = 0.0;
+        double maximum_ms = 0.0;
+    };
+
+    const auto summarize =
+        [](std::vector<double> samples) -> timing_summary {
+
+        timing_summary output;
+        if (samples.empty())
+            return output;
+
+        std::sort(samples.begin(), samples.end());
+        output.minimum_ms = samples.front();
+        output.maximum_ms = samples.back();
+        output.median_ms = samples[samples.size() / 2];
+        return output;
+    };
+
+    const auto ms = [](std::uint64_t value) noexcept {
+        return static_cast<double>(value) / 1'000'000.0;
+    };
+
+    temporary_tree tree;
+    std::filesystem::path configuration_path;
+    std::vector<std::filesystem::path> unused_source_paths;
+
+    std::cerr
+        << "MILLION_FAST_BUILD_SETUP_BEGIN,sources="
+        << source_count
+        << ",samples=" << sample_count
+        << '\n';
+
+    if (!prepare_project(
+            source_count,
+            tree,
+            configuration_path,
+            unused_source_paths,
+            false,
+            100'000)) {
+        return 1;
+    }
+
+    std::cerr
+        << "MILLION_FAST_BUILD_BASELINE_BEGIN,sources="
+        << source_count
+        << '\n';
+
+    project_manager baseline_manager;
+    diagnostic_buffer baseline_diagnostics;
+    project_build_result baseline_rebuild;
+
+    const auto baseline_rebuild_begin =
+        lifecycle_clock::now();
+    const auto baseline_rebuild_status =
+        baseline_manager.rebuild(
+            configuration_path,
+            operation_id{3118},
+            baseline_diagnostics,
+            baseline_rebuild,
+            0);
+    const auto baseline_rebuild_end =
+        lifecycle_clock::now();
+
+    std::cout
+        << "MILLION_FAST_BUILD_BASELINE_REBUILD,"
+        << "status_code="
+        << static_cast<unsigned>(
+            baseline_rebuild_status.code)
+        << ",diagnostic_errors="
+        << (baseline_diagnostics.has_errors() ? 1 : 0)
+        << ",ready="
+        << (baseline_manager.ready() ? 1 : 0)
+        << ",changed="
+        << (baseline_rebuild.changed ? 1 : 0)
+        << ",rebuilt="
+        << (baseline_rebuild.rebuilt ? 1 : 0)
+        << ",wall_ms="
+        << elapsed_ms(
+            baseline_rebuild_begin,
+            baseline_rebuild_end)
+        << ",frontend_ms="
+        << ms(baseline_rebuild.telemetry.frontend_ns)
+        << ",builder_ms="
+        << ms(baseline_rebuild.telemetry.builder_prepare_ns)
+        << '\n';
+
+    if (!baseline_rebuild_status.ok() ||
+        baseline_diagnostics.has_errors() ||
+        !baseline_manager.ready() ||
+        !baseline_rebuild.changed ||
+        !baseline_rebuild.rebuilt) {
+
+        if (baseline_manager.ready())
+            (void)baseline_manager.unload();
+        return 1;
+    }
+
+    baseline_commit_result baseline;
+
+    const auto baseline_save_begin =
+        lifecycle_clock::now();
+    const auto baseline_save_status =
+        baseline_manager.save(baseline);
+    const auto baseline_save_end =
+        lifecycle_clock::now();
+
+    std::cout
+        << "MILLION_FAST_BUILD_BASELINE_SAVE,"
+        << "status_code="
+        << static_cast<unsigned>(
+            baseline_save_status.code)
+        << ",transaction="
+        << (baseline.transaction.empty()
+            ? std::string_view{"<empty>"}
+            : std::string_view{baseline.transaction})
+        << ",bytes_written="
+        << baseline.bytes_written
+        << ",wall_ms="
+        << elapsed_ms(
+            baseline_save_begin,
+            baseline_save_end)
+        << ",save_total_ms="
+        << ms(baseline.telemetry.save_total_ns)
+        << ",freeze_ms="
+        << ms(baseline.telemetry.generation_freeze_ns)
+        << ",store_ms="
+        << ms(baseline.telemetry.store_commit_ns)
+        << '\n';
+
+    if (!baseline_save_status.ok() ||
+        baseline.transaction.empty() ||
+        baseline.bytes_written == 0) {
+
+        if (baseline_manager.ready())
+            (void)baseline_manager.unload();
+        return 1;
+    }
+
+    const auto baseline_unload_begin =
+        lifecycle_clock::now();
+    const auto baseline_unload_status =
+        baseline_manager.unload();
+    const auto baseline_unload_end =
+        lifecycle_clock::now();
+
+    std::cout
+        << "MILLION_FAST_BUILD_BASELINE_UNLOAD,"
+        << "status_code="
+        << static_cast<unsigned>(
+            baseline_unload_status.code)
+        << ",wall_ms="
+        << elapsed_ms(
+            baseline_unload_begin,
+            baseline_unload_end)
+        << '\n';
+
+    if (!baseline_unload_status.ok())
+        return 1;
+
+    std::vector<double> no_change_manager_samples;
+    std::vector<double> no_change_baseline_samples;
+    std::vector<double> no_change_dirty_samples;
+
+    std::vector<double> modify_manager_samples;
+    std::vector<double> modify_baseline_samples;
+    std::vector<double> modify_source_manager_samples;
+    std::vector<double> modify_dirty_samples;
+    std::vector<double> modify_orchestrator_samples;
+    std::vector<double> modify_frontend_samples;
+    std::vector<double> modify_builder_samples;
+
+    no_change_manager_samples.reserve(sample_count);
+    no_change_baseline_samples.reserve(sample_count);
+    no_change_dirty_samples.reserve(sample_count);
+
+    modify_manager_samples.reserve(sample_count);
+    modify_baseline_samples.reserve(sample_count);
+    modify_source_manager_samples.reserve(sample_count);
+    modify_dirty_samples.reserve(sample_count);
+    modify_orchestrator_samples.reserve(sample_count);
+    modify_frontend_samples.reserve(sample_count);
+    modify_builder_samples.reserve(sample_count);
+
+    project_manager manager;
+    diagnostic_buffer diagnostics;
+
+    for (std::size_t sample = 0;
+         sample < sample_count;
+         ++sample) {
+
+        diagnostics.clear();
+        project_build_result no_change;
+
+        const auto build_status = manager.build(
+            configuration_path,
+            operation_id{
+                static_cast<std::uint64_t>(
+                    3120 + sample)},
+            diagnostics,
+            no_change,
+            1);
+
+        const bool correctness =
+            build_status.ok() &&
+            !diagnostics.has_errors() &&
+            manager.state() ==
+                project_lifecycle_state::ready &&
+            validate_no_change(
+                source_count,
+                no_change) &&
+            no_change.telemetry.configuration_probe_ns == 0 &&
+            no_change.telemetry.configuration_ns == 0 &&
+            no_change.telemetry.fingerprint_ns == 0 &&
+            no_change.telemetry.baseline_open_ns != 0 &&
+            no_change.telemetry.baseline_source_manager_map_ns == 0 &&
+            no_change.telemetry.baseline_build_cache_map_ns == 0 &&
+            no_change.telemetry.baseline_activation_ns != 0 &&
+            no_change.telemetry.build_activation_ns == 0 &&
+            no_change.telemetry.dirty_detection_backend == 1 &&
+            no_change.telemetry.dirty_detection_fast &&
+            !no_change.telemetry.dirty_detection_fallback &&
+            no_change.telemetry.dirty_sources == 0 &&
+            no_change.telemetry.sources.path_index_full_rebuilds == 0 &&
+            no_change.telemetry.sources.source_graph_full_scans == 0 &&
+            no_change.telemetry.builder.graph_full_scans == 0 &&
+            no_change.telemetry.builder.contribution_full_scans == 0;
+
+        const auto scenario =
+            "d3d_million_fast_no_change_" +
+            std::to_string(sample + 1);
+
+        print_result(
+            source_count,
+            scenario,
+            no_change,
+            correctness);
+
+        const auto unload_status =
+            manager.ready()
+                ? manager.unload()
+                : status{status_code::invalid_state};
+
+        if (!correctness ||
+            !unload_status.ok()) {
+            return 1;
+        }
+
+        no_change_manager_samples.push_back(
+            ms(no_change.telemetry.manager_total_ns));
+        no_change_baseline_samples.push_back(
+            ms(no_change.telemetry.baseline_open_ns));
+        no_change_dirty_samples.push_back(
+            ms(no_change.telemetry.dirty_detection_ns));
+    }
+
+    const auto target = source_count / 2;
+    const auto target_path =
+        tree.path / source_name(target);
+    const auto changed_text =
+        "struct " + type_name(target) +
+        " { int value; };\n";
+
+    if (!write_text(
+            target_path,
+            changed_text)) {
+        return 1;
+    }
+
+    for (std::size_t sample = 0;
+         sample < sample_count;
+         ++sample) {
+
+        diagnostics.clear();
+        project_build_result modify_one;
+
+        const auto build_status = manager.build(
+            configuration_path,
+            operation_id{
+                static_cast<std::uint64_t>(
+                    3130 + sample)},
+            diagnostics,
+            modify_one,
+            1);
+
+        const bool correctness =
+            build_status.ok() &&
+            !diagnostics.has_errors() &&
+            manager.state() ==
+                project_lifecycle_state::ready &&
+            validate_sparse_modify(
+                source_count,
+                modify_one) &&
+            modify_one.telemetry.configuration_probe_ns == 0 &&
+            modify_one.telemetry.configuration_ns == 0 &&
+            modify_one.telemetry.fingerprint_ns == 0 &&
+            modify_one.telemetry.baseline_open_ns != 0 &&
+            modify_one.telemetry.baseline_source_manager_map_ns != 0 &&
+            modify_one.telemetry.baseline_build_cache_map_ns == 0 &&
+            modify_one.telemetry.baseline_activation_ns == 0 &&
+            modify_one.telemetry.build_activation_ns != 0 &&
+            modify_one.telemetry.dirty_detection_backend == 1 &&
+            modify_one.telemetry.dirty_detection_fast &&
+            !modify_one.telemetry.dirty_detection_fallback &&
+            modify_one.telemetry.dirty_sources == 1 &&
+            modify_one.telemetry.journal_matched_sources == 1 &&
+            modify_one.telemetry.sources.source_graph_visited <= 1 &&
+            modify_one.telemetry.sources.reverse_edge_patches == 0 &&
+            modify_one.telemetry.builder.validation_visited_types == 1 &&
+            modify_one.telemetry.builder.validation_dependency_edges == 0 &&
+            modify_one.telemetry.sources.path_index_full_rebuilds == 0 &&
+            modify_one.telemetry.sources.source_graph_full_scans == 0 &&
+            modify_one.telemetry.builder.graph_full_scans == 0 &&
+            modify_one.telemetry.builder.contribution_full_scans == 0;
+
+        const auto scenario =
+            "d3d_million_fast_modify_one_" +
+            std::to_string(sample + 1);
+
+        print_result(
+            source_count,
+            scenario,
+            modify_one,
+            correctness);
+
+        const auto unload_status =
+            manager.ready()
+                ? manager.unload()
+                : status{status_code::invalid_state};
+
+        if (!correctness ||
+            !unload_status.ok()) {
+            return 1;
+        }
+
+        modify_manager_samples.push_back(
+            ms(modify_one.telemetry.manager_total_ns));
+        modify_baseline_samples.push_back(
+            ms(modify_one.telemetry.baseline_open_ns));
+        modify_source_manager_samples.push_back(
+            ms(modify_one.telemetry.baseline_source_manager_map_ns));
+        modify_dirty_samples.push_back(
+            ms(modify_one.telemetry.dirty_detection_ns));
+        modify_orchestrator_samples.push_back(
+            ms(modify_one.telemetry.total_ns));
+        modify_frontend_samples.push_back(
+            ms(modify_one.telemetry.frontend_ns));
+        modify_builder_samples.push_back(
+            ms(modify_one.telemetry.builder_prepare_ns));
+    }
+
+    const auto no_change_manager =
+        summarize(no_change_manager_samples);
+    const auto no_change_baseline =
+        summarize(no_change_baseline_samples);
+    const auto no_change_dirty =
+        summarize(no_change_dirty_samples);
+
+    const auto modify_manager =
+        summarize(modify_manager_samples);
+    const auto modify_baseline =
+        summarize(modify_baseline_samples);
+    const auto modify_source_manager =
+        summarize(modify_source_manager_samples);
+    const auto modify_dirty =
+        summarize(modify_dirty_samples);
+    const auto modify_orchestrator =
+        summarize(modify_orchestrator_samples);
+    const auto modify_frontend =
+        summarize(modify_frontend_samples);
+    const auto modify_builder =
+        summarize(modify_builder_samples);
+
+    const bool pass =
+        no_change_manager_samples.size() == sample_count &&
+        modify_manager_samples.size() == sample_count &&
+
+        no_change_manager.median_ms <=
+            no_change_manager_median_limit_ms &&
+        no_change_baseline.median_ms <=
+            no_change_baseline_median_limit_ms &&
+        no_change_dirty.median_ms <=
+            no_change_dirty_median_limit_ms &&
+        no_change_manager.maximum_ms <=
+            no_change_manager_max_limit_ms &&
+
+        modify_manager.median_ms <=
+            modify_manager_median_limit_ms &&
+        modify_baseline.median_ms <=
+            modify_baseline_median_limit_ms &&
+        modify_dirty.median_ms <=
+            modify_dirty_median_limit_ms &&
+        modify_orchestrator.median_ms <=
+            modify_orchestrator_median_limit_ms &&
+        modify_frontend.median_ms <=
+            modify_frontend_median_limit_ms &&
+        modify_builder.median_ms <=
+            modify_builder_median_limit_ms &&
+        modify_manager.maximum_ms <=
+            modify_manager_max_limit_ms;
+
+    std::cout
+        << "D3D_MILLION_FAST_BUILD_MEDIAN_GATE,"
+        << (pass ? "PASS" : "FAIL")
+        << ",sources=" << source_count
+        << ",samples=" << sample_count
+
+        << ",no_change_manager_min_ms="
+        << no_change_manager.minimum_ms
+        << ",no_change_manager_median_ms="
+        << no_change_manager.median_ms
+        << ",no_change_manager_max_ms="
+        << no_change_manager.maximum_ms
+
+        << ",no_change_baseline_min_ms="
+        << no_change_baseline.minimum_ms
+        << ",no_change_baseline_median_ms="
+        << no_change_baseline.median_ms
+        << ",no_change_baseline_max_ms="
+        << no_change_baseline.maximum_ms
+
+        << ",no_change_dirty_min_ms="
+        << no_change_dirty.minimum_ms
+        << ",no_change_dirty_median_ms="
+        << no_change_dirty.median_ms
+        << ",no_change_dirty_max_ms="
+        << no_change_dirty.maximum_ms
+
+        << ",modify_manager_min_ms="
+        << modify_manager.minimum_ms
+        << ",modify_manager_median_ms="
+        << modify_manager.median_ms
+        << ",modify_manager_max_ms="
+        << modify_manager.maximum_ms
+
+        << ",modify_baseline_min_ms="
+        << modify_baseline.minimum_ms
+        << ",modify_baseline_median_ms="
+        << modify_baseline.median_ms
+        << ",modify_baseline_max_ms="
+        << modify_baseline.maximum_ms
+
+        << ",modify_source_manager_min_ms="
+        << modify_source_manager.minimum_ms
+        << ",modify_source_manager_median_ms="
+        << modify_source_manager.median_ms
+        << ",modify_source_manager_max_ms="
+        << modify_source_manager.maximum_ms
+
+        << ",modify_dirty_min_ms="
+        << modify_dirty.minimum_ms
+        << ",modify_dirty_median_ms="
+        << modify_dirty.median_ms
+        << ",modify_dirty_max_ms="
+        << modify_dirty.maximum_ms
+
+        << ",modify_orchestrator_min_ms="
+        << modify_orchestrator.minimum_ms
+        << ",modify_orchestrator_median_ms="
+        << modify_orchestrator.median_ms
+        << ",modify_orchestrator_max_ms="
+        << modify_orchestrator.maximum_ms
+
+        << ",modify_frontend_min_ms="
+        << modify_frontend.minimum_ms
+        << ",modify_frontend_median_ms="
+        << modify_frontend.median_ms
+        << ",modify_frontend_max_ms="
+        << modify_frontend.maximum_ms
+
+        << ",modify_builder_min_ms="
+        << modify_builder.minimum_ms
+        << ",modify_builder_median_ms="
+        << modify_builder.median_ms
+        << ",modify_builder_max_ms="
+        << modify_builder.maximum_ms
+
+        << ",no_change_manager_median_limit_ms="
+        << no_change_manager_median_limit_ms
+        << ",no_change_baseline_median_limit_ms="
+        << no_change_baseline_median_limit_ms
+        << ",no_change_dirty_median_limit_ms="
+        << no_change_dirty_median_limit_ms
+        << ",no_change_manager_max_limit_ms="
+        << no_change_manager_max_limit_ms
+
+        << ",modify_manager_median_limit_ms="
+        << modify_manager_median_limit_ms
+        << ",modify_baseline_median_limit_ms="
+        << modify_baseline_median_limit_ms
+        << ",modify_dirty_median_limit_ms="
+        << modify_dirty_median_limit_ms
+        << ",modify_orchestrator_median_limit_ms="
+        << modify_orchestrator_median_limit_ms
+        << ",modify_frontend_median_limit_ms="
+        << modify_frontend_median_limit_ms
+        << ",modify_builder_median_limit_ms="
+        << modify_builder_median_limit_ms
+        << ",modify_manager_max_limit_ms="
+        << modify_manager_max_limit_ms
+
+        << ",build_cache_map_ms=0"
+        << ",dirty_no_change=0"
+        << ",dirty_modify=1"
+        << ",journal_matched_modify=1"
+        << ",graph_full_scans=0"
+        << ",contribution_full_scans=0"
+        << ",timing_policy=frozen_limits"
+        << '\n';
+
+    return pass ? 0 : 1;
+#else
+    std::cout
+        << "D3D_MILLION_FAST_BUILD_MEDIAN_GATE,UNAVAILABLE,"
+        << "backend=0,platform=non_windows\n";
+    return 3;
+#endif
+}
+
 [[nodiscard]] bool run_matrix() {
     constexpr std::size_t matrix[]{
         1'000,
@@ -2656,6 +3195,11 @@ int main(int argc, char** argv) {
     if (argc == 2 &&
         std::string_view{argv[1]} == "--fast-modify-gate") {
         return run_fast_modify_gate();
+    }
+
+    if (argc == 2 &&
+        std::string_view{argv[1]} == "--million-fast-build-gate") {
+        return run_million_fast_build_gate();
     }
 
     if (argc == 2 &&
