@@ -1904,10 +1904,11 @@ build_cache_section_path(
     return previous_end == expected_size;
 }
 
+// D4Q2B_BUILD_CACHE_SCATTER_WRITER
 [[nodiscard]] status durable_write_sectioned_build_cache(
     const std::filesystem::path& transaction_directory,
     const std::filesystem::path& previous_directory,
-    std::span<const std::byte> image,
+    const project_generation_segment& image,
     const std::array<
         frozen_baseline_section_provenance,
         25>& provenance,
@@ -1928,6 +1929,17 @@ build_cache_section_path(
     }
 
     std::array<
+        std::byte,
+        build_cache_image_prefix_size>
+        prefix_storage{};
+
+    if (!copy_segment_prefix(
+            image,
+            prefix_storage)) {
+        return {status_code::not_available};
+    }
+
+    std::array<
         build_cache_storage_section,
         build_cache_image_directory_count>
         current{};
@@ -1937,8 +1949,8 @@ build_cache_section_path(
             image.size());
 
     const auto prefix =
-        image.first(
-            build_cache_image_prefix_size);
+        std::span<const std::byte>{
+            prefix_storage};
 
     if (!parse_build_cache_prefix(
             prefix,
@@ -2015,6 +2027,11 @@ build_cache_section_path(
     }
 
     std::array<
+        project_generation_segment,
+        build_cache_image_directory_count>
+        pending_segments{};
+
+    std::array<
         std::size_t,
         build_cache_image_directory_count>
         pending_sections{};
@@ -2045,12 +2062,20 @@ build_cache_section_path(
             return {status_code::not_available};
         }
 
+        project_generation_segment
+            section_segment;
+
+        if (!slice_generation_segment(
+                image,
+                value.offset,
+                value.byte_count,
+                section_segment)) {
+            cleanup();
+            return {status_code::not_available};
+        }
+
         const auto bytes =
-            image.subspan(
-                static_cast<std::size_t>(
-                    value.offset),
-                static_cast<std::size_t>(
-                    value.byte_count));
+            section_segment.contiguous();
 
         const auto target =
             build_cache_section_path(
@@ -2058,6 +2083,7 @@ build_cache_section_path(
                 index);
 
         bool reused = false;
+        bool force_write = false;
 
         // D4O1B: freeze may prove that this logical output section was copied
         // byte-for-byte from one whole immutable Build Cache section and was
@@ -2073,6 +2099,7 @@ build_cache_section_path(
             const auto proven_bytes =
                 proof.bytes();
             const bool frozen_binding_valid =
+                section_segment.is_contiguous() &&
                 frozen_proof.valid_for(bytes);
 
             if (frozen_proof.valid() &&
@@ -2134,6 +2161,7 @@ build_cache_section_path(
                              link_error) ==
                          hard_link_failure_action::rewrite) {
                     ++detail.hard_link_fallback_sections;
+                    force_write = true;
                 }
                 else {
                     cleanup();
@@ -2142,7 +2170,9 @@ build_cache_section_path(
             }
         }
 
-        if (!reused && previous_available) {
+        if (!reused &&
+            !force_write &&
+            previous_available) {
             const auto& old =
                 previous[index];
 
@@ -2174,8 +2204,7 @@ build_cache_section_path(
                 const auto compare_result =
                     exact_file_equals_segment(
                         source,
-                        project_generation_segment{
-                            bytes},
+                        section_segment,
                         exact_equal);
 
                 detail.compare_ns +=
@@ -2239,6 +2268,9 @@ build_cache_section_path(
         }
 
         if (!reused) {
+            pending_segments[
+                pending_count] =
+                    section_segment;
             pending_sections[
                 pending_count++] = index;
 
@@ -2315,15 +2347,9 @@ build_cache_section_path(
                 pending_sections[
                     task - 1];
 
-            const auto& value =
-                current[section_index];
-
-            const auto bytes =
-                image.subspan(
-                    static_cast<std::size_t>(
-                        value.offset),
-                    static_cast<std::size_t>(
-                        value.byte_count));
+            const auto& bytes =
+                pending_segments[
+                    task - 1];
 
             task_status[task] =
                 durable_write_file(
@@ -5552,21 +5578,6 @@ status baseline_store::commit(
 
             const auto build_cache_task =
                 [&]() noexcept {
-                    if (!build_cache.is_contiguous()) {
-                        build_cache_fallback_reason =
-                            baseline_sectioned_fallback_reason::
-                                structural_ineligible;
-
-                        build_cache_result =
-                            transaction_write(
-                                directory /
-                                    build_cache_name,
-                                build_cache,
-                                {},
-                                &build_cache_io);
-                        return;
-                    }
-
                     const auto attempt_begin =
                         std::chrono::steady_clock::now();
 
@@ -5574,7 +5585,7 @@ status baseline_store::commit(
                         durable_write_sectioned_build_cache(
                             directory,
                             previous_build_cache_directory,
-                            build_cache.contiguous(),
+                            build_cache,
                             provenance.build_cache,
                             transaction_executor,
                             build_cache_io,

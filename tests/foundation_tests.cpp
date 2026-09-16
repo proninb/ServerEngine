@@ -4485,6 +4485,172 @@ bool test_build_cache_image_incremental_lineage() {
     return pass;
 }
 
+bool test_build_cache_generation_section_carrier() {
+    build_cache_fixture fixture;
+    if (!prepare_build_cache_fixture(fixture))
+        return false;
+
+    std::vector<std::byte> image;
+    if (!encode_build_cache_image(
+            *fixture.context,
+            image).ok()) {
+        std::error_code error;
+        std::filesystem::remove_all(
+            fixture.directory,
+            error);
+        return false;
+    }
+
+    build_cache_image_view logical;
+    build_cache_generation_segments contiguous;
+
+    if (!logical.bind(image).ok() ||
+        !contiguous.bind_validated_contiguous(
+            image,
+            logical).ok() ||
+        !contiguous.valid() ||
+        contiguous.logical_size() !=
+            image.size() ||
+        contiguous.prefix().data() !=
+            image.data() ||
+        contiguous.prefix().size() !=
+            build_cache_image_prefix_size) {
+        std::error_code error;
+        std::filesystem::remove_all(
+            fixture.directory,
+            error);
+        return false;
+    }
+
+    std::array<
+        project_generation_segment,
+        build_cache_image_directory_count>
+        sections{};
+
+    std::size_t expected_physical_size =
+        build_cache_image_prefix_size;
+    std::size_t expected_extent_count = 1;
+    bool zero_copy = true;
+
+    for (std::size_t index = 0;
+         index < sections.size();
+         ++index) {
+
+        const auto kind =
+            static_cast<
+                build_cache_image_section>(
+                    index + 1);
+        const auto expected =
+            logical.section_bytes(kind);
+        const auto& actual =
+            contiguous.section(kind);
+
+        if (expected.empty()) {
+            if (!actual.empty())
+                zero_copy = false;
+        }
+        else {
+            const auto bytes =
+                actual.contiguous();
+
+            if (!actual.is_contiguous() ||
+                bytes.data() !=
+                    expected.data() ||
+                bytes.size() !=
+                    expected.size()) {
+                zero_copy = false;
+            }
+
+            ++expected_extent_count;
+        }
+
+        expected_physical_size +=
+            expected.size();
+        sections[index] = actual;
+    }
+
+    if (!zero_copy ||
+        contiguous.physical_size() !=
+            expected_physical_size ||
+        contiguous.physical_extent_count() !=
+            expected_extent_count) {
+        std::error_code error;
+        std::filesystem::remove_all(
+            fixture.directory,
+            error);
+        return false;
+    }
+
+    // Prove the carrier is not constrained to one contiguous extent per
+    // section. Split source_directory at a record boundary without copying.
+    constexpr auto split_kind =
+        build_cache_image_section::
+            source_directory;
+    constexpr std::size_t split_index =
+        static_cast<std::size_t>(
+            static_cast<std::uint32_t>(
+                split_kind) - 1);
+
+    const auto split_bytes =
+        logical.section_bytes(split_kind);
+
+    if (split_bytes.size() < 112) {
+        std::error_code error;
+        std::filesystem::remove_all(
+            fixture.directory,
+            error);
+        return false;
+    }
+
+    constexpr std::size_t split_offset = 56;
+
+    project_generation_segment split;
+    if (!split.append(
+            split_bytes.first(
+                split_offset)) ||
+        !split.append(
+            split_bytes.subspan(
+                split_offset))) {
+        std::error_code error;
+        std::filesystem::remove_all(
+            fixture.directory,
+            error);
+        return false;
+    }
+
+    sections[split_index] = split;
+
+    build_cache_generation_segments scatter;
+    const bool scatter_pass =
+        scatter.bind_sectioned(
+            contiguous.prefix(),
+            sections,
+            contiguous.logical_size()).ok() &&
+        scatter.valid() &&
+        scatter.logical_size() ==
+            contiguous.logical_size() &&
+        scatter.physical_size() ==
+            contiguous.physical_size() &&
+        scatter.physical_extent_count() ==
+            contiguous.physical_extent_count() + 1 &&
+        scatter.section(
+            split_kind).extent_count() == 2 &&
+        scatter.section(
+            split_kind).extent(0).data() ==
+            split_bytes.data() &&
+        scatter.section(
+            split_kind).extent(1).data() ==
+            split_bytes.data() +
+                split_offset;
+
+    std::error_code error;
+    std::filesystem::remove_all(
+        fixture.directory,
+        error);
+    return scatter_pass;
+}
+
+
 bool test_build_cache_image_integrity() {
     build_cache_fixture fixture;
     if (!prepare_build_cache_fixture(fixture))
@@ -6323,6 +6489,9 @@ constexpr std::array tests{
     test_case{"build_cache_image_cross_artifact", &test_build_cache_image_cross_artifact},
     test_case{"build_cache_image_mapped_baseline", &test_build_cache_image_mapped_baseline},
     test_case{"build_cache_image_incremental_lineage", &test_build_cache_image_incremental_lineage},
+    test_case{
+        "build_cache_generation_section_carrier",
+        &test_build_cache_generation_section_carrier},
     test_case{"build_cache_image_integrity", &test_build_cache_image_integrity},
     test_case{
         "frozen_build_cache_capability_rejects_rebound_span",

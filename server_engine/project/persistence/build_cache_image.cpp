@@ -565,6 +565,554 @@ std::span<const std::byte> build_cache_image_view::section_bytes(
     };
 }
 
+void build_cache_generation_segments::reset() noexcept {
+    prefix_value = {};
+    for (auto& value : sections_value)
+        value = {};
+    section_offsets.fill(0);
+    logical_size_value = 0;
+    physical_size_value = 0;
+    physical_extent_count_value = 0;
+}
+
+const project_generation_segment&
+build_cache_generation_segments::section(
+    build_cache_image_section kind) const noexcept {
+
+    static const project_generation_segment empty{};
+
+    const auto index = section_index(kind);
+    return index < sections_value.size()
+        ? sections_value[index]
+        : empty;
+}
+
+status build_cache_generation_segments::bind(
+    std::span<const std::byte> image) noexcept {
+
+    reset();
+
+    build_cache_image_view validated;
+    const auto result = validated.bind(image);
+    if (!result.ok())
+        return result;
+
+    return bind_validated_contiguous(
+        image,
+        validated);
+}
+
+status build_cache_generation_segments::
+bind_validated_contiguous(
+    std::span<const std::byte> image,
+    const build_cache_image_view& validated) noexcept {
+
+    reset();
+
+    if (!validated.valid() ||
+        image.size() < build_cache_image_prefix_size) {
+        return {status_code::invalid_argument};
+    }
+
+    const auto image_begin =
+        reinterpret_cast<std::uintptr_t>(
+            image.data());
+    const auto image_end =
+        image_begin + image.size();
+
+    if (image_end < image_begin)
+        return {status_code::artifact_corrupt};
+
+    std::array<
+        project_generation_segment,
+        build_cache_image_directory_count>
+        candidate{};
+
+    for (std::size_t index = 0;
+         index < candidate.size();
+         ++index) {
+
+        const auto kind =
+            static_cast<build_cache_image_section>(
+                index + 1);
+        const auto bytes =
+            validated.section_bytes(kind);
+
+        if (bytes.empty())
+            continue;
+
+        const auto begin =
+            reinterpret_cast<std::uintptr_t>(
+                bytes.data());
+        const auto end =
+            begin + bytes.size();
+
+        if (end < begin ||
+            begin < image_begin ||
+            end > image_end) {
+            return {status_code::invalid_argument};
+        }
+
+        candidate[index] =
+            project_generation_segment{bytes};
+    }
+
+    return bind_sectioned(
+        image.first(build_cache_image_prefix_size),
+        candidate,
+        image.size());
+}
+
+status build_cache_generation_segments::bind_sectioned(
+    std::span<const std::byte> prefix,
+    const std::array<
+        project_generation_segment,
+        build_cache_image_directory_count>& section_values,
+    std::size_t logical_size) noexcept {
+
+    reset();
+
+    if (prefix.size() !=
+            build_cache_image_prefix_size ||
+        logical_size <
+            build_cache_image_prefix_size) {
+        return {status_code::artifact_corrupt};
+    }
+
+    if (!std::equal(
+            image_magic.begin(),
+            image_magic.end(),
+            prefix.begin())) {
+        return {status_code::artifact_corrupt};
+    }
+
+    if (read_u32(prefix.data() + 8) !=
+        build_cache_image_format_version) {
+        return {status_code::rebuild_required};
+    }
+
+    const auto flags =
+        read_u32(
+            prefix.data() +
+            header_flags_offset);
+
+    if (read_u32(prefix.data() + 12) !=
+            endian_marker ||
+        read_u32(prefix.data() + 16) !=
+            build_cache_image_header_size ||
+        read_u32(prefix.data() + 20) !=
+            build_cache_image_directory_count ||
+        read_u32(prefix.data() + 24) !=
+            build_cache_image_directory_entry_size ||
+        (flags & ~known_flags) != 0 ||
+        (flags & known_flags) != known_flags ||
+        read_u64(prefix.data() + 32) !=
+            directory_offset ||
+        read_u64(prefix.data() + 40) !=
+            logical_size) {
+        return {status_code::artifact_corrupt};
+    }
+
+    if (!zero_bytes(
+            prefix.data() +
+                header_reserved_begin,
+            header_directory_crc_offset -
+                header_reserved_begin)) {
+        return {status_code::artifact_corrupt};
+    }
+
+    std::array<
+        std::byte,
+        build_cache_image_header_size>
+        header{};
+
+    std::memcpy(
+        header.data(),
+        prefix.data(),
+        header.size());
+
+    const auto stored_header_crc =
+        read_u64(
+            header.data() +
+            header_crc_offset);
+
+    write_u64(
+        header.data() +
+            header_crc_offset,
+        0);
+
+    if (persistence_crc64(header) !=
+        stored_header_crc) {
+        return {status_code::artifact_corrupt};
+    }
+
+    const auto directory_span =
+        prefix.subspan(
+            directory_offset,
+            directory_bytes);
+
+    if (persistence_crc64(
+            directory_span) !=
+        read_u64(
+            prefix.data() +
+            header_directory_crc_offset)) {
+        return {status_code::artifact_corrupt};
+    }
+
+    const auto prefix_payload_end =
+        directory_offset +
+        directory_bytes;
+
+    if (prefix_payload_end >
+            prefix.size() ||
+        !zero_bytes(
+            prefix.data() +
+                prefix_payload_end,
+            prefix.size() -
+                prefix_payload_end)) {
+        return {status_code::artifact_corrupt};
+    }
+
+    std::uint64_t previous_end =
+        first_section_offset;
+
+    std::size_t physical_size =
+        prefix.size();
+    std::size_t physical_extents = 1;
+
+    for (std::size_t index = 0;
+         index <
+            build_cache_image_directory_count;
+         ++index) {
+
+        const auto* entry =
+            prefix.data() +
+            directory_offset +
+            index *
+                build_cache_image_directory_entry_size;
+
+        const auto raw_kind =
+            read_u32(entry);
+        const auto kind =
+            static_cast<build_cache_image_section>(
+                raw_kind);
+        const auto record_size =
+            read_u32(entry + 4);
+        const auto offset =
+            read_u64(entry + 8);
+        const auto count =
+            read_u64(entry + 16);
+
+        const auto aligned_offset =
+            align64(previous_end);
+
+        if (raw_kind != index + 1 ||
+            record_size !=
+                expected_record_size(kind) ||
+            offset != aligned_offset ||
+            (offset & 63u) != 0) {
+            return {status_code::artifact_corrupt};
+        }
+
+        std::uint64_t byte_count = 0;
+        std::uint64_t end = 0;
+
+        if (!multiply_u64(
+                count,
+                record_size,
+                byte_count) ||
+            !add_u64(
+                offset,
+                byte_count,
+                end) ||
+            end > logical_size ||
+            byte_count !=
+                section_values[index].size()) {
+            return {status_code::artifact_corrupt};
+        }
+
+        if (section_values[index].size() >
+            (std::numeric_limits<std::size_t>::max)() -
+                physical_size) {
+            return {status_code::not_available};
+        }
+
+        physical_size +=
+            section_values[index].size();
+
+        if (section_values[index].extent_count() >
+            (std::numeric_limits<std::size_t>::max)() -
+                physical_extents) {
+            return {status_code::not_available};
+        }
+
+        physical_extents +=
+            section_values[index].extent_count();
+
+        section_offsets[index] = offset;
+        previous_end = end;
+    }
+
+    if (previous_end != logical_size)
+        return {status_code::artifact_corrupt};
+
+    prefix_value = prefix;
+    sections_value = section_values;
+    logical_size_value = logical_size;
+    physical_size_value = physical_size;
+    physical_extent_count_value =
+        physical_extents;
+
+    return {};
+}
+
+
+status build_cache_generation_segments::bind_view(
+    build_cache_image_view& output) const noexcept {
+
+    output.reset();
+
+    if (!valid())
+        return {status_code::invalid_state};
+
+    std::array<
+        std::span<const std::byte>,
+        build_cache_image_directory_count> sections{};
+
+    for (std::size_t index = 0; index < sections.size(); ++index) {
+        if (!sections_value[index].is_contiguous())
+            return {status_code::not_available};
+
+        sections[index] =
+            sections_value[index].contiguous();
+    }
+
+    return output.bind_sectioned(prefix_value, sections);
+}
+
+status build_cache_generation_segments::bind_validated_sections(
+    std::span<const std::byte> layout_backing,
+    const build_cache_image_view& validated,
+    const build_cache_encode_sparse_sections* sparse) noexcept {
+
+    reset();
+
+    if (!validated.valid() ||
+        layout_backing.size() < build_cache_image_prefix_size) {
+        return {status_code::invalid_argument};
+    }
+
+    std::array<
+        project_generation_segment,
+        build_cache_image_directory_count> sections{};
+
+    for (std::size_t index = 0; index < sections.size(); ++index) {
+        const auto kind =
+            static_cast<build_cache_image_section>(index + 1);
+        if (sparse != nullptr &&
+            !sparse->sections[index].empty()) {
+            sections[index] =
+                sparse->sections[index];
+        }
+        else {
+            sections[index] =
+                project_generation_segment{
+                    validated.section_bytes(kind)};
+        }
+    }
+
+    return bind_sectioned(
+        layout_backing.first(build_cache_image_prefix_size),
+        sections,
+        layout_backing.size());
+}
+
+project_generation_segment
+build_cache_generation_segments::logical_segment(
+    std::span<const std::byte> layout_backing) const noexcept {
+
+    project_generation_segment output;
+
+    if (!valid() ||
+        layout_backing.size() != logical_size_value ||
+        layout_backing.size() < build_cache_image_prefix_size ||
+        layout_backing.data() != prefix_value.data()) {
+        return output;
+    }
+
+    bool canonical = true;
+
+    for (std::size_t index = 0; index < sections_value.size(); ++index) {
+        const auto& value = sections_value[index];
+        if (value.empty())
+            continue;
+
+        const auto offset =
+            static_cast<std::size_t>(section_offsets[index]);
+
+        if (!value.is_contiguous() ||
+            offset > layout_backing.size() ||
+            value.size() > layout_backing.size() - offset ||
+            value.contiguous().data() != layout_backing.data() + offset) {
+            canonical = false;
+            break;
+        }
+    }
+
+    if (canonical) {
+        (void)output.append(layout_backing);
+        return output;
+    }
+
+    if (!output.append(prefix_value))
+        return {};
+
+    std::size_t previous_end = build_cache_image_prefix_size;
+
+    for (std::size_t index = 0; index < sections_value.size(); ++index) {
+        const auto offset =
+            static_cast<std::size_t>(section_offsets[index]);
+        const auto& value = sections_value[index];
+
+        if (offset < previous_end ||
+            offset > layout_backing.size() ||
+            value.size() > layout_backing.size() - offset) {
+            return {};
+        }
+
+        if (offset > previous_end &&
+            !output.append(
+                layout_backing.subspan(
+                    previous_end,
+                    offset - previous_end))) {
+            return {};
+        }
+
+        for (std::size_t extent = 0;
+             extent < value.extent_count();
+             ++extent) {
+            if (!output.append(value.extent(extent)))
+                return {};
+        }
+
+        previous_end = offset + value.size();
+    }
+
+    if (previous_end < layout_backing.size() &&
+        !output.append(layout_backing.subspan(previous_end))) {
+        return {};
+    }
+
+    return output.size() == logical_size_value
+        ? output
+        : project_generation_segment{};
+}
+
+status build_cache_image_view::bind_encoded_mixed(
+    std::span<const std::byte> layout_backing,
+    const build_cache_encode_borrowed_sections& borrowed) noexcept {
+
+    if (layout_backing.size() < build_cache_image_prefix_size)
+        return {status_code::artifact_corrupt};
+
+    const auto prefix =
+        layout_backing.first(build_cache_image_prefix_size);
+
+    std::array<
+        std::span<const std::byte>,
+        build_cache_image_directory_count> sections{};
+
+    std::uint64_t previous_end = first_section_offset;
+
+    for (std::size_t index = 0; index < sections.size(); ++index) {
+        const auto* entry =
+            prefix.data() +
+            directory_offset +
+            index * build_cache_image_directory_entry_size;
+
+        const auto record_size = read_u32(entry + 4);
+        const auto offset = read_u64(entry + 8);
+        const auto count = read_u64(entry + 16);
+
+        std::uint64_t byte_count = 0;
+        std::uint64_t end = 0;
+
+        if (!multiply_u64(count, record_size, byte_count) ||
+            !add_u64(offset, byte_count, end) ||
+            offset != align64(previous_end) ||
+            end > layout_backing.size()) {
+            return {status_code::artifact_corrupt};
+        }
+
+        const auto exact = borrowed.sections[index];
+
+        if (!exact.empty()) {
+            if (exact.size() != byte_count)
+                return {status_code::artifact_corrupt};
+            sections[index] = exact;
+        }
+        else {
+            sections[index] =
+                layout_backing.subspan(
+                    static_cast<std::size_t>(offset),
+                    static_cast<std::size_t>(byte_count));
+        }
+
+        previous_end = end;
+    }
+
+    if (previous_end != layout_backing.size())
+        return {status_code::artifact_corrupt};
+
+    return bind_sectioned(prefix, sections);
+}
+
+
+status build_cache_image_view::bind_encoded_sparse(
+    std::span<const std::byte> layout_backing,
+    const build_cache_encode_borrowed_sections& borrowed,
+    const build_cache_encode_sparse_sections& sparse) noexcept {
+
+    auto result =
+        bind_encoded_mixed(
+            layout_backing,
+            borrowed);
+    if (!result.ok())
+        return result;
+
+    for (std::size_t index = 0;
+         index < sparse.sections.size();
+         ++index) {
+
+        const auto& segment =
+            sparse.sections[index];
+
+        if (segment.empty())
+            continue;
+
+        auto& value = sections[index];
+
+        std::uint64_t byte_count = 0;
+        if (!multiply_u64(
+                value.count,
+                value.record_size,
+                byte_count) ||
+            byte_count != segment.size()) {
+            reset();
+            return {status_code::artifact_corrupt};
+        }
+
+        value.segment = segment;
+        value.data =
+            segment.is_contiguous()
+            ? segment.contiguous().data()
+            : nullptr;
+    }
+
+    return {};
+}
+
+
 status build_cache_image_view::bind(
     std::span<const std::byte> image) noexcept {
 
@@ -1335,10 +1883,47 @@ status build_cache_image_view::source(
 
     const auto& values =
         section(build_cache_image_section::source_directory);
-    const auto* record =
-        values.data +
+    const auto record_offset =
         static_cast<std::size_t>(id.value() - 1) *
             source_directory_record_size;
+
+    const std::byte* record = nullptr;
+
+    if (values.segment.empty()) {
+        record =
+            values.data +
+            record_offset;
+    }
+    else {
+        std::size_t cursor = 0;
+
+        for (std::size_t extent_index = 0;
+             extent_index < values.segment.extent_count();
+             ++extent_index) {
+
+            const auto extent =
+                values.segment.extent(
+                    extent_index);
+
+            if (record_offset >= cursor &&
+                record_offset - cursor <=
+                    extent.size() &&
+                source_directory_record_size <=
+                    extent.size() -
+                        (record_offset - cursor)) {
+
+                record =
+                    extent.data() +
+                    (record_offset - cursor);
+                break;
+            }
+
+            cursor += extent.size();
+        }
+
+        if (record == nullptr)
+            return {status_code::artifact_corrupt};
+    }
 
     const auto raw_source = read_u32(record);
     const auto flags = read_u32(record + 4);
@@ -1469,11 +2054,50 @@ std::string_view build_cache_image_view::source_text(
         return {};
     }
 
-    return {
-        reinterpret_cast<const char*>(
-            values.data + static_cast<std::size_t>(record.text_offset)),
-        static_cast<std::size_t>(record.text_length),
-    };
+    const auto logical_offset =
+        static_cast<std::size_t>(
+            record.text_offset);
+    const auto logical_size =
+        static_cast<std::size_t>(
+            record.text_length);
+
+    if (values.segment.empty()) {
+        return {
+            reinterpret_cast<const char*>(
+                values.data + logical_offset),
+            logical_size,
+        };
+    }
+
+    std::size_t cursor = 0;
+
+    for (std::size_t extent_index = 0;
+         extent_index < values.segment.extent_count();
+         ++extent_index) {
+
+        const auto extent =
+            values.segment.extent(
+                extent_index);
+
+        if (logical_offset >= cursor &&
+            logical_offset - cursor <=
+                extent.size() &&
+            logical_size <=
+                extent.size() -
+                    (logical_offset - cursor)) {
+
+            return {
+                reinterpret_cast<const char*>(
+                    extent.data() +
+                    (logical_offset - cursor)),
+                logical_size,
+            };
+        }
+
+        cursor += extent.size();
+    }
+
+    return {};
 }
 
 status build_cache_image_view::frontend_local_type(
@@ -2238,11 +2862,31 @@ status build_cache_image_view::verify_contents(
             return {status_code::artifact_corrupt};
         }
 
-        if (verify_section_crc &&
-            persistence_crc64(std::span<const std::byte>{
-                value.data,
-                static_cast<std::size_t>(byte_count)}) != value.crc64) {
-            return {status_code::artifact_corrupt};
+        if (verify_section_crc) {
+            std::uint64_t crc = 0;
+
+            if (!value.segment.empty()) {
+                for (std::size_t extent_index = 0;
+                     extent_index <
+                        value.segment.extent_count();
+                     ++extent_index) {
+
+                    crc = persistence_crc64_update(
+                        crc,
+                        value.segment.extent(
+                            extent_index));
+                }
+            }
+            else {
+                crc = persistence_crc64(
+                    std::span<const std::byte>{
+                        value.data,
+                        static_cast<std::size_t>(
+                            byte_count)});
+            }
+
+            if (crc != value.crc64)
+                return {status_code::artifact_corrupt};
         }
     }
 
@@ -3475,13 +4119,19 @@ status encode_build_cache_image(
     const source_change_capture& change_capture,
     std::vector<std::byte>& output,
     build_cache_encode_telemetry* telemetry,
-    build_cache_encode_provenance* provenance) noexcept {
+    build_cache_encode_provenance* provenance,
+    build_cache_encode_borrowed_sections* borrowed,
+    build_cache_encode_sparse_sections* sparse) noexcept {
 
     output.clear();
     if (telemetry != nullptr)
         *telemetry = {};
     if (provenance != nullptr)
         *provenance = {};
+    if (borrowed != nullptr)
+        *borrowed = {};
+    if (sparse != nullptr)
+        *sparse = {};
 
     build_cache_section_identity_tracker
         section_identity{provenance};
@@ -3706,11 +4356,16 @@ status encode_build_cache_image(
             }
 
             bool patches_valid = true;
+            bool patches_exact = true;
             std::size_t patch_records = 0;
+            std::array<std::byte, 64> encoded_patch{};
+
+            if (record_size > encoded_patch.size())
+                return false;
 
             values.for_each_materialized(
                 [&](std::size_t index,
-                    const auto&) noexcept {
+                    const auto& value) noexcept {
 
                     if (index >= baseline_count) {
                         patches_valid = false;
@@ -3718,10 +4373,57 @@ status encode_build_cache_image(
                     }
 
                     ++patch_records;
+                    encoded_patch.fill(std::byte{0});
+                    write_record(encoded_patch.data(), value);
+
+                    const auto old =
+                        baseline_bytes.subspan(
+                            index * record_size,
+                            record_size);
+
+                    if (std::memcmp(
+                            encoded_patch.data(),
+                            old.data(),
+                            record_size) != 0) {
+                        patches_exact = false;
+                    }
                 });
 
             if (!patches_valid)
                 return false;
+
+            const bool whole_section_exact =
+                local_values.empty() &&
+                patches_exact;
+
+            if (whole_section_exact &&
+                borrowed != nullptr &&
+                !baseline_bytes.empty()) {
+
+                const auto borrow_index =
+                    section_index(kind);
+
+                if (borrow_index >= borrowed->sections.size())
+                    return false;
+
+                borrowed->sections[borrow_index] =
+                    baseline_bytes;
+
+                section_identity.establish_exact(kind);
+
+                if (telemetry != nullptr) {
+                    telemetry->mapped_baseline_bulk_bytes +=
+                        baseline_bytes.size();
+                    telemetry->mapped_baseline_borrowed_bytes +=
+                        baseline_bytes.size();
+                    telemetry->mapped_baseline_patch_records +=
+                        patch_records;
+                    ++telemetry->mapped_baseline_bulk_sections;
+                    ++telemetry->mapped_baseline_borrowed_sections;
+                }
+
+                return true;
+            }
 
             auto* target = section_data(kind);
 
@@ -4053,7 +4755,29 @@ status encode_build_cache_image(
                         slot.text_candidate = true;
                     }
 
-                    if (!baseline_directory.empty()) {
+                    // D4Q2C2B_SOURCE_DIRECTORY_PARTIAL_ZERO_COPY
+                    project_generation_segment
+                        sparse_source_directory;
+                    std::uint64_t
+                        sparse_source_directory_borrowed = 0;
+                    std::uint32_t
+                        sparse_source_directory_borrowed_extents = 0;
+                    std::size_t
+                        directory_borrow_begin = 0;
+                    std::size_t
+                        directory_borrow_count = 0;
+                    std::size_t
+                        directory_owned_begin = 0;
+                    std::size_t
+                        directory_owned_count = 0;
+                    bool directory_force_owned_tail = false;
+
+                    // D4Q2C2B_DIRECTORY_RUN_COALESCE_AND_BOUND
+                    const bool use_sparse_source_directory =
+                        sparse != nullptr;
+
+                    if (!use_sparse_source_directory &&
+                        !baseline_directory.empty()) {
                         std::memcpy(
                             source_directory,
                             baseline_directory.data(),
@@ -4061,8 +4785,103 @@ status encode_build_cache_image(
                     }
 
                     std::uint64_t baseline_bytes_copied =
-                        baseline_directory.size();
+                        use_sparse_source_directory
+                        ? 0
+                        : baseline_directory.size();
 
+                    const auto flush_directory_borrow =
+                        [&]() noexcept {
+
+                            if (directory_borrow_count == 0)
+                                return true;
+
+                            if (directory_borrow_begin >
+                                    (std::numeric_limits<
+                                        std::size_t>::max)() /
+                                        source_directory_record_size ||
+                                directory_borrow_count >
+                                    (std::numeric_limits<
+                                        std::size_t>::max)() /
+                                        source_directory_record_size) {
+                                return false;
+                            }
+
+                            const auto offset =
+                                directory_borrow_begin *
+                                source_directory_record_size;
+                            const auto bytes =
+                                directory_borrow_count *
+                                source_directory_record_size;
+
+                            if (offset >
+                                    baseline_directory.size() ||
+                                bytes >
+                                    baseline_directory.size() -
+                                        offset) {
+                                return false;
+                            }
+
+                            const auto run =
+                                baseline_directory.subspan(
+                                    offset,
+                                    bytes);
+
+                            if (!sparse_source_directory.append(
+                                    run)) {
+                                return false;
+                            }
+
+                            sparse_source_directory_borrowed +=
+                                run.size();
+                            ++sparse_source_directory_borrowed_extents;
+                            directory_borrow_count = 0;
+                            return true;
+                        };
+
+                    const auto flush_directory_owned =
+                        [&]() noexcept {
+
+                            if (directory_owned_count == 0)
+                                return true;
+
+                            if (directory_owned_begin >
+                                    (std::numeric_limits<
+                                        std::size_t>::max)() /
+                                        source_directory_record_size ||
+                                directory_owned_count >
+                                    (std::numeric_limits<
+                                        std::size_t>::max)() /
+                                        source_directory_record_size) {
+                                return false;
+                            }
+
+                            const auto offset =
+                                directory_owned_begin *
+                                source_directory_record_size;
+                            const auto bytes =
+                                directory_owned_count *
+                                source_directory_record_size;
+                            const auto directory_bytes =
+                                source_count *
+                                source_directory_record_size;
+
+                            if (offset > directory_bytes ||
+                                bytes > directory_bytes - offset) {
+                                return false;
+                            }
+
+                            if (!sparse_source_directory.append(
+                                    std::span<const std::byte>{
+                                        source_directory + offset,
+                                        bytes})) {
+                                return false;
+                            }
+
+                            directory_owned_count = 0;
+                            return true;
+                        };
+
+                    // D4Q2C1_SOURCE_FRONTEND_WHOLE_SECTION_BORROW
                     struct sparse_arena_state final {
                         build_cache_image_section kind{};
                         std::span<const std::byte> baseline;
@@ -4073,6 +4892,8 @@ status encode_build_cache_image(
                         std::size_t logical_cursor = 0;
                         std::size_t copy_cursor = 0;
                         std::size_t output_cursor = 0;
+                        bool borrow_candidate = false;
+                        bool whole_materialized = false;
                     };
 
                     std::array<sparse_arena_state, 4>
@@ -4143,12 +4964,44 @@ status encode_build_cache_image(
                             return false;
                         }
 
-                        // D4O2C: equal geometry lets reconstruction start from
-                        // one exact whole-baseline copy. Subsequent moved or
-                        // replacement ranges are the only bytes that can
-                        // invalidate identity.
+                        // Equal geometry is logically identical before
+                        // sparse replacements are applied. Delay the baseline
+                        // memcpy while a pinned whole-section borrow remains
+                        // possible.
                         if (arena.baseline_count ==
                             arena.current_count) {
+
+                            section_identity.establish_exact(
+                                arena.kind);
+
+                            arena.borrow_candidate =
+                                borrowed != nullptr &&
+                                !arena.baseline.empty();
+
+                            if (!arena.borrow_candidate) {
+                                if (!arena.baseline.empty()) {
+                                    std::memcpy(
+                                        arena.output,
+                                        arena.baseline.data(),
+                                        arena.baseline.size());
+
+                                    baseline_bytes_copied +=
+                                        arena.baseline.size();
+                                }
+
+                                arena.whole_materialized = true;
+                            }
+                        }
+                    }
+
+                    const auto materialize_equal_arena =
+                        [&](sparse_arena_state& arena) noexcept {
+
+                            if (arena.baseline_count !=
+                                    arena.current_count ||
+                                arena.whole_materialized) {
+                                return;
+                            }
 
                             if (!arena.baseline.empty()) {
                                 std::memcpy(
@@ -4160,10 +5013,9 @@ status encode_build_cache_image(
                                     arena.baseline.size();
                             }
 
-                            section_identity.establish_exact(
-                                arena.kind);
-                        }
-                    }
+                            arena.whole_materialized = true;
+                            arena.borrow_candidate = false;
+                        };
 
                     const auto copy_arena_until =
                         [&](sparse_arena_state& arena,
@@ -4212,6 +5064,9 @@ status encode_build_cache_image(
                                         baseline_offset;
 
                                 if (!already_exact_at_target) {
+                                    materialize_equal_arena(
+                                        arena);
+
                                     auto* target =
                                         arena.output +
                                         output_offset;
@@ -4384,26 +5239,51 @@ status encode_build_cache_image(
                                 const auto output_offset =
                                     arena.output_cursor *
                                     arena.record_size;
-                                auto* target =
-                                    arena.output +
-                                    output_offset;
 
-                                std::memcpy(
-                                    target,
-                                    replacement.data(),
-                                    replacement.size());
+                                const bool equal_geometry =
+                                    arena.baseline_count ==
+                                        arena.current_count;
 
-                                if (arena.baseline_count ==
-                                    arena.current_count) {
+                                const auto baseline_replacement =
+                                    equal_geometry &&
+                                    output_offset <=
+                                        arena.baseline.size() &&
+                                    replacement.size() <=
+                                        arena.baseline.size() -
+                                            output_offset
+                                    ? arena.baseline.subspan(
+                                        output_offset,
+                                        replacement.size())
+                                    : std::span<const std::byte>{};
 
+                                const bool replacement_exact =
+                                    arena.borrow_candidate &&
+                                    baseline_replacement.size() ==
+                                        replacement.size() &&
+                                    std::memcmp(
+                                        replacement.data(),
+                                        baseline_replacement.data(),
+                                        replacement.size()) == 0;
+
+                                if (!replacement_exact) {
+                                    materialize_equal_arena(
+                                        arena);
+
+                                    auto* target =
+                                        arena.output +
+                                        output_offset;
+
+                                    std::memcpy(
+                                        target,
+                                        replacement.data(),
+                                        replacement.size());
+                                }
+
+                                if (equal_geometry) {
                                     section_identity.observe_overwrite(
                                         arena.kind,
-                                        std::span<const std::byte>{
-                                            target,
-                                            replacement.size()},
-                                        arena.baseline.subspan(
-                                            output_offset,
-                                            replacement.size()));
+                                        replacement,
+                                        baseline_replacement);
                                 }
                             }
 
@@ -4412,9 +5292,20 @@ status encode_build_cache_image(
                             return true;
                         };
 
+                    // D4Q2C2A_SOURCE_BYTES_PARTIAL_ZERO_COPY
                     std::size_t baseline_text_logical = 0;
                     std::size_t baseline_text_copy = 0;
                     std::size_t current_text_cursor = 0;
+
+                    project_generation_segment
+                        sparse_source_bytes;
+                    std::uint64_t
+                        sparse_source_bytes_borrowed = 0;
+                    std::uint32_t
+                        sparse_source_bytes_borrowed_extents = 0;
+
+                    const bool use_sparse_source_bytes =
+                        sparse != nullptr;
 
                     const auto copy_text_until =
                         [&](std::size_t target) noexcept {
@@ -4440,15 +5331,31 @@ status encode_build_cache_image(
                             }
 
                             if (bytes != 0) {
-                                std::memcpy(
-                                    source_bytes +
-                                        current_text_cursor,
-                                    baseline_source_bytes.data() +
+                                const auto baseline_run =
+                                    baseline_source_bytes.subspan(
                                         baseline_text_copy,
-                                    bytes);
+                                        bytes);
 
-                                baseline_bytes_copied +=
-                                    bytes;
+                                if (use_sparse_source_bytes) {
+                                    if (!sparse_source_bytes.append(
+                                            baseline_run)) {
+                                        return false;
+                                    }
+
+                                    sparse_source_bytes_borrowed +=
+                                        bytes;
+                                    ++sparse_source_bytes_borrowed_extents;
+                                }
+                                else {
+                                    std::memcpy(
+                                        source_bytes +
+                                            current_text_cursor,
+                                        baseline_run.data(),
+                                        bytes);
+
+                                    baseline_bytes_copied +=
+                                        bytes;
+                                }
                             }
 
                             current_text_cursor +=
@@ -4472,17 +5379,45 @@ status encode_build_cache_image(
                             index <
                             baseline_source_count;
 
+                        const std::byte*
+                            baseline_record =
+                                baseline_source
+                                ? baseline_directory.data() +
+                                    index *
+                                        source_directory_record_size
+                                : nullptr;
+
+                        std::array<
+                            std::byte,
+                            source_directory_record_size>
+                            current_record_storage;
+
                         auto* current_record =
                             source_directory +
                             index *
                                 source_directory_record_size;
 
+                        if (use_sparse_source_directory) {
+                            current_record =
+                                current_record_storage.data();
+
+                            if (baseline_record != nullptr) {
+                                std::memcpy(
+                                    current_record,
+                                    baseline_record,
+                                    source_directory_record_size);
+                            }
+                            else {
+                                std::memset(
+                                    current_record,
+                                    0,
+                                    source_directory_record_size);
+                            }
+                        }
+
                         write_u32(
                             current_record,
                             source_value.value());
-
-                        const std::byte*
-                            baseline_record = nullptr;
 
                         std::uint32_t old_flags = 0;
                         std::uint64_t old_text_offset = 0;
@@ -4490,11 +5425,6 @@ status encode_build_cache_image(
                         build_cache_range old_ranges[4]{};
 
                         if (baseline_source) {
-                            baseline_record =
-                                baseline_directory.data() +
-                                index *
-                                    source_directory_record_size;
-
                             if (read_u32(
                                     baseline_record) !=
                                     source_value.value()) {
@@ -4628,11 +5558,22 @@ status encode_build_cache_image(
                                         text.size()));
 
                                 if (!text.empty()) {
-                                    std::memcpy(
+                                    auto* current_text =
                                         source_bytes +
-                                            current_text_cursor,
+                                        current_text_cursor;
+
+                                    std::memcpy(
+                                        current_text,
                                         text.data(),
                                         text.size());
+
+                                    if (use_sparse_source_bytes &&
+                                        !sparse_source_bytes.append(
+                                            std::span<const std::byte>{
+                                                current_text,
+                                                text.size()})) {
+                                        return false;
+                                    }
                                 }
 
                                 current_text_cursor +=
@@ -4849,6 +5790,95 @@ status encode_build_cache_image(
                         write_u32(
                             current_record + 4,
                             flags);
+
+                        if (use_sparse_source_directory) {
+                            const bool exact_record =
+                                baseline_record != nullptr &&
+                                std::memcmp(
+                                    current_record,
+                                    baseline_record,
+                                    source_directory_record_size) == 0;
+
+                            bool borrow_record =
+                                exact_record &&
+                                !directory_force_owned_tail;
+
+                            // Preserve already borrowed runs, but do not let
+                            // alternating exact/adjusted records exhaust the
+                            // fixed Generation carrier. Near the limit the
+                            // remaining directory becomes one owned tail.
+                            if (borrow_record &&
+                                directory_owned_count != 0 &&
+                                sparse_source_directory.extent_count() >=
+                                    project_generation_segment_max_extents -
+                                        6) {
+
+                                directory_force_owned_tail = true;
+                                borrow_record = false;
+                            }
+
+                            if (borrow_record) {
+                                if (!flush_directory_owned())
+                                    return false;
+
+                                if (directory_borrow_count == 0)
+                                    directory_borrow_begin = index;
+
+                                ++directory_borrow_count;
+                            }
+                            else {
+                                if (!flush_directory_borrow())
+                                    return false;
+
+                                auto* owned_record =
+                                    source_directory +
+                                    index *
+                                        source_directory_record_size;
+
+                                std::memcpy(
+                                    owned_record,
+                                    current_record,
+                                    source_directory_record_size);
+
+                                // D4Q2C2B_DIRECTORY_BASELINE_ACCOUNTING
+                                // Count baseline payload materialized into
+                                // current Generation storage. The temporary
+                                // stack comparison is not counted twice.
+                                if (baseline_record != nullptr) {
+                                    baseline_bytes_copied +=
+                                        source_directory_record_size;
+                                }
+
+                                if (directory_owned_count == 0)
+                                    directory_owned_begin = index;
+
+                                ++directory_owned_count;
+                            }
+                        }
+                    }
+
+                    if (use_sparse_source_directory) {
+                        if (!flush_directory_borrow() ||
+                            !flush_directory_owned()) {
+                            return false;
+                        }
+
+                        const auto current_directory_bytes =
+                            source_count *
+                            source_directory_record_size;
+
+                        if (sparse_source_directory.size() !=
+                                current_directory_bytes) {
+                            return false;
+                        }
+
+                        const auto sparse_index =
+                            section_index(
+                                build_cache_image_section::
+                                    source_directory);
+
+                        sparse->sections[sparse_index] =
+                            sparse_source_directory;
                     }
 
                     if (baseline_text_logical !=
@@ -4858,6 +5888,21 @@ status encode_build_cache_image(
                         current_text_cursor !=
                             source_bytes_count) {
                         return false;
+                    }
+
+                    if (use_sparse_source_bytes) {
+                        if (sparse_source_bytes.size() !=
+                                source_bytes_count) {
+                            return false;
+                        }
+
+                        const auto sparse_index =
+                            section_index(
+                                build_cache_image_section::
+                                    source_bytes);
+
+                        sparse->sections[sparse_index] =
+                            sparse_source_bytes;
                     }
 
                     for (auto& arena : arenas) {
@@ -4875,6 +5920,30 @@ status encode_build_cache_image(
                     if (current_frontends !=
                         frontend_count) {
                         return false;
+                    }
+
+                    std::uint64_t baseline_bytes_borrowed = 0;
+                    std::uint32_t baseline_sections_borrowed = 0;
+
+                    if (borrowed != nullptr) {
+                        for (auto& arena : arenas) {
+                            if (!arena.borrow_candidate)
+                                continue;
+
+                            const auto borrow_index =
+                                section_index(arena.kind);
+
+                            if (borrow_index >=
+                                borrowed->sections.size()) {
+                                return false;
+                            }
+
+                            borrowed->sections[borrow_index] =
+                                arena.baseline;
+                            baseline_bytes_borrowed +=
+                                arena.baseline.size();
+                            ++baseline_sections_borrowed;
+                        }
                     }
 
                     text_cursor =
@@ -4897,7 +5966,36 @@ status encode_build_cache_image(
                     if (telemetry != nullptr) {
                         telemetry->
                             mapped_baseline_bulk_bytes +=
-                                baseline_bytes_copied;
+                                baseline_bytes_copied +
+                                baseline_bytes_borrowed +
+                                sparse_source_bytes_borrowed +
+                                sparse_source_directory_borrowed;
+                        telemetry->
+                            mapped_baseline_borrowed_bytes +=
+                                baseline_bytes_borrowed;
+                        telemetry->
+                            mapped_baseline_sparse_borrowed_bytes +=
+                                sparse_source_bytes_borrowed +
+                                sparse_source_directory_borrowed;
+                        telemetry->
+                            mapped_baseline_sparse_directory_borrowed_bytes +=
+                                sparse_source_directory_borrowed;
+                        telemetry->
+                            mapped_baseline_borrowed_sections +=
+                                baseline_sections_borrowed;
+                        if (use_sparse_source_bytes) {
+                            telemetry->
+                                mapped_baseline_sparse_borrowed_extents +=
+                                    sparse_source_bytes_borrowed_extents;
+                        }
+                        if (use_sparse_source_directory) {
+                            telemetry->
+                                mapped_baseline_sparse_borrowed_extents +=
+                                    sparse_source_directory_borrowed_extents;
+                            telemetry->
+                                mapped_baseline_sparse_directory_borrowed_extents +=
+                                    sparse_source_directory_borrowed_extents;
+                        }
                         telemetry->
                             mapped_baseline_bulk_sections +=
                                 6;
@@ -4917,8 +6015,11 @@ status encode_build_cache_image(
             native_source_encoded = true;
         }
         else {
-            // Fast path is optional. Partial writes must never leak into the
-            // established canonical fallback encoder.
+            // Fast path is optional. Partial writes and partial-section
+            // carriers must never leak into the canonical fallback encoder.
+            if (sparse != nullptr)
+                *sparse = {};
+
             clear_source_frontend_sections();
         }
     }
@@ -6364,9 +7465,59 @@ status encode_build_cache_image(
                 return;
             }
 
-            value.crc64 = persistence_crc64(std::span<const std::byte>{
+            std::span<const std::byte> crc_bytes{
                 base + static_cast<std::size_t>(value.offset),
-                static_cast<std::size_t>(byte_count)});
+                static_cast<std::size_t>(byte_count)};
+
+            if (borrowed != nullptr) {
+                const auto exact =
+                    borrowed->sections[index];
+
+                if (!exact.empty()) {
+                    if (exact.size() != crc_bytes.size()) {
+                        crc_failed.store(
+                            true,
+                            std::memory_order_relaxed);
+                        return;
+                    }
+
+                    crc_bytes = exact;
+                }
+            }
+
+            if (sparse != nullptr &&
+                !sparse->sections[index].empty()) {
+
+                const auto& segment =
+                    sparse->sections[index];
+
+                if (segment.size() !=
+                    crc_bytes.size()) {
+                    crc_failed.store(
+                        true,
+                        std::memory_order_relaxed);
+                    return;
+                }
+
+                std::uint64_t crc = 0;
+                for (std::size_t extent_index = 0;
+                     extent_index <
+                        segment.extent_count();
+                     ++extent_index) {
+
+                    crc = persistence_crc64_update(
+                        crc,
+                        segment.extent(
+                            extent_index));
+                }
+
+                value.crc64 = crc;
+            }
+            else {
+                value.crc64 =
+                    persistence_crc64(
+                        crc_bytes);
+            }
 
         }
     };
@@ -6513,7 +7664,21 @@ status encode_build_cache_image(
     const auto bind_begin =
         std::chrono::steady_clock::now();
 
-    auto result = validation.bind(output);
+    auto result =
+        sparse != nullptr &&
+            sparse->any()
+        ? validation.bind_encoded_sparse(
+            output,
+            borrowed != nullptr
+                ? *borrowed
+                : build_cache_encode_borrowed_sections{},
+            *sparse)
+        : borrowed != nullptr &&
+            borrowed->any()
+            ? validation.bind_encoded_mixed(
+                output,
+                *borrowed)
+            : validation.bind(output);
 
     if (telemetry != nullptr)
         telemetry->bind_ns =

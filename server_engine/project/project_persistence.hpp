@@ -18,6 +18,18 @@ namespace cw::server {
 
 class project_context;
 
+// D4Q1 ownership classification at the frozen Generation persistence boundary.
+// The classification describes where durable bytes physically come from after
+// freeze, not whether their semantic contents happen to equal a baseline.
+enum class project_generation_persistence_origin : std::uint32_t {
+    none = 0,
+    reconstructed = 1,
+    generation_owned = 2,
+    baseline_borrowed = 3,
+    mixed_generation = 4,
+    mixed_baseline = 5,
+};
+
 struct project_generation_freeze_telemetry final {
     std::uint64_t internal_ns = 0;
     std::uint64_t materialize_change_ns = 0;
@@ -127,14 +139,52 @@ struct project_generation_freeze_telemetry final {
     std::uint64_t build_cache_bind_ns = 0;
     std::uint64_t build_cache_verify_ns = 0;
     std::uint64_t build_cache_mapped_baseline_bulk_bytes = 0;
+    std::uint64_t build_cache_mapped_baseline_borrowed_bytes = 0;
+    std::uint64_t build_cache_mapped_baseline_sparse_borrowed_bytes = 0;
+    std::uint64_t build_cache_mapped_baseline_sparse_directory_borrowed_bytes = 0;
     std::uint64_t build_cache_mapped_baseline_patch_records = 0;
     std::uint64_t build_cache_mapped_baseline_append_records = 0;
     std::uint32_t build_cache_mapped_baseline_bulk_sections = 0;
+    std::uint32_t build_cache_mapped_baseline_borrowed_sections = 0;
+    std::uint32_t build_cache_mapped_baseline_sparse_borrowed_extents = 0;
+    std::uint32_t build_cache_mapped_baseline_sparse_directory_borrowed_extents = 0;
     std::uint64_t build_cache_provenance_bytes = 0;
     std::uint32_t build_cache_provenance_sections = 0;
     std::uint64_t bind_ns = 0;
     std::uint64_t verify_change_state_ns = 0;
     std::uint64_t verify_build_cache_ns = 0;
+
+    // D4Q1 observational ownership audit. staging_ns is the existing sequence
+    // of SAVE-side materialization/encoding/assembly phases; validation_ns is
+    // the final cross-artifact gate. No persistence behavior depends on these.
+    std::uint64_t audit_staging_ns = 0;
+    std::uint64_t audit_validation_ns = 0;
+    std::uint64_t audit_unclassified_ns = 0;
+
+    std::uint64_t audit_compiled_bytes = 0;
+    std::uint64_t audit_source_manager_bytes = 0;
+    std::uint64_t audit_change_state_bytes = 0;
+    std::uint64_t audit_build_cache_bytes = 0;
+
+    // Exact whole physical baseline sections directly borrowed by the frozen
+    // Source Manager. Partial sparse baseline ranges are deliberately excluded.
+    std::uint64_t
+        audit_source_manager_baseline_direct_borrow_bytes = 0;
+    std::uint32_t
+        audit_source_manager_baseline_direct_borrow_sections = 0;
+
+    // Build Cache is still reconstructed today. These bytes identify sections
+    // proven byte-identical to baseline after reconstruction and therefore show
+    // duplicate SAVE work available to a future native-section representation.
+    std::uint64_t
+        audit_build_cache_baseline_exact_bytes = 0;
+    std::uint32_t
+        audit_build_cache_baseline_exact_sections = 0;
+
+    std::uint32_t audit_compiled_origin = 0;
+    std::uint32_t audit_source_manager_origin = 0;
+    std::uint32_t audit_change_state_origin = 0;
+    std::uint32_t audit_build_cache_origin = 0;
 };
 
 // Temporary owner used while existing encoders are migrated to native
@@ -178,8 +228,13 @@ public:
         }
 
         build_cache_image_view image;
-        if (!image.bind(build).ok())
+        const bool use_build_sections =
+            build_sections.valid();
+
+        if (!use_build_sections &&
+            !image.bind(build).ok()) {
             return false;
+        }
 
         const auto raw =
             static_cast<std::uint32_t>(index + 1);
@@ -191,7 +246,11 @@ public:
         const auto section =
             static_cast<build_cache_image_section>(raw);
         const auto current =
-            image.section_bytes(section);
+            use_build_sections
+            ? build_sections.section(
+                section).contiguous()
+            : image.section_bytes(
+                section);
         const auto expected =
             baseline.bytes();
 
@@ -211,6 +270,11 @@ public:
 
         return baseline_reuse_provenance.
             build_cache[index].valid_for(current);
+    }
+
+    [[nodiscard]] const build_cache_generation_segments&
+    build_cache_sections() const noexcept {
+        return build_sections;
     }
 
     [[nodiscard]] project_generation_segments
@@ -234,6 +298,17 @@ public:
                         sources.data(),
                         sources.size()}};
 
+        const auto build_segment =
+            build_sections.valid()
+            ? build_sections.logical_segment(
+                std::span<const std::byte>{
+                    build.data(),
+                    build.size()})
+            : project_generation_segment{
+                std::span<const std::byte>{
+                    build.data(),
+                    build.size()}};
+
         return {
             project_generation_segment{
                 std::span<const std::byte>{
@@ -241,10 +316,7 @@ public:
                     compiled.size()}},
             source_segment,
             change_segment,
-            project_generation_segment{
-                std::span<const std::byte>{
-                    build.data(),
-                    build.size()}},
+            build_segment,
         };
     }
 
@@ -256,6 +328,7 @@ public:
         baseline_reuse_provenance = {};
         change_fallback.clear();
         native_change = {};
+        build_sections.reset();
         build.clear();
     }
 
@@ -275,8 +348,13 @@ private:
         }
 
         build_cache_image_view image;
-        if (!image.bind(build).ok())
+        const bool use_build_sections =
+            build_sections.valid();
+
+        if (!use_build_sections &&
+            !image.bind(build).ok()) {
             return false;
+        }
 
         const auto raw =
             static_cast<std::uint32_t>(index + 1);
@@ -288,7 +366,11 @@ private:
         const auto section =
             static_cast<build_cache_image_section>(raw);
         const auto frozen =
-            image.section_bytes(section);
+            use_build_sections
+            ? build_sections.section(
+                section).contiguous()
+            : image.section_bytes(
+                section);
 
         if (frozen.empty() ||
             frozen.size() != baseline.bytes().size()) {
@@ -312,6 +394,7 @@ private:
     std::vector<std::byte> change_fallback;
     std::span<const std::byte> native_change;
     std::vector<std::byte> build;
+    build_cache_generation_segments build_sections;
 
     friend status freeze_project_generation(
         const project_context&,

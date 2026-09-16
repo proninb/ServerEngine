@@ -304,14 +304,41 @@ struct baseline_commit_telemetry final {
     std::uint64_t generation_freeze_build_cache_bind_ns = 0;
     std::uint64_t generation_freeze_build_cache_verify_ns = 0;
     std::uint64_t generation_freeze_build_cache_mapped_baseline_bulk_bytes = 0;
+    std::uint64_t generation_freeze_build_cache_mapped_baseline_borrowed_bytes = 0;
+    std::uint64_t generation_freeze_build_cache_mapped_baseline_sparse_borrowed_bytes = 0;
+    std::uint64_t generation_freeze_build_cache_mapped_baseline_sparse_directory_borrowed_bytes = 0;
     std::uint64_t generation_freeze_build_cache_mapped_baseline_patch_records = 0;
     std::uint64_t generation_freeze_build_cache_mapped_baseline_append_records = 0;
     std::uint32_t generation_freeze_build_cache_mapped_baseline_bulk_sections = 0;
+    std::uint32_t generation_freeze_build_cache_mapped_baseline_borrowed_sections = 0;
+    std::uint32_t generation_freeze_build_cache_mapped_baseline_sparse_borrowed_extents = 0;
+    std::uint32_t generation_freeze_build_cache_mapped_baseline_sparse_directory_borrowed_extents = 0;
     std::uint64_t generation_freeze_build_cache_provenance_bytes = 0;
     std::uint32_t generation_freeze_build_cache_provenance_sections = 0;
     std::uint64_t generation_freeze_bind_ns = 0;
     std::uint64_t generation_freeze_verify_change_state_ns = 0;
     std::uint64_t generation_freeze_verify_build_cache_ns = 0;
+
+    // D4Q1 observational frozen-Generation ownership audit.
+    std::uint64_t generation_freeze_audit_staging_ns = 0;
+    std::uint64_t generation_freeze_audit_validation_ns = 0;
+    std::uint64_t generation_freeze_audit_unclassified_ns = 0;
+    std::uint64_t generation_freeze_audit_compiled_bytes = 0;
+    std::uint64_t generation_freeze_audit_source_manager_bytes = 0;
+    std::uint64_t generation_freeze_audit_change_state_bytes = 0;
+    std::uint64_t generation_freeze_audit_build_cache_bytes = 0;
+    std::uint64_t
+        generation_freeze_audit_source_manager_baseline_direct_borrow_bytes = 0;
+    std::uint32_t
+        generation_freeze_audit_source_manager_baseline_direct_borrow_sections = 0;
+    std::uint64_t
+        generation_freeze_audit_build_cache_baseline_exact_bytes = 0;
+    std::uint32_t
+        generation_freeze_audit_build_cache_baseline_exact_sections = 0;
+    std::uint32_t generation_freeze_audit_compiled_origin = 0;
+    std::uint32_t generation_freeze_audit_source_manager_origin = 0;
+    std::uint32_t generation_freeze_audit_change_state_origin = 0;
+    std::uint32_t generation_freeze_audit_build_cache_origin = 0;
 
     // baseline_store durable commit boundary.
     std::uint64_t store_commit_ns = 0;

@@ -705,6 +705,10 @@ status freeze_project_generation(
     build_cache_encode_telemetry build_cache_detail;
     build_cache_encode_provenance
         build_cache_provenance;
+    build_cache_encode_borrowed_sections
+        build_cache_borrowed;
+    build_cache_encode_sparse_sections
+        build_cache_sparse;
 
     result = encode_build_cache_image(
         project,
@@ -713,7 +717,9 @@ status freeze_project_generation(
         telemetry != nullptr
             ? &build_cache_detail
             : nullptr,
-        &build_cache_provenance);
+        &build_cache_provenance,
+        &build_cache_borrowed,
+        &build_cache_sparse);
 
     if (telemetry != nullptr) {
         telemetry->build_cache_ns =
@@ -768,12 +774,24 @@ status freeze_project_generation(
             build_cache_detail.verify_ns;
         telemetry->build_cache_mapped_baseline_bulk_bytes =
             build_cache_detail.mapped_baseline_bulk_bytes;
+        telemetry->build_cache_mapped_baseline_borrowed_bytes =
+            build_cache_detail.mapped_baseline_borrowed_bytes;
+        telemetry->build_cache_mapped_baseline_sparse_borrowed_bytes =
+            build_cache_detail.mapped_baseline_sparse_borrowed_bytes;
+        telemetry->build_cache_mapped_baseline_sparse_directory_borrowed_bytes =
+            build_cache_detail.mapped_baseline_sparse_directory_borrowed_bytes;
         telemetry->build_cache_mapped_baseline_patch_records =
             build_cache_detail.mapped_baseline_patch_records;
         telemetry->build_cache_mapped_baseline_append_records =
             build_cache_detail.mapped_baseline_append_records;
         telemetry->build_cache_mapped_baseline_bulk_sections =
             build_cache_detail.mapped_baseline_bulk_sections;
+        telemetry->build_cache_mapped_baseline_borrowed_sections =
+            build_cache_detail.mapped_baseline_borrowed_sections;
+        telemetry->build_cache_mapped_baseline_sparse_borrowed_extents =
+            build_cache_detail.mapped_baseline_sparse_borrowed_extents;
+        telemetry->build_cache_mapped_baseline_sparse_directory_borrowed_extents =
+            build_cache_detail.mapped_baseline_sparse_directory_borrowed_extents;
     }
 
     if (!result.ok())
@@ -814,7 +832,27 @@ status freeze_project_generation(
     if (!result.ok())
         return result;
 
-    result = build_cache.bind(output.build);
+    result =
+        build_cache_sparse.any()
+        ? build_cache.bind_encoded_sparse(
+            output.build,
+            build_cache_borrowed,
+            build_cache_sparse)
+        : build_cache_borrowed.any()
+            ? build_cache.bind_encoded_mixed(
+                output.build,
+                build_cache_borrowed)
+            : build_cache.bind(output.build);
+    if (!result.ok())
+        return result;
+
+    result = output.build_sections.
+        bind_validated_sections(
+            output.build,
+            build_cache,
+            build_cache_sparse.any()
+                ? &build_cache_sparse
+                : nullptr);
     if (!result.ok())
         return result;
 
@@ -927,9 +965,114 @@ status freeze_project_generation(
         }
     }
 
-    if (telemetry != nullptr)
+    if (telemetry != nullptr) {
+        const auto frozen = output.segments();
+
+        telemetry->audit_compiled_bytes =
+            frozen.compiled_segment().size();
+        telemetry->audit_source_manager_bytes =
+            frozen.sources_segment().size();
+        telemetry->audit_change_state_bytes =
+            frozen.change_segment().size();
+        telemetry->audit_build_cache_bytes =
+            frozen.build_segment().size();
+
+        const auto reconstructed =
+            static_cast<std::uint32_t>(
+                project_generation_persistence_origin::
+                    reconstructed);
+        const auto generation_owned =
+            static_cast<std::uint32_t>(
+                project_generation_persistence_origin::
+                    generation_owned);
+        const auto mixed_generation =
+            static_cast<std::uint32_t>(
+                project_generation_persistence_origin::
+                    mixed_generation);
+        const auto mixed_baseline =
+            static_cast<std::uint32_t>(
+                project_generation_persistence_origin::
+                    mixed_baseline);
+
+        telemetry->audit_compiled_origin =
+            output.compiled.empty()
+                ? 0u
+                : reconstructed;
+
+        telemetry->audit_source_manager_origin =
+            output.native_sources.valid()
+                ? mixed_generation
+                : output.sparse_sources.valid()
+                    ? mixed_baseline
+                    : output.sources.empty()
+                        ? 0u
+                        : reconstructed;
+
+        telemetry->audit_change_state_origin =
+            !output.native_change.empty()
+                ? generation_owned
+                : output.change_fallback.empty()
+                    ? 0u
+                    : reconstructed;
+
+        telemetry->audit_build_cache_origin =
+            output.build.empty()
+                ? 0u
+                : reconstructed;
+
+        for (const auto& proof :
+             output.baseline_reuse_provenance.
+                 source_manager) {
+
+            if (!proof.valid())
+                continue;
+
+            telemetry->
+                audit_source_manager_baseline_direct_borrow_bytes +=
+                    proof.bytes().size();
+            ++telemetry->
+                audit_source_manager_baseline_direct_borrow_sections;
+        }
+
+        for (const auto& proof :
+             output.baseline_reuse_provenance.
+                 build_cache) {
+
+            if (!proof.valid())
+                continue;
+
+            telemetry->
+                audit_build_cache_baseline_exact_bytes +=
+                    proof.baseline().bytes().size();
+            ++telemetry->
+                audit_build_cache_baseline_exact_sections;
+        }
+
+        telemetry->audit_staging_ns =
+            telemetry->materialize_change_ns +
+            telemetry->compiled_ns +
+            telemetry->roots_ns +
+            telemetry->source_manager_ns +
+            telemetry->change_state_ns +
+            telemetry->build_cache_ns;
+
+        telemetry->audit_validation_ns =
+            telemetry->bind_ns +
+            telemetry->verify_change_state_ns +
+            telemetry->verify_build_cache_ns;
+
         telemetry->internal_ns =
             elapsed(freeze_begin);
+
+        const auto accounted =
+            telemetry->audit_staging_ns +
+            telemetry->audit_validation_ns;
+
+        telemetry->audit_unclassified_ns =
+            telemetry->internal_ns > accounted
+                ? telemetry->internal_ns - accounted
+                : 0;
+    }
 
     return {};
 }

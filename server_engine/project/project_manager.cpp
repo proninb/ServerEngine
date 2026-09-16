@@ -1478,12 +1478,24 @@ status project_manager::save(
             generation_freeze_detail.build_cache_verify_ns;
         output.telemetry.generation_freeze_build_cache_mapped_baseline_bulk_bytes =
             generation_freeze_detail.build_cache_mapped_baseline_bulk_bytes;
+        output.telemetry.generation_freeze_build_cache_mapped_baseline_borrowed_bytes =
+            generation_freeze_detail.build_cache_mapped_baseline_borrowed_bytes;
+        output.telemetry.generation_freeze_build_cache_mapped_baseline_sparse_borrowed_bytes =
+            generation_freeze_detail.build_cache_mapped_baseline_sparse_borrowed_bytes;
+        output.telemetry.generation_freeze_build_cache_mapped_baseline_sparse_directory_borrowed_bytes =
+            generation_freeze_detail.build_cache_mapped_baseline_sparse_directory_borrowed_bytes;
         output.telemetry.generation_freeze_build_cache_mapped_baseline_patch_records =
             generation_freeze_detail.build_cache_mapped_baseline_patch_records;
         output.telemetry.generation_freeze_build_cache_mapped_baseline_append_records =
             generation_freeze_detail.build_cache_mapped_baseline_append_records;
         output.telemetry.generation_freeze_build_cache_mapped_baseline_bulk_sections =
             generation_freeze_detail.build_cache_mapped_baseline_bulk_sections;
+        output.telemetry.generation_freeze_build_cache_mapped_baseline_borrowed_sections =
+            generation_freeze_detail.build_cache_mapped_baseline_borrowed_sections;
+        output.telemetry.generation_freeze_build_cache_mapped_baseline_sparse_borrowed_extents =
+            generation_freeze_detail.build_cache_mapped_baseline_sparse_borrowed_extents;
+        output.telemetry.generation_freeze_build_cache_mapped_baseline_sparse_directory_borrowed_extents =
+            generation_freeze_detail.build_cache_mapped_baseline_sparse_directory_borrowed_extents;
         output.telemetry.generation_freeze_build_cache_provenance_bytes =
             generation_freeze_detail.build_cache_provenance_bytes;
         output.telemetry.generation_freeze_build_cache_provenance_sections =
@@ -1494,6 +1506,44 @@ status project_manager::save(
             generation_freeze_detail.verify_change_state_ns;
         output.telemetry.generation_freeze_verify_build_cache_ns =
             generation_freeze_detail.verify_build_cache_ns;
+        output.telemetry.generation_freeze_audit_staging_ns =
+            generation_freeze_detail.audit_staging_ns;
+        output.telemetry.generation_freeze_audit_validation_ns =
+            generation_freeze_detail.audit_validation_ns;
+        output.telemetry.generation_freeze_audit_unclassified_ns =
+            generation_freeze_detail.audit_unclassified_ns;
+        output.telemetry.generation_freeze_audit_compiled_bytes =
+            generation_freeze_detail.audit_compiled_bytes;
+        output.telemetry.generation_freeze_audit_source_manager_bytes =
+            generation_freeze_detail.audit_source_manager_bytes;
+        output.telemetry.generation_freeze_audit_change_state_bytes =
+            generation_freeze_detail.audit_change_state_bytes;
+        output.telemetry.generation_freeze_audit_build_cache_bytes =
+            generation_freeze_detail.audit_build_cache_bytes;
+        output.telemetry.
+            generation_freeze_audit_source_manager_baseline_direct_borrow_bytes =
+                generation_freeze_detail.
+                    audit_source_manager_baseline_direct_borrow_bytes;
+        output.telemetry.
+            generation_freeze_audit_source_manager_baseline_direct_borrow_sections =
+                generation_freeze_detail.
+                    audit_source_manager_baseline_direct_borrow_sections;
+        output.telemetry.
+            generation_freeze_audit_build_cache_baseline_exact_bytes =
+                generation_freeze_detail.
+                    audit_build_cache_baseline_exact_bytes;
+        output.telemetry.
+            generation_freeze_audit_build_cache_baseline_exact_sections =
+                generation_freeze_detail.
+                    audit_build_cache_baseline_exact_sections;
+        output.telemetry.generation_freeze_audit_compiled_origin =
+            generation_freeze_detail.audit_compiled_origin;
+        output.telemetry.generation_freeze_audit_source_manager_origin =
+            generation_freeze_detail.audit_source_manager_origin;
+        output.telemetry.generation_freeze_audit_change_state_origin =
+            generation_freeze_detail.audit_change_state_origin;
+        output.telemetry.generation_freeze_audit_build_cache_origin =
+            generation_freeze_detail.audit_build_cache_origin;
         output.telemetry.save_total_ns =
             static_cast<std::uint64_t>(
                 std::chrono::duration_cast<

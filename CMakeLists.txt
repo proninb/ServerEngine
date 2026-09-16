@@ -181,6 +181,9 @@ add_test(NAME build_cache_image_deterministic COMMAND server_engine_tests build_
 add_test(NAME build_cache_image_cross_artifact COMMAND server_engine_tests build_cache_image_cross_artifact)
 add_test(NAME build_cache_image_mapped_baseline COMMAND server_engine_tests build_cache_image_mapped_baseline)
 add_test(NAME build_cache_image_incremental_lineage COMMAND server_engine_tests build_cache_image_incremental_lineage)
+add_test(
+    NAME build_cache_generation_section_carrier
+    COMMAND server_engine_tests build_cache_generation_section_carrier)
 add_test(NAME build_cache_image_integrity COMMAND server_engine_tests build_cache_image_integrity)
 add_test(
     NAME frozen_build_cache_capability_rejects_rebound_span

@@ -4,6 +4,7 @@
 #include "../../status.hpp"
 #include "../builder/source_contribution.hpp"
 #include "../graph/graph.hpp"
+#include "../project_generation_segments.hpp"
 #include "../parser/source_environment.hpp"
 #include "../source/source_change_tracker.hpp"
 
@@ -136,10 +137,49 @@ struct build_cache_encode_telemetry final {
     std::uint64_t verify_ns = 0;
 
     std::uint64_t mapped_baseline_bulk_bytes = 0;
+    std::uint64_t mapped_baseline_borrowed_bytes = 0;
+    std::uint64_t mapped_baseline_sparse_borrowed_bytes = 0;
+    std::uint64_t mapped_baseline_sparse_directory_borrowed_bytes = 0;
     std::uint64_t mapped_baseline_patch_records = 0;
     std::uint64_t mapped_baseline_append_records = 0;
     std::uint32_t mapped_baseline_bulk_sections = 0;
+    std::uint32_t mapped_baseline_borrowed_sections = 0;
+    std::uint32_t mapped_baseline_sparse_borrowed_extents = 0;
+    std::uint32_t mapped_baseline_sparse_directory_borrowed_extents = 0;
 };
+
+struct build_cache_encode_borrowed_sections final {
+    std::array<
+        std::span<const std::byte>,
+        build_cache_image_directory_count> sections{};
+
+    [[nodiscard]] bool any() const noexcept {
+        for (const auto value : sections) {
+            if (!value.empty())
+                return true;
+        }
+        return false;
+    }
+};
+
+// D4Q2C2A: partial logical sections may borrow immutable baseline runs while
+// dirty ranges remain owned by the frozen Generation. Extent count is bounded
+// by project_generation_segment_max_extents and failure falls back to the
+// canonical contiguous encoder.
+struct build_cache_encode_sparse_sections final {
+    std::array<
+        project_generation_segment,
+        build_cache_image_directory_count> sections{};
+
+    [[nodiscard]] bool any() const noexcept {
+        for (const auto& value : sections) {
+            if (!value.empty())
+                return true;
+        }
+        return false;
+    }
+};
+
 
 // Mmap-native BUILD-only baseline. The view contains Source bytes, Parser-local
 // interface tables, SourceContribution append arenas, and Builder lineage caches.
@@ -158,6 +198,15 @@ public:
         const std::array<
             std::span<const std::byte>,
             build_cache_image_directory_count>& section_images) noexcept;
+
+    [[nodiscard]] status bind_encoded_mixed(
+        std::span<const std::byte> layout_backing,
+        const build_cache_encode_borrowed_sections& borrowed) noexcept;
+
+    [[nodiscard]] status bind_encoded_sparse(
+        std::span<const std::byte> layout_backing,
+        const build_cache_encode_borrowed_sections& borrowed,
+        const build_cache_encode_sparse_sections& sparse) noexcept;
 
     void reset() noexcept;
 
@@ -402,6 +451,7 @@ private:
         std::uint64_t count = 0;
         std::uint32_t record_size = 0;
         std::uint64_t crc64 = 0;
+        project_generation_segment segment{};
     };
 
     [[nodiscard]] const section_view& section(
@@ -427,8 +477,95 @@ private:
     bool contributions_complete_value = false;
 };
 
+// Storage-neutral physical-section view of one immutable Build Cache
+// Generation. The prefix and each logical section are independent carriers;
+// one section may itself contain multiple scatter/gather extents. This matches
+// the durable sectioned artifact and removes the architectural requirement for
+// one monolithic Build Cache buffer.
+//
+// The class owns no bytes. Every extent must remain immutable and alive for the
+// lifetime of this view.
+class build_cache_generation_segments final {
+public:
+    build_cache_generation_segments() noexcept = default;
+
+    void reset() noexcept;
+
+    // Convenience conversion for the current contiguous encoder. No bytes are
+    // copied: every section extent points directly into image.
+    [[nodiscard]] status bind(
+        std::span<const std::byte> image) noexcept;
+
+    // O(section-count) conversion after build_cache_image_view::bind(image)
+    // already established the contiguous image contract. This avoids a second
+    // complete bind in the SAVE path while still proves that every exposed
+    // section span belongs to the exact supplied image.
+    [[nodiscard]] status bind_validated_contiguous(
+        std::span<const std::byte> image,
+        const build_cache_image_view& validated) noexcept;
+
+    // Native sparse entry point. Prefix geometry is validated against the
+    // logical size and each section carrier, but section bytes are not
+    // materialized or concatenated.
+    [[nodiscard]] status bind_sectioned(
+        std::span<const std::byte> prefix,
+        const std::array<
+            project_generation_segment,
+            build_cache_image_directory_count>& sections,
+        std::size_t logical_size) noexcept;
+
+    [[nodiscard]] status bind_view(
+        build_cache_image_view& output) const noexcept;
+
+    [[nodiscard]] status bind_validated_sections(
+        std::span<const std::byte> layout_backing,
+        const build_cache_image_view& validated,
+        const build_cache_encode_sparse_sections* sparse = nullptr) noexcept;
+
+    [[nodiscard]] project_generation_segment logical_segment(
+        std::span<const std::byte> layout_backing) const noexcept;
+
+    [[nodiscard]] bool valid() const noexcept {
+        return !prefix_value.empty();
+    }
+
+    [[nodiscard]] std::span<const std::byte>
+    prefix() const noexcept {
+        return prefix_value;
+    }
+
+    [[nodiscard]] const project_generation_segment&
+    section(build_cache_image_section kind) const noexcept;
+
+    [[nodiscard]] std::size_t logical_size() const noexcept {
+        return logical_size_value;
+    }
+
+    // Physical bytes exclude canonical zero alignment gaps between section
+    // files. They are prefix + exact section payload bytes.
+    [[nodiscard]] std::size_t physical_size() const noexcept {
+        return physical_size_value;
+    }
+
+    [[nodiscard]] std::size_t physical_extent_count() const noexcept {
+        return physical_extent_count_value;
+    }
+
+private:
+    std::span<const std::byte> prefix_value;
+    std::array<
+        project_generation_segment,
+        build_cache_image_directory_count> sections_value{};
+    std::array<
+        std::uint64_t,
+        build_cache_image_directory_count> section_offsets{};
+    std::size_t logical_size_value = 0;
+    std::size_t physical_size_value = 0;
+    std::size_t physical_extent_count_value = 0;
+};
+
 // Deterministic field-wise little-endian staging encoder for the persisted
-// Build Cache v2 image.
+// Build Cache v4 image.
 // It walks dense source_id and existing append-arena order only; no sort or
 // runtime hash-table traversal is used.
 [[nodiscard]] status encode_build_cache_image(
@@ -445,6 +582,8 @@ private:
     const source_change_capture& change_capture,
     std::vector<std::byte>& output,
     build_cache_encode_telemetry* telemetry,
-    build_cache_encode_provenance* provenance = nullptr) noexcept;
+    build_cache_encode_provenance* provenance = nullptr,
+    build_cache_encode_borrowed_sections* borrowed = nullptr,
+    build_cache_encode_sparse_sections* sparse = nullptr) noexcept;
 
 } // namespace cw::server

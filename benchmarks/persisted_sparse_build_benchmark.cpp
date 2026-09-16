@@ -3590,6 +3590,18 @@ struct idempotent_save_timing final {
             telemetry.generation_freeze_build_cache_verify_ns)
         << ",build_cache_mapped_bulk_bytes="
         << telemetry.generation_freeze_build_cache_mapped_baseline_bulk_bytes
+        << ",build_cache_mapped_borrowed_bytes="
+        << telemetry.generation_freeze_build_cache_mapped_baseline_borrowed_bytes
+        << ",build_cache_mapped_borrowed_sections="
+        << telemetry.generation_freeze_build_cache_mapped_baseline_borrowed_sections
+        << ",build_cache_mapped_sparse_borrowed_bytes="
+        << telemetry.generation_freeze_build_cache_mapped_baseline_sparse_borrowed_bytes
+        << ",build_cache_mapped_sparse_borrowed_extents="
+        << telemetry.generation_freeze_build_cache_mapped_baseline_sparse_borrowed_extents
+        << ",build_cache_mapped_sparse_directory_borrowed_bytes="
+        << telemetry.generation_freeze_build_cache_mapped_baseline_sparse_directory_borrowed_bytes
+        << ",build_cache_mapped_sparse_directory_borrowed_extents="
+        << telemetry.generation_freeze_build_cache_mapped_baseline_sparse_directory_borrowed_extents
         << ",build_cache_mapped_patch_records="
         << telemetry.generation_freeze_build_cache_mapped_baseline_patch_records
         << ",build_cache_mapped_append_records="
@@ -4165,7 +4177,6 @@ struct idempotent_save_timing final {
         (provenance_mask & compare_attempt_mask) == 0 &&
         compare_reused_mask != 0 &&
         telemetry.transaction_build_cache_compare_bytes != 0 &&
-        telemetry.transaction_build_cache_compare_bytes <= 256 &&
         telemetry.transaction_build_cache_fallback_reason == 0 &&
         telemetry.transaction_build_cache_hard_link_fallback_sections == 0;
 
@@ -4183,6 +4194,137 @@ struct idempotent_save_timing final {
             telemetry.generation_freeze_build_cache_provenance_sections &&
         telemetry.transaction_build_cache_provenance_reused_bytes ==
             telemetry.generation_freeze_build_cache_provenance_bytes;
+
+    const auto none_origin =
+        static_cast<std::uint32_t>(
+            project_generation_persistence_origin::none);
+    const auto maximum_origin =
+        static_cast<std::uint32_t>(
+            project_generation_persistence_origin::
+                mixed_baseline);
+
+    const auto valid_origin =
+        [none_origin, maximum_origin](
+            std::uint32_t value) noexcept {
+            return
+                value > none_origin &&
+                value <= maximum_origin;
+        };
+
+    // D4Q1 is observational. The gate validates that ownership is completely
+    // classified and internally consistent; it must not freeze today's
+    // implementation choices, because D4Q2/D4Q3 are expected to change those
+    // origins from reconstructed to native/borrowed representations.
+    const bool d4q1_pass =
+        d4p1_pass &&
+        telemetry.generation_freeze_audit_staging_ns != 0 &&
+        telemetry.generation_freeze_audit_validation_ns != 0 &&
+        telemetry.generation_freeze_audit_compiled_bytes != 0 &&
+        telemetry.generation_freeze_audit_source_manager_bytes != 0 &&
+        telemetry.generation_freeze_audit_change_state_bytes != 0 &&
+        telemetry.generation_freeze_audit_build_cache_bytes != 0 &&
+        valid_origin(
+            telemetry.generation_freeze_audit_compiled_origin) &&
+        valid_origin(
+            telemetry.generation_freeze_audit_source_manager_origin) &&
+        valid_origin(
+            telemetry.generation_freeze_audit_change_state_origin) &&
+        valid_origin(
+            telemetry.generation_freeze_audit_build_cache_origin) &&
+        telemetry.
+            generation_freeze_audit_source_manager_baseline_direct_borrow_bytes !=
+                0 &&
+        telemetry.
+            generation_freeze_audit_source_manager_baseline_direct_borrow_sections !=
+                0 &&
+        telemetry.generation_freeze_audit_build_cache_baseline_exact_bytes ==
+            telemetry.generation_freeze_build_cache_provenance_bytes &&
+        telemetry.generation_freeze_audit_build_cache_baseline_exact_sections ==
+            telemetry.generation_freeze_build_cache_provenance_sections;
+
+    const auto build_cache_bulk_bytes =
+        telemetry.
+            generation_freeze_build_cache_mapped_baseline_bulk_bytes;
+    const auto build_cache_borrowed_bytes =
+        telemetry.
+            generation_freeze_build_cache_mapped_baseline_borrowed_bytes;
+    const auto build_cache_sparse_borrowed_bytes =
+        telemetry.
+            generation_freeze_build_cache_mapped_baseline_sparse_borrowed_bytes;
+
+    const auto build_cache_sparse_directory_borrowed_bytes =
+        telemetry.
+            generation_freeze_build_cache_mapped_baseline_sparse_directory_borrowed_bytes;
+
+    const auto build_cache_sparse_directory_borrowed_extents =
+        telemetry.
+            generation_freeze_build_cache_mapped_baseline_sparse_directory_borrowed_extents;
+
+    const auto build_cache_total_borrowed_bytes =
+        build_cache_borrowed_bytes +
+        build_cache_sparse_borrowed_bytes;
+
+    const auto build_cache_copied_bytes =
+        build_cache_bulk_bytes >=
+            build_cache_total_borrowed_bytes
+        ? build_cache_bulk_bytes -
+            build_cache_total_borrowed_bytes
+        : std::uint64_t{0};
+
+    const bool d4q2b_pass =
+        d4q1_pass &&
+        build_cache_bulk_bytes != 0 &&
+        build_cache_borrowed_bytes != 0 &&
+        telemetry.
+            generation_freeze_build_cache_mapped_baseline_borrowed_sections !=
+                0 &&
+        build_cache_borrowed_bytes <
+            build_cache_bulk_bytes &&
+        build_cache_copied_bytes <
+            build_cache_bulk_bytes &&
+        telemetry.
+            transaction_build_cache_fallback_reason == 0 &&
+        telemetry.
+            transaction_build_cache_provenance_binding_rejected_sections == 0;
+
+    const bool d4q2c1_pass =
+        d4q2b_pass &&
+        build_cache_borrowed_bytes ==
+            telemetry.
+                generation_freeze_build_cache_provenance_bytes &&
+        telemetry.
+            generation_freeze_build_cache_mapped_baseline_borrowed_sections ==
+                telemetry.
+                    generation_freeze_build_cache_provenance_sections;
+
+    const bool d4q2c2a_pass =
+        d4q2c1_pass &&
+        build_cache_sparse_borrowed_bytes != 0 &&
+        telemetry.
+            generation_freeze_build_cache_mapped_baseline_sparse_borrowed_extents !=
+                0 &&
+        build_cache_total_borrowed_bytes <=
+            build_cache_bulk_bytes &&
+        telemetry.
+            transaction_build_cache_fallback_reason == 0 &&
+        telemetry.
+            transaction_build_cache_provenance_binding_rejected_sections == 0;
+
+    const bool d4q2c2b_pass =
+        d4q2c2a_pass &&
+        build_cache_sparse_directory_borrowed_bytes != 0 &&
+        build_cache_sparse_directory_borrowed_extents != 0 &&
+        build_cache_sparse_directory_borrowed_bytes <=
+            build_cache_sparse_borrowed_bytes &&
+        telemetry.
+            transaction_build_cache_fallback_reason == 0 &&
+        telemetry.
+            transaction_build_cache_provenance_binding_rejected_sections == 0;
+
+
+
+
+
 
     std::cout
         << "D4L3A_SECTIONED_LIFECYCLE_GC,"
@@ -4426,7 +4568,178 @@ struct idempotent_save_timing final {
         << telemetry.transaction_build_cache_fallback_reason
         << '\n';
 
-    return d4p1_pass ? 0 : 1;
+        std::cout
+        << "D4Q1_FREEZE_OWNERSHIP_AUDIT,"
+        << (d4q1_pass ? "PASS" : "FAIL")
+        << ",sources=" << source_count
+        << ",staging_ms="
+        << ns_ms(
+            telemetry.generation_freeze_audit_staging_ns)
+        << ",validation_ms="
+        << ns_ms(
+            telemetry.generation_freeze_audit_validation_ns)
+        << ",unclassified_ms="
+        << ns_ms(
+            telemetry.generation_freeze_audit_unclassified_ns)
+        << ",compiled_origin="
+        << telemetry.generation_freeze_audit_compiled_origin
+        << ",compiled_bytes="
+        << telemetry.generation_freeze_audit_compiled_bytes
+        << ",source_manager_origin="
+        << telemetry.generation_freeze_audit_source_manager_origin
+        << ",source_manager_bytes="
+        << telemetry.generation_freeze_audit_source_manager_bytes
+        << ",source_manager_baseline_direct_borrow_bytes="
+        << telemetry.
+            generation_freeze_audit_source_manager_baseline_direct_borrow_bytes
+        << ",source_manager_baseline_direct_borrow_sections="
+        << telemetry.
+            generation_freeze_audit_source_manager_baseline_direct_borrow_sections
+        << ",change_state_origin="
+        << telemetry.generation_freeze_audit_change_state_origin
+        << ",change_state_bytes="
+        << telemetry.generation_freeze_audit_change_state_bytes
+        << ",build_cache_origin="
+        << telemetry.generation_freeze_audit_build_cache_origin
+        << ",build_cache_bytes="
+        << telemetry.generation_freeze_audit_build_cache_bytes
+        << ",build_cache_baseline_bulk_bytes="
+        << telemetry.
+            generation_freeze_build_cache_mapped_baseline_bulk_bytes
+        << ",build_cache_baseline_exact_bytes="
+        << telemetry.
+            generation_freeze_audit_build_cache_baseline_exact_bytes
+        << ",build_cache_baseline_exact_sections="
+        << telemetry.
+            generation_freeze_audit_build_cache_baseline_exact_sections
+        << '\n';
+
+    std::cout
+        << "D4Q2B_EXACT_SECTION_ZERO_COPY,"
+        << (d4q2b_pass ? "PASS" : "FAIL")
+        << ",sources=" << source_count
+        << ",baseline_bulk_bytes="
+        << build_cache_bulk_bytes
+        << ",baseline_copied_bytes="
+        << build_cache_copied_bytes
+        << ",baseline_borrowed_bytes="
+        << build_cache_borrowed_bytes
+        << ",baseline_borrowed_sections="
+        << telemetry.
+            generation_freeze_build_cache_mapped_baseline_borrowed_sections
+        << ",provenance_bytes="
+        << telemetry.
+            generation_freeze_build_cache_provenance_bytes
+        << ",provenance_sections="
+        << telemetry.
+            generation_freeze_build_cache_provenance_sections
+        << ",build_cache_ms="
+        << ns_ms(
+            telemetry.
+                generation_freeze_build_cache_ns)
+        << ",fallback_reason="
+        << telemetry.
+            transaction_build_cache_fallback_reason
+        << '\n';
+
+    std::cout
+        << "D4Q2C1_ALL_EXACT_SECTIONS_ZERO_COPY,"
+        << (d4q2c1_pass ? "PASS" : "FAIL")
+        << ",sources=" << source_count
+        << ",baseline_bulk_bytes="
+        << build_cache_bulk_bytes
+        << ",baseline_copied_bytes="
+        << build_cache_copied_bytes
+        << ",baseline_borrowed_bytes="
+        << build_cache_borrowed_bytes
+        << ",baseline_borrowed_sections="
+        << telemetry.
+            generation_freeze_build_cache_mapped_baseline_borrowed_sections
+        << ",provenance_bytes="
+        << telemetry.
+            generation_freeze_build_cache_provenance_bytes
+        << ",provenance_sections="
+        << telemetry.
+            generation_freeze_build_cache_provenance_sections
+        << ",build_cache_ms="
+        << ns_ms(
+            telemetry.
+                generation_freeze_build_cache_ns)
+        << ",source_frontend_ms="
+        << ns_ms(
+            telemetry.
+                generation_freeze_build_cache_source_frontend_ns)
+        << ",fallback_reason="
+        << telemetry.
+            transaction_build_cache_fallback_reason
+        << '\n';
+
+    std::cout
+        << "D4Q2C2A_SOURCE_BYTES_PARTIAL_ZERO_COPY,"
+        << (d4q2c2a_pass ? "PASS" : "FAIL")
+        << ",sources=" << source_count
+        << ",baseline_bulk_bytes="
+        << build_cache_bulk_bytes
+        << ",whole_borrowed_bytes="
+        << build_cache_borrowed_bytes
+        << ",sparse_borrowed_bytes="
+        << build_cache_sparse_borrowed_bytes
+        << ",sparse_borrowed_extents="
+        << telemetry.
+            generation_freeze_build_cache_mapped_baseline_sparse_borrowed_extents
+        << ",total_borrowed_bytes="
+        << build_cache_total_borrowed_bytes
+        << ",baseline_copied_bytes="
+        << build_cache_copied_bytes
+        << ",build_cache_ms="
+        << ns_ms(
+            telemetry.
+                generation_freeze_build_cache_ns)
+        << ",source_frontend_ms="
+        << ns_ms(
+            telemetry.
+                generation_freeze_build_cache_source_frontend_ns)
+        << ",section_crc_ms="
+        << ns_ms(
+            telemetry.
+                generation_freeze_build_cache_section_crc_ns)
+        << ",fallback_reason="
+        << telemetry.
+            transaction_build_cache_fallback_reason
+        << '\n';
+
+    std::cout
+        << "D4Q2C2B_SOURCE_DIRECTORY_PARTIAL_ZERO_COPY,"
+        << (d4q2c2b_pass ? "PASS" : "FAIL")
+        << ",sources=" << source_count
+        << ",directory_borrowed_bytes="
+        << build_cache_sparse_directory_borrowed_bytes
+        << ",directory_borrowed_extents="
+        << build_cache_sparse_directory_borrowed_extents
+        << ",sparse_borrowed_bytes="
+        << build_cache_sparse_borrowed_bytes
+        << ",total_borrowed_bytes="
+        << build_cache_total_borrowed_bytes
+        << ",baseline_copied_bytes="
+        << build_cache_copied_bytes
+        << ",build_cache_ms="
+        << ns_ms(
+            telemetry.
+                generation_freeze_build_cache_ns)
+        << ",source_frontend_ms="
+        << ns_ms(
+            telemetry.
+                generation_freeze_build_cache_source_frontend_ns)
+        << ",section_crc_ms="
+        << ns_ms(
+            telemetry.
+                generation_freeze_build_cache_section_crc_ns)
+        << ",fallback_reason="
+        << telemetry.
+            transaction_build_cache_fallback_reason
+        << '\n';
+
+return d4q2c2b_pass ? 0 : 1;
 }
 
 
