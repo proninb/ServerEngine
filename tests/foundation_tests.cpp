@@ -11,6 +11,7 @@
 #include "../server_engine/project/frontend/source_facts_validation.hpp"
 #include "../server_engine/project/frontend/include_discovery.hpp"
 #include "../server_engine/project/frontend/source_frontend_generation.hpp"
+#include "../server_engine/project/frontend/source_frontend_block_store.hpp"
 #include "../server_engine/project/source/source_manager.hpp"
 #include "../server_engine/project/source/source_hash.hpp"
 #include "../server_engine/project/parser/lexer.hpp"
@@ -6401,6 +6402,622 @@ bool test_project_build_without_baseline_full_no_save() {
     return pass;
 }
 
+
+bool test_source_frontend_block_store() {
+    project_configuration configuration;
+    project_context context{std::move(configuration)};
+
+    identity_ref scope;
+    identity_ref type;
+    identity_ref object;
+
+    if (!context.resolve_declaration(
+            context.identity_root(),
+            "BlockStoreScope",
+            identity_kind::namespace_scope,
+            scope).ok() ||
+        !context.resolve_declaration(
+            scope,
+            "BlockStoreType",
+            identity_kind::type,
+            type).ok() ||
+        !context.resolve_declaration(
+            scope,
+            "BlockStoreObject",
+            identity_kind::object,
+            object).ok()) {
+        return false;
+    }
+
+    string_id type_name;
+    string_id object_name;
+    string_id member_name;
+
+    if (!context.intern_string(
+            "BlockStoreType",
+            type_name).ok() ||
+        !context.intern_string(
+            "BlockStoreObject",
+            object_name).ok() ||
+        !context.intern_string(
+            "member",
+            member_name).ok()) {
+        return false;
+    }
+
+    const std::array local_types{type};
+
+    const std::array type_slots{
+        source_interface_type_slot{
+            scope,
+            type_name,
+            type,
+        },
+    };
+
+    const std::array object_slots{
+        source_interface_object_slot{
+            scope,
+            object_name,
+            object,
+            type,
+        },
+    };
+
+    const std::array member_slots{
+        source_interface_member_slot{
+            type,
+            member_name,
+            member_index::from_zero_based(2),
+        },
+    };
+
+    const source_interface_data_view data{
+        local_types,
+        type_slots,
+        object_slots,
+        member_slots,
+    };
+
+    // Small pages force repeated page and directory growth while the first
+    // block's published spans must remain stable.
+    source_frontend_block_store store{64};
+
+    source_frontend_block_ref first;
+    if (!store.append(
+            source_id{1},
+            data,
+            first).ok() ||
+        !first ||
+        store.block_count() != 1 ||
+        store.source(first) != source_id{1}) {
+        return false;
+    }
+
+    source_interface_data_view before;
+    if (!store.view(first, before).ok() ||
+        before.local_types.size() != 1 ||
+        before.type_slots.size() != 1 ||
+        before.object_slots.size() != 1 ||
+        before.member_slots.size() != 1) {
+        return false;
+    }
+
+    const auto* local_address =
+        before.local_types.data();
+    const auto* type_address =
+        before.type_slots.data();
+    const auto* object_address =
+        before.object_slots.data();
+    const auto* member_address =
+        before.member_slots.data();
+
+    for (std::uint32_t index = 2;
+         index <= 1024;
+         ++index) {
+
+        source_frontend_block_ref next;
+        if (!store.append(
+                source_id{index},
+                data,
+                next).ok() ||
+            !next ||
+            store.source(next) != source_id{index}) {
+            return false;
+        }
+    }
+
+    source_interface_data_view after;
+    if (!store.view(first, after).ok())
+        return false;
+
+    if (after.local_types.data() != local_address ||
+        after.type_slots.data() != type_address ||
+        after.object_slots.data() != object_address ||
+        after.member_slots.data() != member_address ||
+        after.local_types[0] != type ||
+        after.type_slots[0].identity != type ||
+        after.object_slots[0].identity != object ||
+        after.object_slots[0].named_type != type ||
+        after.member_slots[0].type != type ||
+        after.member_slots[0].index !=
+            member_index::from_zero_based(2) ||
+        store.block_count() != 1024) {
+        return false;
+    }
+
+    source_interface_data_view missing;
+    if (store.view(
+            source_frontend_block_ref{},
+            missing).code !=
+        status_code::not_found) {
+        return false;
+    }
+
+    store.clear();
+
+    return
+        store.block_count() == 0 &&
+        store.source(first) == source_id{};
+}
+
+
+bool test_source_frontend_cache_native_block_publication() {
+    project_configuration configuration;
+    project_context context{std::move(configuration)};
+
+    identity_ref type;
+    if (!context.resolve_declaration(
+            context.identity_root(),
+            "NativePublishedType",
+            identity_kind::type,
+            type).ok() ||
+        !type) {
+        return false;
+    }
+
+    constexpr std::string_view text =
+        "struct NativePublishedType {};";
+
+    const std::array<source_namespace_fact, 0> namespaces{};
+    const std::array<source_member_fact, 0> members{};
+    const std::array<source_type_modifier, 0> modifiers{};
+    const std::array records{
+        source_record_fact{
+            type,
+            source_fact_range{0, 0},
+            source_span{
+                0,
+                static_cast<std::uint32_t>(text.size())},
+            source_record_declaration_kind::definition,
+            source_record_kind::struct_type,
+        },
+    };
+
+    const source_facts facts{
+        source_id{1},
+        text,
+        namespaces,
+        records,
+        members,
+        modifiers,
+    };
+
+    auto first =
+        std::make_unique<source_interface>();
+
+    // Mirrors full REBUILD: compact persistence is intentionally omitted
+    // initially and reconstructed by the existing v4 publication path.
+    if (!first->initialize(
+            facts,
+            context.identity_metadata(),
+            {},
+            false).ok()) {
+        return false;
+    }
+
+    source_frontend_cache cache;
+    auto full = cache.begin_update(true);
+
+    if (!full.replace(
+            source_id{1},
+            std::move(first)).ok() ||
+        !full.prepare_publish(1).ok()) {
+        return false;
+    }
+
+    full.publish_prepared();
+
+    if (!cache.complete() ||
+        !cache.native_frontend_block_storage_complete()) {
+        return false;
+    }
+
+    source_frontend_block_ref block;
+    source_interface_data_view block_data;
+
+    if (!cache.native_frontend_block(
+            source_id{1},
+            block).ok() ||
+        !block ||
+        !cache.native_frontend_block_view(
+            source_id{1},
+            block_data).ok()) {
+        return false;
+    }
+
+    if (block_data.local_types.size() != 1 ||
+        block_data.local_types[0] != type ||
+        block_data.type_slots.size() != 1 ||
+        block_data.type_slots[0].identity != type) {
+        return false;
+    }
+
+    auto replacement =
+        std::make_unique<source_interface>();
+
+    if (!replacement->initialize(
+            facts,
+            context.identity_metadata(),
+            {},
+            true).ok()) {
+        return false;
+    }
+
+    auto sparse = cache.begin_update(false);
+
+    if (!sparse.replace(
+            source_id{1},
+            std::move(replacement)).ok() ||
+        !sparse.prepare_publish(1).ok()) {
+        return false;
+    }
+
+    sparse.publish_prepared();
+
+    source_frontend_block_ref updated;
+    return
+        cache.complete() &&
+        cache.native_frontend_block_storage_complete() &&
+        cache.native_frontend_block(
+            source_id{1},
+            updated).ok() &&
+        updated &&
+        updated != block;
+}
+
+
+bool test_source_frontend_cache_sparse_native_block_publication() {
+    project_configuration configuration;
+    project_context context{std::move(configuration)};
+
+    identity_ref type_a;
+    identity_ref type_b;
+    identity_ref type_c;
+
+    if (!context.resolve_declaration(
+            context.identity_root(),
+            "NativeSparseA",
+            identity_kind::type,
+            type_a).ok() ||
+        !context.resolve_declaration(
+            context.identity_root(),
+            "NativeSparseB",
+            identity_kind::type,
+            type_b).ok() ||
+        !context.resolve_declaration(
+            context.identity_root(),
+            "NativeSparseC",
+            identity_kind::type,
+            type_c).ok()) {
+        return false;
+    }
+
+    constexpr std::string_view text_a =
+        "struct NativeSparseA {};";
+    constexpr std::string_view text_b =
+        "struct NativeSparseB {};";
+    constexpr std::string_view text_ac =
+        "struct NativeSparseA {}; struct NativeSparseC {};";
+
+    const std::array<source_namespace_fact, 0> namespaces{};
+    const std::array<source_member_fact, 0> members{};
+    const std::array<source_type_modifier, 0> modifiers{};
+
+    const std::array records_a{
+        source_record_fact{
+            type_a,
+            source_fact_range{0, 0},
+            source_span{
+                0,
+                static_cast<std::uint32_t>(
+                    text_a.size())},
+            source_record_declaration_kind::definition,
+            source_record_kind::struct_type,
+        },
+    };
+
+    const std::array records_b{
+        source_record_fact{
+            type_b,
+            source_fact_range{0, 0},
+            source_span{
+                0,
+                static_cast<std::uint32_t>(
+                    text_b.size())},
+            source_record_declaration_kind::definition,
+            source_record_kind::struct_type,
+        },
+    };
+
+    const std::array records_ac{
+        source_record_fact{
+            type_a,
+            source_fact_range{0, 0},
+            source_span{
+                0,
+                static_cast<std::uint32_t>(
+                    text_a.size())},
+            source_record_declaration_kind::definition,
+            source_record_kind::struct_type,
+        },
+        source_record_fact{
+            type_c,
+            source_fact_range{0, 0},
+            source_span{
+                static_cast<std::uint32_t>(
+                    text_a.size() + 1),
+                static_cast<std::uint32_t>(
+                    text_ac.size() -
+                    text_a.size() - 1)},
+            source_record_declaration_kind::definition,
+            source_record_kind::struct_type,
+        },
+    };
+
+    const source_facts facts_a{
+        source_id{1},
+        text_a,
+        namespaces,
+        records_a,
+        members,
+        modifiers,
+    };
+
+    const source_facts facts_b{
+        source_id{2},
+        text_b,
+        namespaces,
+        records_b,
+        members,
+        modifiers,
+    };
+
+    const source_facts facts_ac{
+        source_id{1},
+        text_ac,
+        namespaces,
+        records_ac,
+        members,
+        modifiers,
+    };
+
+    auto interface_a =
+        std::make_unique<source_interface>();
+    auto interface_b =
+        std::make_unique<source_interface>();
+
+    if (!interface_a->initialize(
+            facts_a,
+            context.identity_metadata(),
+            {},
+            false).ok() ||
+        !interface_b->initialize(
+            facts_b,
+            context.identity_metadata(),
+            {},
+            false).ok()) {
+        return false;
+    }
+
+    source_frontend_cache cache;
+    auto full = cache.begin_update(true);
+
+    if (!full.replace(
+            source_id{1},
+            std::move(interface_a)).ok() ||
+        !full.replace(
+            source_id{2},
+            std::move(interface_b)).ok() ||
+        !full.prepare_publish(2).ok()) {
+        return false;
+    }
+
+    full.publish_prepared();
+
+    source_frontend_block_ref before_a;
+    source_frontend_block_ref before_b;
+
+    if (!cache.native_frontend_block_storage_complete() ||
+        !cache.native_frontend_block(
+            source_id{1},
+            before_a).ok() ||
+        !cache.native_frontend_block(
+            source_id{2},
+            before_b).ok()) {
+        return false;
+    }
+
+    auto replacement_a =
+        std::make_unique<source_interface>();
+
+    if (!replacement_a->initialize(
+            facts_ac,
+            context.identity_metadata(),
+            {},
+            true).ok()) {
+        return false;
+    }
+
+    auto sparse = cache.begin_update(false);
+
+    if (!sparse.replace(
+            source_id{1},
+            std::move(replacement_a)).ok() ||
+        !sparse.prepare_publish(2).ok()) {
+        return false;
+    }
+
+    sparse.publish_prepared();
+
+    source_frontend_block_ref after_a;
+    source_frontend_block_ref after_b;
+    source_interface_data_view data_a;
+    source_interface_data_view data_b;
+
+    if (!cache.native_frontend_block_storage_complete() ||
+        !cache.native_frontend_block(
+            source_id{1},
+            after_a).ok() ||
+        !cache.native_frontend_block(
+            source_id{2},
+            after_b).ok() ||
+        !cache.native_frontend_block_view(
+            source_id{1},
+            data_a).ok() ||
+        !cache.native_frontend_block_view(
+            source_id{2},
+            data_b).ok()) {
+        return false;
+    }
+
+    return
+        after_a != before_a &&
+        after_b == before_b &&
+        data_a.local_types.size() == 2 &&
+        data_a.local_types[0] == type_a &&
+        data_a.local_types[1] == type_c &&
+        data_b.local_types.size() == 1 &&
+        data_b.local_types[0] == type_b;
+}
+
+
+bool test_source_frontend_cache_baseline_native_block_borrow() {
+    build_cache_fixture fixture;
+    if (!prepare_build_cache_fixture(fixture))
+        return false;
+
+    const auto cleanup = [&fixture] {
+        std::error_code error;
+        std::filesystem::remove_all(
+            fixture.directory,
+            error);
+    };
+
+    std::vector<std::byte> compiled_bytes;
+    std::vector<std::byte> source_bytes;
+    std::vector<std::byte> cache_bytes;
+
+    if (!encode_build_cache_correlated_images(
+            fixture,
+            compiled_bytes,
+            source_bytes,
+            cache_bytes)) {
+        cleanup();
+        return false;
+    }
+
+    source_manager_image_view sources;
+    build_cache_image_view cache;
+
+    if (!sources.bind(source_bytes).ok() ||
+        !cache.bind(cache_bytes).ok()) {
+        cleanup();
+        return false;
+    }
+
+    source_frontend_cache frontend{
+        cache,
+        sources};
+
+    source_frontend_block_descriptor
+        dependency_before;
+    source_frontend_block_descriptor
+        root_before;
+
+    if (!frontend.native_frontend_block_descriptor(
+            fixture.dependency_source,
+            dependency_before).ok() ||
+        !frontend.native_frontend_block_descriptor(
+            fixture.root_source,
+            root_before).ok() ||
+        dependency_before.origin !=
+            source_frontend_block_origin::baseline_borrowed ||
+        root_before.origin !=
+            source_frontend_block_origin::baseline_borrowed ||
+        dependency_before.block ||
+        root_before.block) {
+        cleanup();
+        return false;
+    }
+
+    auto replacement =
+        std::make_unique<source_interface>();
+
+    if (!replacement->initialize_persisted(
+            cache,
+            fixture.dependency_source,
+            {}).ok()) {
+        cleanup();
+        return false;
+    }
+
+    auto update =
+        frontend.begin_update(false);
+
+    if (!update.replace(
+            fixture.dependency_source,
+            std::move(replacement)).ok() ||
+        !update.prepare_publish(
+            sources.source_count()).ok()) {
+        cleanup();
+        return false;
+    }
+
+    update.publish_prepared();
+
+    source_frontend_block_descriptor
+        dependency_after;
+    source_frontend_block_descriptor
+        root_after;
+    source_interface_data_view owned_data;
+
+    const bool pass =
+        frontend.native_frontend_block_descriptor(
+            fixture.dependency_source,
+            dependency_after).ok() &&
+        frontend.native_frontend_block_descriptor(
+            fixture.root_source,
+            root_after).ok() &&
+        dependency_after.origin ==
+            source_frontend_block_origin::generation_owned &&
+        dependency_after.block &&
+        root_after.origin ==
+            source_frontend_block_origin::baseline_borrowed &&
+        !root_after.block &&
+        frontend.native_frontend_block_view(
+            fixture.dependency_source,
+            owned_data).ok() &&
+        !owned_data.local_types.empty() &&
+        frontend.native_frontend_block_view(
+            fixture.root_source,
+            owned_data).code ==
+            status_code::not_available;
+
+    cleanup();
+    return pass;
+}
+
 using test_function = bool (*)();
 
 struct test_case {
@@ -6420,6 +7037,18 @@ constexpr std::array tests{
     test_case{"source_facts_validation", &test_source_facts_validation},
     test_case{"source_facts_enum_validation", &test_source_facts_enum_validation},
     test_case{"source_facts_order_contract", &test_source_facts_order_contract},
+    test_case{
+        "source_frontend_block_store",
+        &test_source_frontend_block_store},
+    test_case{
+        "source_frontend_cache_native_block_publication",
+        &test_source_frontend_cache_native_block_publication},
+    test_case{
+        "source_frontend_cache_sparse_native_block_publication",
+        &test_source_frontend_cache_sparse_native_block_publication},
+    test_case{
+        "source_frontend_cache_baseline_native_block_borrow",
+        &test_source_frontend_cache_baseline_native_block_borrow},
     test_case{"source_hash_sha256", &test_source_hash_sha256},
     test_case{"source_snapshot_immutability", &test_source_snapshot_immutability},
     test_case{"source_manager_transactional_identity", &test_source_manager_transactional_identity},

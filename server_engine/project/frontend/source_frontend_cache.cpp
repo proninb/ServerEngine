@@ -393,7 +393,209 @@ persistence_record_of(
 }
 
 
+[[nodiscard]] status build_generation_frontend_blocks(
+    const std::vector<std::unique_ptr<source_interface>>& interfaces,
+    std::size_t source_count,
+    source_frontend_block_store& blocks,
+    std::vector<source_frontend_block_ref>& refs) noexcept {
+
+    blocks.clear();
+    refs.clear();
+
+    if (source_count >
+        static_cast<std::size_t>(
+            (std::numeric_limits<std::uint32_t>::max)())) {
+        return {status_code::not_available};
+    }
+
+    try {
+        refs.resize(source_count);
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+
+    for (std::size_t index = 0;
+         index < source_count;
+         ++index) {
+
+        if (index >= interfaces.size()) {
+            blocks.clear();
+            refs.clear();
+            return {status_code::initialization_failed};
+        }
+
+        const auto* interface_value =
+            interfaces[index].get();
+
+        if (interface_value == nullptr)
+            continue;
+
+        const auto counts =
+            interface_value->persistence_counts();
+        const auto data =
+            interface_value->persistence_data_view();
+
+        if (data.local_types.size() != counts.local_types ||
+            data.type_slots.size() != counts.type_slots ||
+            data.object_slots.size() != counts.object_slots ||
+            data.member_slots.size() != counts.member_slots) {
+
+            blocks.clear();
+            refs.clear();
+            return {status_code::initialization_failed};
+        }
+
+        source_frontend_block_ref block;
+        const auto result =
+            blocks.append(
+                source_id{
+                    static_cast<std::uint32_t>(
+                        index + 1)},
+                data,
+                block);
+
+        if (!result.ok()) {
+            blocks.clear();
+            refs.clear();
+            return result;
+        }
+
+        refs[index] = block;
+    }
+
+    return {};
+}
+
 } // namespace
+
+
+status source_frontend_cache::native_frontend_block(
+    source_id source,
+    source_frontend_block_ref& output) const noexcept {
+
+    output = {};
+
+    if (!source ||
+        static_cast<std::size_t>(source.value()) >
+            logical_source_count) {
+        return {status_code::not_found};
+    }
+
+    if (!native_frontend_block_storage_complete())
+        return {status_code::not_available};
+
+    const auto index =
+        static_cast<std::size_t>(source.value() - 1);
+
+    const auto block =
+        frontend_block_refs[index];
+
+    if (!block)
+        return {status_code::not_found};
+
+    output = block;
+    return {};
+}
+
+
+status source_frontend_cache::native_frontend_block_descriptor(
+    source_id source,
+    source_frontend_block_descriptor& output) const noexcept {
+
+    output = {};
+
+    if (!source ||
+        static_cast<std::size_t>(source.value()) >
+            logical_source_count) {
+        return {status_code::not_found};
+    }
+
+    if (baseline_cache == nullptr) {
+        source_frontend_block_ref block;
+        const auto result =
+            native_frontend_block(
+                source,
+                block);
+
+        if (!result.ok())
+            return result;
+
+        output.origin =
+            source_frontend_block_origin::generation_owned;
+        output.source = source;
+        output.block = block;
+        return {};
+    }
+
+    if (const auto* item = find_overlay(source);
+        item != nullptr) {
+
+        if (!item->resolved)
+            return {status_code::invalid_state};
+
+        if (item->native_block_overrides_baseline) {
+            if (!item->native_block)
+                return {status_code::not_found};
+
+            output.origin =
+                source_frontend_block_origin::generation_owned;
+            output.source = source;
+            output.block = item->native_block;
+            return {};
+        }
+    }
+
+    if (static_cast<std::size_t>(source.value()) >
+        baseline_source_count) {
+        return {status_code::not_found};
+    }
+
+    build_cache_source_record persisted;
+    const auto result =
+        baseline_cache->source(
+            source,
+            persisted);
+
+    if (!result.ok())
+        return result;
+
+    if (!persisted.frontend_present)
+        return {status_code::not_found};
+
+    output.origin =
+        source_frontend_block_origin::baseline_borrowed;
+    output.source = source;
+    return {};
+}
+
+status source_frontend_cache::native_frontend_block_view(
+    source_id source,
+    source_interface_data_view& output) const noexcept {
+
+    output = {};
+
+    source_frontend_block_descriptor descriptor;
+    const auto result =
+        native_frontend_block_descriptor(
+            source,
+            descriptor);
+
+    if (!result.ok())
+        return result;
+
+    if (descriptor.origin !=
+        source_frontend_block_origin::generation_owned) {
+        return {status_code::not_available};
+    }
+
+    return frontend_blocks.view(
+        descriptor.block,
+        output);
+}
 
 source_frontend_cache::source_frontend_cache(
     const build_cache_image_view& baseline_cache_value,
@@ -502,7 +704,9 @@ source_frontend_cache::overlay_entry* source_frontend_cache::publish_overlay(
     overlay.push_back(overlay_entry{
         source,
         std::move(interface_value),
-        resolved_value});
+        {},
+        resolved_value,
+        false});
     overlay_index[position] = overlay_slot{
         source,
         static_cast<std::uint32_t>(overlay.size())};
@@ -842,6 +1046,9 @@ void source_frontend_cache::invalidate() noexcept {
     persistence_object_slots.clear();
     persistence_member_slots.clear();
     native_persistence_complete_state = false;
+    frontend_blocks.clear();
+    frontend_block_refs.clear();
+    native_frontend_block_complete_state = false;
     overlay.clear();
     overlay_index.clear();
     persistence_summary_value = {};
@@ -866,14 +1073,26 @@ source_frontend_cache_update::source_frontend_cache_update(
           std::move(other.full_persistence_object_slots)),
       full_persistence_member_slots(
           std::move(other.full_persistence_member_slots)),
+      full_frontend_blocks(
+          std::move(other.full_frontend_blocks)),
+      full_frontend_block_refs(
+          std::move(other.full_frontend_block_refs)),
       replacements(std::move(other.replacements)),
       replacement_index(std::move(other.replacement_index)),
+      frontend_block_updates(
+          std::move(other.frontend_block_updates)),
+      frontend_block_checkpoint(
+          other.frontend_block_checkpoint),
+      frontend_block_sparse_prepared(
+          other.frontend_block_sparse_prepared),
       candidate_summary(other.candidate_summary),
       required_source_count(other.required_source_count),
       full_reconstruction(other.full_reconstruction),
       prepared(other.prepared),
       published(other.published),
-      failure(other.failure) {}
+      failure(other.failure) {
+    other.frontend_block_sparse_prepared = false;
+}
 
 status source_frontend_cache_update::ensure_replacement_index(
     std::size_t required) noexcept {
@@ -1165,6 +1384,18 @@ status source_frontend_cache_update::prepare_publish(
                 failure = arena_result;
                 return failure;
             }
+
+            const auto block_result =
+                build_generation_frontend_blocks(
+                    full_candidate,
+                    required_source_count,
+                    full_frontend_blocks,
+                    full_frontend_block_refs);
+
+            if (!block_result.ok()) {
+                failure = block_result;
+                return failure;
+            }
         } else if (owner->baseline_backed()) {
             if (required_source_count < owner->baseline_source_count)
                 return {status_code::invalid_argument};
@@ -1187,6 +1418,87 @@ status source_frontend_cache_update::prepare_publish(
                 }
             }
         }
+
+        if (!full_reconstruction &&
+            (owner->baseline_backed() ||
+             owner->native_frontend_block_storage_complete())) {
+
+            frontend_block_checkpoint =
+                owner->frontend_blocks.mark();
+
+            try {
+                frontend_block_updates.clear();
+                frontend_block_updates.reserve(
+                    replacements.size());
+
+                if (!owner->baseline_backed() &&
+                    required_source_count >
+                        owner->frontend_block_refs.capacity()) {
+                    owner->frontend_block_refs.reserve(
+                        required_source_count);
+                }
+            }
+            catch (const std::bad_alloc&) {
+                owner->frontend_blocks.restore(
+                    frontend_block_checkpoint);
+                return {status_code::not_available};
+            }
+            catch (const std::length_error&) {
+                owner->frontend_blocks.restore(
+                    frontend_block_checkpoint);
+                return {status_code::not_available};
+            }
+
+            frontend_block_sparse_prepared = true;
+
+            for (const auto& item : replacements) {
+                source_frontend_block_ref block;
+
+                if (item.interface != nullptr) {
+                    const auto counts =
+                        item.interface->persistence_counts();
+                    const auto data =
+                        item.interface->persistence_data_view();
+
+                    if (data.local_types.size() !=
+                            counts.local_types ||
+                        data.type_slots.size() !=
+                            counts.type_slots ||
+                        data.object_slots.size() !=
+                            counts.object_slots ||
+                        data.member_slots.size() !=
+                            counts.member_slots) {
+
+                        owner->frontend_blocks.restore(
+                            frontend_block_checkpoint);
+                        frontend_block_updates.clear();
+                        frontend_block_sparse_prepared = false;
+                        return {
+                            status_code::initialization_failed};
+                    }
+
+                    const auto block_result =
+                        owner->frontend_blocks.append(
+                            item.source,
+                            data,
+                            block);
+
+                    if (!block_result.ok()) {
+                        owner->frontend_blocks.restore(
+                            frontend_block_checkpoint);
+                        frontend_block_updates.clear();
+                        frontend_block_sparse_prepared = false;
+                        return block_result;
+                    }
+                }
+
+                frontend_block_updates.push_back({
+                    item.source,
+                    block,
+                });
+            }
+        }
+
         prepared = true;
         return {};
     }
@@ -1217,17 +1529,40 @@ void source_frontend_cache_update::publish_prepared() noexcept {
         owner->persistence_member_slots.swap(
             full_persistence_member_slots);
 
+        owner->frontend_blocks =
+            std::move(full_frontend_blocks);
+        owner->frontend_block_refs.swap(
+            full_frontend_block_refs);
+
         owner->native_persistence_complete_state = true;
+        owner->native_frontend_block_complete_state = true;
         owner->logical_source_count = required_source_count;
     } else if (owner->baseline_backed()) {
-        for (auto& item : replacements) {
-            if (owner->publish_overlay(
+        for (std::size_t index = 0;
+             index < replacements.size();
+             ++index) {
+
+            auto& item = replacements[index];
+
+            auto* published =
+                owner->publish_overlay(
                     item.source,
                     std::move(item.interface),
-                    true) == nullptr) {
+                    true);
+
+            if (published == nullptr)
                 return;
+
+            if (frontend_block_sparse_prepared) {
+                published->native_block =
+                    frontend_block_updates[index].block;
+                published->native_block_overrides_baseline = true;
             }
         }
+
+        if (frontend_block_sparse_prepared)
+            frontend_block_sparse_prepared = false;
+
         owner->logical_source_count = required_source_count;
     } else {
         const bool invalidates_bulk_persistence =
@@ -1240,11 +1575,32 @@ void source_frontend_cache_update::publish_prepared() noexcept {
         for (auto& item : replacements)
             owner->interfaces[item.source.value() - 1] = std::move(item.interface);
 
-        // Do not clear the arenas here. Unchanged interfaces may hold spans
-        // into them. Only disable the bulk directory because replaced Source
-        // ranges no longer describe the complete current Generation.
+        // Do not clear the v4 arenas here. Unchanged interfaces may hold
+        // spans into them. Only disable the v4 bulk directory because replaced
+        // Source ranges no longer describe the complete current Generation.
         if (invalidates_bulk_persistence)
             owner->native_persistence_complete_state = false;
+
+        if (frontend_block_sparse_prepared) {
+            // reserve() completed in prepare_publish(); resize and slot
+            // replacement are allocation-free publication operations.
+            owner->frontend_block_refs.resize(
+                required_source_count);
+
+            for (const auto& update :
+                 frontend_block_updates) {
+
+                owner->frontend_block_refs[
+                    static_cast<std::size_t>(
+                        update.source.value() - 1)] =
+                    update.block;
+            }
+
+            owner->native_frontend_block_complete_state = true;
+            frontend_block_sparse_prepared = false;
+        } else if (invalidates_bulk_persistence) {
+            owner->native_frontend_block_complete_state = false;
+        }
 
         owner->logical_source_count = required_source_count;
     }
@@ -1260,6 +1616,14 @@ void source_frontend_cache_update::publish_prepared() noexcept {
 void source_frontend_cache_update::cancel() noexcept {
     if (owner == nullptr || published)
         return;
+
+    if (frontend_block_sparse_prepared) {
+        owner->frontend_blocks.restore(
+            frontend_block_checkpoint);
+        frontend_block_updates.clear();
+        frontend_block_sparse_prepared = false;
+    }
+
     owner = nullptr;
     prepared = false;
 }

@@ -20,6 +20,7 @@ add_library(server_engine_core STATIC
     server_engine/project/frontend/source_frontend_generation.cpp
     server_engine/project/frontend/source_frontend_incremental.cpp
     server_engine/project/frontend/source_frontend_cache.cpp
+    server_engine/project/frontend/source_frontend_block_store.cpp
     server_engine/project/builder/source_contribution.cpp
     server_engine/project/builder/generation_builder.cpp
     server_engine/project/graph/graph.cpp
@@ -109,6 +110,10 @@ add_test(NAME source_facts_contract COMMAND server_engine_tests source_facts_con
 add_test(NAME source_facts_validation COMMAND server_engine_tests source_facts_validation)
 add_test(NAME source_facts_enum_validation COMMAND server_engine_tests source_facts_enum_validation)
 add_test(NAME source_facts_order_contract COMMAND server_engine_tests source_facts_order_contract)
+add_test(NAME source_frontend_block_store COMMAND server_engine_tests source_frontend_block_store)
+add_test(NAME source_frontend_cache_native_block_publication COMMAND server_engine_tests source_frontend_cache_native_block_publication)
+add_test(NAME source_frontend_cache_sparse_native_block_publication COMMAND server_engine_tests source_frontend_cache_sparse_native_block_publication)
+add_test(NAME source_frontend_cache_baseline_native_block_borrow COMMAND server_engine_tests source_frontend_cache_baseline_native_block_borrow)
 add_test(NAME source_hash_sha256 COMMAND server_engine_tests source_hash_sha256)
 add_test(NAME source_snapshot_immutability COMMAND server_engine_tests source_snapshot_immutability)
 add_test(NAME source_manager_transactional_identity COMMAND server_engine_tests source_manager_transactional_identity)

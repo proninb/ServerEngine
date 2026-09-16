@@ -1,5 +1,6 @@
 #pragma once
 
+#include "source_frontend_block_store.hpp"
 #include "../parser/source_environment.hpp"
 #include "../../source_id.hpp"
 #include "../../status.hpp"
@@ -66,6 +67,22 @@ enum class source_frontend_persistence_storage : std::uint8_t {
     none = 0,
     native_interface = 1,
     persisted_baseline = 2,
+};
+
+enum class source_frontend_block_origin : std::uint8_t {
+    none = 0,
+    generation_owned = 1,
+    baseline_borrowed = 2,
+};
+
+// Storage-neutral identity of one current Source frontend block. Baseline-backed
+// unchanged Sources are represented implicitly by source_id and require no
+// dense O(N) block-ref directory.
+struct source_frontend_block_descriptor final {
+    source_frontend_block_origin origin =
+        source_frontend_block_origin::none;
+    source_id source{};
+    source_frontend_block_ref block{};
 };
 
 // Allocation-free SAVE view. Native and sparse-overlay interfaces expose
@@ -191,6 +208,24 @@ public:
         std::size_t index,
         source_interface_member_slot& output) const noexcept;
 
+    [[nodiscard]] bool
+    native_frontend_block_storage_complete() const noexcept {
+        return native_frontend_block_complete_state &&
+            frontend_block_refs.size() == logical_source_count;
+    }
+
+    [[nodiscard]] status native_frontend_block(
+        source_id source,
+        source_frontend_block_ref& output) const noexcept;
+
+    [[nodiscard]] status native_frontend_block_descriptor(
+        source_id source,
+        source_frontend_block_descriptor& output) const noexcept;
+
+    [[nodiscard]] status native_frontend_block_view(
+        source_id source,
+        source_interface_data_view& output) const noexcept;
+
     [[nodiscard]] std::size_t source_slots() const noexcept { return logical_source_count; }
 
     [[nodiscard]] const source_frontend_persistence_summary&
@@ -225,7 +260,9 @@ private:
     struct overlay_entry final {
         source_id source{};
         std::unique_ptr<source_interface> interface;
+        source_frontend_block_ref native_block{};
         bool resolved = false;
+        bool native_block_overrides_baseline = false;
     };
 
     struct overlay_slot final {
@@ -256,6 +293,10 @@ private:
     std::vector<source_interface_member_slot>
         persistence_member_slots;
     bool native_persistence_complete_state = false;
+
+    source_frontend_block_store frontend_blocks;
+    std::vector<source_frontend_block_ref> frontend_block_refs;
+    bool native_frontend_block_complete_state = false;
 
     const build_cache_image_view* baseline_cache = nullptr;
     const source_manager_image_view* baseline_sources = nullptr;
@@ -301,6 +342,11 @@ private:
         std::uint32_t position = 0;
     };
 
+    struct frontend_block_update final {
+        source_id source{};
+        source_frontend_block_ref block{};
+    };
+
     [[nodiscard]] status ensure_replacement_index(
         std::size_t required) noexcept;
     [[nodiscard]] replacement* find_replacement(
@@ -324,8 +370,19 @@ private:
     std::vector<source_interface_member_slot>
         full_persistence_member_slots;
 
+    source_frontend_block_store full_frontend_blocks;
+    std::vector<source_frontend_block_ref>
+        full_frontend_block_refs;
+
     std::vector<replacement> replacements;
     std::vector<replacement_slot> replacement_index;
+
+    std::vector<frontend_block_update>
+        frontend_block_updates;
+    source_frontend_block_store::checkpoint
+        frontend_block_checkpoint{};
+    bool frontend_block_sparse_prepared = false;
+
     source_frontend_persistence_summary candidate_summary{};
     std::size_t required_source_count = 0;
     bool full_reconstruction = false;
