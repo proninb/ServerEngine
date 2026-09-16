@@ -1,4 +1,5 @@
 #include "baseline_store.hpp"
+#include "hard_link_policy.hpp"
 #include "build_cache_image.hpp"
 #include "source_manager_image.hpp"
 #include "crc64_ecma.hpp"
@@ -1037,38 +1038,6 @@ void write_u64(std::array<std::byte, manifest_size>& output, std::size_t offset,
 #endif
 }
 
-[[nodiscard]] bool hard_link_unavailable(
-    const std::error_code& error) noexcept {
-
-    if (!error)
-        return false;
-
-    if (error == std::errc::operation_not_supported ||
-        error == std::errc::function_not_supported ||
-        error == std::errc::cross_device_link ||
-        error == std::errc::operation_not_permitted ||
-        error == std::errc::permission_denied ||
-        error == std::errc::too_many_links) {
-        return true;
-    }
-
-#if defined(_WIN32)
-    if (error.category() == std::system_category()) {
-        switch (static_cast<DWORD>(error.value())) {
-        case ERROR_INVALID_FUNCTION:
-        case ERROR_NOT_SUPPORTED:
-        case ERROR_NOT_SAME_DEVICE:
-        case ERROR_PRIVILEGE_NOT_HELD:
-        case ERROR_ACCESS_DENIED:
-            return true;
-        default:
-            break;
-        }
-    }
-#endif
-
-    return false;
-}
 
 struct source_manager_storage_section final {
     std::uint32_t record_size = 0;
@@ -1541,8 +1510,9 @@ source_manager_section_path(
                     detail.provenance_reused_bytes +=
                         value.byte_count;
                 }
-                else if (hard_link_unavailable(
-                             link_error)) {
+                else if (classify_hard_link_failure(
+                             link_error) ==
+                         hard_link_failure_action::rewrite) {
                     ++detail.hard_link_fallback_sections;
                 }
                 else {
@@ -1630,8 +1600,9 @@ source_manager_section_path(
                         detail.reused_bytes +=
                             value.byte_count;
                     }
-                    else if (hard_link_unavailable(
-                                 link_error)) {
+                    else if (classify_hard_link_failure(
+                                 link_error) ==
+                             hard_link_failure_action::rewrite) {
                         ++detail.hard_link_fallback_sections;
                     }
                     else {
@@ -2152,8 +2123,9 @@ build_cache_section_path(
                         detail.reused_bytes +=
                             value.byte_count;
                     }
-                    else if (hard_link_unavailable(
-                                 link_error)) {
+                    else if (classify_hard_link_failure(
+                                 link_error) ==
+                             hard_link_failure_action::rewrite) {
                         ++detail.hard_link_fallback_sections;
                     }
                     else {

@@ -4,6 +4,7 @@
 #include "../server_engine/project/project_build_orchestrator.hpp"
 #include "../server_engine/project/project_manager.hpp"
 #include "../server_engine/project/persistence/baseline_store.hpp"
+#include "../server_engine/project/persistence/hard_link_policy.hpp"
 #include "../server_engine/project/persistence/source_manager_image.hpp"
 #include "../server_engine/project/persistence/compiled_image.hpp"
 #include "../server_engine/project/persistence/build_cache_image.hpp"
@@ -2935,6 +2936,34 @@ template <std::size_t Size>
     for (std::size_t index = 0; index < output.bytes.size(); ++index)
         output.bytes[index] = static_cast<std::uint8_t>(seed + index);
     return output;
+}
+
+bool test_baseline_store_hard_link_failure_policy() {
+    using action = hard_link_failure_action;
+
+    const auto classify =
+        [](std::errc value) noexcept {
+            return classify_hard_link_failure(
+                std::make_error_code(value));
+        };
+
+    if (classify(std::errc::cross_device_link) != action::rewrite ||
+        classify(std::errc::operation_not_supported) != action::rewrite ||
+        classify(std::errc::function_not_supported) != action::rewrite) {
+        return false;
+    }
+
+    if (classify_hard_link_failure({}) != action::fail ||
+        classify(std::errc::permission_denied) != action::fail ||
+        classify(std::errc::operation_not_permitted) != action::fail ||
+        classify(std::errc::too_many_links) != action::fail ||
+        classify(std::errc::io_error) != action::fail ||
+        classify(std::errc::no_space_on_device) != action::fail ||
+        classify(std::errc::read_only_file_system) != action::fail) {
+        return false;
+    }
+
+    return true;
 }
 
 bool test_baseline_store_commit_open() {
@@ -6068,6 +6097,7 @@ constexpr std::array tests{
     test_case{"project_access_move_only", &test_project_access_move_only},
     test_case{"project_unload_stop_before_wait", &test_project_unload_stop_before_wait},
     test_case{"project_rebuild_failure_returns_unloaded", &test_project_rebuild_failure_returns_unloaded},
+    test_case{"baseline_store_hard_link_failure_policy", &test_baseline_store_hard_link_failure_policy},
     test_case{"baseline_store_commit_open", &test_baseline_store_commit_open},
     test_case{"baseline_store_fingerprint_guard", &test_baseline_store_fingerprint_guard},
     test_case{"baseline_store_pinned_gc", &test_baseline_store_pinned_gc},

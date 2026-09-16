@@ -35,6 +35,7 @@ add_library(server_engine_core STATIC
     server_engine/project/project_build_orchestrator.cpp
     server_engine/project/project_manager.cpp
     server_engine/project/persistence/baseline_store.cpp
+    server_engine/project/persistence/hard_link_policy.cpp
     server_engine/project/persistence/source_manager_image.cpp
     server_engine/project/persistence/change_state_image.cpp
     server_engine/project/persistence/compiled_image.cpp
@@ -161,6 +162,7 @@ add_test(NAME project_manager_rebuild_ready_unload COMMAND server_engine_tests p
 add_test(NAME project_access_move_only COMMAND server_engine_tests project_access_move_only)
 add_test(NAME project_unload_stop_before_wait COMMAND server_engine_tests project_unload_stop_before_wait)
 add_test(NAME project_rebuild_failure_returns_unloaded COMMAND server_engine_tests project_rebuild_failure_returns_unloaded)
+add_test(NAME baseline_store_hard_link_failure_policy COMMAND server_engine_tests baseline_store_hard_link_failure_policy)
 add_test(NAME baseline_store_commit_open COMMAND server_engine_tests baseline_store_commit_open)
 add_test(NAME baseline_store_fingerprint_guard COMMAND server_engine_tests baseline_store_fingerprint_guard)
 add_test(NAME baseline_store_pinned_gc COMMAND server_engine_tests baseline_store_pinned_gc)
