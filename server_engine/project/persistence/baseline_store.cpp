@@ -1767,6 +1767,7 @@ struct sectioned_build_cache_write_telemetry final {
     std::uint64_t link_ns = 0;
     std::uint64_t compare_ns = 0;
     std::uint64_t compare_bytes = 0;
+    std::uint64_t provenance_reused_bytes = 0;
     std::uint64_t io_wall_ns = 0;
     std::uint64_t directory_flush_ns = 0;
     std::uint64_t written_bytes = 0;
@@ -1774,6 +1775,7 @@ struct sectioned_build_cache_write_telemetry final {
     std::uint32_t written_sections = 0;
     std::uint32_t reused_sections = 0;
     std::uint32_t compare_sections = 0;
+    std::uint32_t provenance_reused_sections = 0;
     std::uint32_t hard_link_fallback_sections = 0;
     std::uint32_t io_worker_count = 0;
     bool sectioned = false;
@@ -1902,6 +1904,9 @@ build_cache_section_path(
     const std::filesystem::path& transaction_directory,
     const std::filesystem::path& previous_directory,
     std::span<const std::byte> image,
+    const std::array<
+        baseline_section_provenance,
+        25>& provenance,
     transaction_io_executor& io_executor,
     durable_write_telemetry& io,
     sectioned_build_cache_write_telemetry&
@@ -2050,7 +2055,77 @@ build_cache_section_path(
 
         bool reused = false;
 
-        if (previous_available) {
+        // D4O1B: freeze may prove that this logical output section was copied
+        // byte-for-byte from one whole immutable Build Cache section and was
+        // not patched or appended afterwards. The proof is baseline-owned and
+        // commit validates that owner/section capability before hard-linking
+        // directly; no metadata/CRC/memcmp equality proof is repeated here.
+        if (index < provenance.size()) {
+            const auto& proof =
+                provenance[index];
+
+            const auto proven_bytes =
+                proof.bytes();
+
+            const bool direct_provenance =
+                proof.valid() &&
+                proof.artifact() ==
+                    baseline_artifact_kind::build_cache &&
+                proof.section() == index &&
+                proof.owner() != nullptr &&
+                proof.owner()->
+                    validate_section_borrow(proof) &&
+                proven_bytes.size() ==
+                    value.byte_count &&
+                bytes.size() ==
+                    proven_bytes.size();
+
+            if (direct_provenance) {
+                const auto source =
+                    transaction_directory.parent_path() /
+                    std::string{
+                        proof.owner()->transaction()} /
+                    build_cache_directory_name /
+                    ("section-" +
+                     std::to_string(index + 1) +
+                     ".bin");
+
+                const auto link_begin =
+                    std::chrono::steady_clock::now();
+
+                std::error_code link_error;
+                std::filesystem::create_hard_link(
+                    source,
+                    target,
+                    link_error);
+
+                detail.link_ns +=
+                    elapsed_ns(
+                        link_begin,
+                        std::chrono::steady_clock::now());
+
+                if (!link_error) {
+                    reused = true;
+                    ++detail.reused_sections;
+                    detail.reused_bytes +=
+                        value.byte_count;
+                    ++detail.provenance_reused_sections;
+                    detail.provenance_reused_bytes +=
+                        value.byte_count;
+                }
+                else if (classify_hard_link_failure(
+                             link_error) ==
+                         hard_link_failure_action::rewrite) {
+                    ++detail.hard_link_fallback_sections;
+                }
+                else {
+                    cleanup();
+                    return {status_code::io_failed};
+                }
+            }
+        }
+
+        if (!reused && previous_available) {
             const auto& old =
                 previous[index];
 
@@ -5473,6 +5548,7 @@ status baseline_store::commit(
                             directory,
                             previous_build_cache_directory,
                             build_cache.contiguous(),
+                            provenance.build_cache,
                             transaction_executor,
                             build_cache_io,
                             build_cache_detail);
@@ -5608,6 +5684,10 @@ status baseline_store::commit(
                 build_cache_detail.compare_bytes;
             output.telemetry.transaction_build_cache_compare_sections =
                 build_cache_detail.compare_sections;
+            output.telemetry.transaction_build_cache_provenance_reused_bytes =
+                build_cache_detail.provenance_reused_bytes;
+            output.telemetry.transaction_build_cache_provenance_reused_sections =
+                build_cache_detail.provenance_reused_sections;
             output.telemetry.transaction_build_cache_failed_attempt_ns =
                 build_cache_failed_attempt_ns;
             output.telemetry.transaction_build_cache_fallback_reason =

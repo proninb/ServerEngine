@@ -275,6 +275,8 @@ struct baseline_commit_telemetry final {
     std::uint64_t transaction_build_cache_compare_ns = 0;
     std::uint64_t transaction_build_cache_compare_bytes = 0;
     std::uint32_t transaction_build_cache_compare_sections = 0;
+    std::uint64_t transaction_build_cache_provenance_reused_bytes = 0;
+    std::uint32_t transaction_build_cache_provenance_reused_sections = 0;
     std::uint64_t transaction_build_cache_failed_attempt_ns = 0;
     std::uint32_t transaction_build_cache_fallback_reason = 0;
     std::uint32_t transaction_build_cache_hard_link_fallback_sections = 0;

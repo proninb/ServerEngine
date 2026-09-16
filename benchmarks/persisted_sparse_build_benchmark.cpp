@@ -3234,7 +3234,11 @@ struct idempotent_save_timing final {
         telemetry.generation_freeze_build_cache_mapped_baseline_bulk_bytes != 0 &&
         telemetry.generation_freeze_build_cache_mapped_baseline_bulk_sections >= 22 &&
         telemetry.generation_freeze_build_cache_provenance_bytes != 0 &&
-        telemetry.generation_freeze_build_cache_provenance_sections != 0;
+        telemetry.generation_freeze_build_cache_provenance_sections != 0 &&
+        telemetry.transaction_build_cache_provenance_reused_bytes ==
+            telemetry.generation_freeze_build_cache_provenance_bytes &&
+        telemetry.transaction_build_cache_provenance_reused_sections ==
+            telemetry.generation_freeze_build_cache_provenance_sections;
 
     std::cout
         << "D4A_SPARSE_SAVE_MATERIALIZATION,"
@@ -3688,6 +3692,10 @@ struct idempotent_save_timing final {
         << telemetry.transaction_build_cache_compare_bytes
         << ",tx_build_cache_compare_sections="
         << telemetry.transaction_build_cache_compare_sections
+        << ",tx_build_cache_provenance_reused_bytes="
+        << telemetry.transaction_build_cache_provenance_reused_bytes
+        << ",tx_build_cache_provenance_reused_sections="
+        << telemetry.transaction_build_cache_provenance_reused_sections
         << ",tx_build_cache_fallback_reason="
         << telemetry.transaction_build_cache_fallback_reason
         << ",tx_build_cache_failed_attempt_ms="
