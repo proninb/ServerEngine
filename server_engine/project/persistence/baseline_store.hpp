@@ -19,6 +19,7 @@ namespace cw::server {
 
 class build_cache_image_view;
 class source_manager_image_view;
+class baseline_snapshot;
 
 inline constexpr std::uint32_t baseline_format_version = 1;
 inline constexpr std::size_t baseline_fingerprint_size = 32;
@@ -36,6 +37,73 @@ enum class baseline_artifact_kind : std::uint8_t {
     source_manager,
     change_state,
     build_cache,
+};
+
+// Full-write fallback is legal only when the optimized physical
+// representation is structurally inapplicable. Runtime I/O/flush/corruption
+// failures are errors and must never be hidden by a second full write.
+enum class baseline_sectioned_fallback_reason : std::uint32_t {
+    none = 0,
+    structural_ineligible = 1,
+};
+
+// Capability-style proof that one logical section is the exact whole physical
+// section file mapped by one pinned immutable baseline. Only baseline_snapshot
+// can mint a valid proof; callers cannot construct one from metadata or CRC.
+class baseline_section_provenance final {
+public:
+    baseline_section_provenance() noexcept = default;
+
+    [[nodiscard]] bool valid() const noexcept {
+        return owner_value != nullptr;
+    }
+
+    [[nodiscard]] const baseline_snapshot* owner() const noexcept {
+        return owner_value;
+    }
+
+    [[nodiscard]] baseline_artifact_kind artifact() const noexcept {
+        return artifact_value;
+    }
+
+    [[nodiscard]] std::uint32_t section() const noexcept {
+        return section_value;
+    }
+
+    [[nodiscard]] std::span<const std::byte> bytes() const noexcept {
+        return {
+            data_value,
+            static_cast<std::size_t>(size_value)};
+    }
+
+private:
+    baseline_section_provenance(
+        const baseline_snapshot* owner,
+        baseline_artifact_kind artifact,
+        std::uint32_t section,
+        const std::byte* data,
+        std::uint64_t size) noexcept
+        : owner_value(owner),
+          artifact_value(artifact),
+          section_value(section),
+          data_value(data),
+          size_value(size) {}
+
+    const baseline_snapshot* owner_value = nullptr;
+    baseline_artifact_kind artifact_value =
+        baseline_artifact_kind::compiled;
+    std::uint32_t section_value = 0;
+    const std::byte* data_value = nullptr;
+    std::uint64_t size_value = 0;
+
+    friend class baseline_snapshot;
+};
+
+// Commit-scoped provenance. It does not own the baseline; project_context keeps
+// the referenced baseline_snapshot alive for the synchronous SAVE/commit call.
+struct baseline_commit_provenance final {
+    std::array<baseline_section_provenance, 10>
+        source_manager{};
 };
 
 struct baseline_commit_telemetry final {
@@ -179,6 +247,11 @@ struct baseline_commit_telemetry final {
     std::uint64_t transaction_source_manager_compare_ns = 0;
     std::uint64_t transaction_source_manager_compare_bytes = 0;
     std::uint32_t transaction_source_manager_compare_sections = 0;
+    std::uint64_t transaction_source_manager_provenance_reused_bytes = 0;
+    std::uint32_t transaction_source_manager_provenance_reused_sections = 0;
+    std::uint64_t transaction_source_manager_failed_attempt_ns = 0;
+    std::uint32_t transaction_source_manager_fallback_reason = 0;
+    std::uint32_t transaction_source_manager_hard_link_fallback_sections = 0;
     std::uint64_t transaction_source_manager_io_wall_ns = 0;
     std::uint32_t transaction_source_manager_io_worker_count = 0;
     std::uint64_t transaction_source_manager_directory_flush_ns = 0;
@@ -193,6 +266,9 @@ struct baseline_commit_telemetry final {
     std::uint64_t transaction_build_cache_compare_ns = 0;
     std::uint64_t transaction_build_cache_compare_bytes = 0;
     std::uint32_t transaction_build_cache_compare_sections = 0;
+    std::uint64_t transaction_build_cache_failed_attempt_ns = 0;
+    std::uint32_t transaction_build_cache_fallback_reason = 0;
+    std::uint32_t transaction_build_cache_hard_link_fallback_sections = 0;
     std::uint64_t transaction_build_cache_io_wall_ns = 0;
     std::uint32_t transaction_build_cache_io_worker_count = 0;
     std::uint64_t transaction_build_cache_directory_flush_ns = 0;
@@ -298,6 +374,16 @@ public:
     // immutable sectioned physical backend to the same logical v3 view.
     [[nodiscard]] status bind_source_manager(
         source_manager_image_view& output) const noexcept;
+
+    // Mints a direct-borrow capability only when bytes are exactly one whole
+    // physical immutable section mapped by this pinned baseline.
+    [[nodiscard]] baseline_section_provenance prove_section_borrow(
+        baseline_artifact_kind artifact,
+        std::size_t section,
+        std::span<const std::byte> bytes) const noexcept;
+
+    [[nodiscard]] bool validate_section_borrow(
+        const baseline_section_provenance& proof) const noexcept;
 
     // Binds either legacy contiguous/packed Build Cache storage or the new
     // immutable sectioned physical backend to the same logical v4 view.
@@ -454,6 +540,13 @@ public:
         const baseline_fingerprint& fingerprint,
         const baseline_configuration_state& configuration,
         project_generation_segments generation,
+        baseline_commit_result& output) const noexcept;
+
+    [[nodiscard]] status commit(
+        const baseline_fingerprint& fingerprint,
+        const baseline_configuration_state& configuration,
+        project_generation_segments generation,
+        const baseline_commit_provenance& provenance,
         baseline_commit_result& output) const noexcept;
 
     [[nodiscard]] status commit(

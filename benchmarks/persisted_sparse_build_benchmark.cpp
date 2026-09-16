@@ -1,4 +1,5 @@
 #include "../server_engine/project/project_manager.hpp"
+#include "../server_engine/project/persistence/baseline_store.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -3627,6 +3628,16 @@ struct idempotent_save_timing final {
         << telemetry.transaction_source_manager_compare_bytes
         << ",tx_source_manager_compare_sections="
         << telemetry.transaction_source_manager_compare_sections
+        << ",tx_source_manager_provenance_reused_bytes="
+        << telemetry.transaction_source_manager_provenance_reused_bytes
+        << ",tx_source_manager_provenance_reused_sections="
+        << telemetry.transaction_source_manager_provenance_reused_sections
+        << ",tx_source_manager_fallback_reason="
+        << telemetry.transaction_source_manager_fallback_reason
+        << ",tx_source_manager_failed_attempt_ms="
+        << ns_ms(telemetry.transaction_source_manager_failed_attempt_ns)
+        << ",tx_source_manager_hard_link_fallback_sections="
+        << telemetry.transaction_source_manager_hard_link_fallback_sections
         << ",tx_source_manager_io_wall_ms="
         << ns_ms(telemetry.transaction_source_manager_io_wall_ns)
         << ",tx_source_manager_io_workers="
@@ -3656,6 +3667,12 @@ struct idempotent_save_timing final {
         << telemetry.transaction_build_cache_compare_bytes
         << ",tx_build_cache_compare_sections="
         << telemetry.transaction_build_cache_compare_sections
+        << ",tx_build_cache_fallback_reason="
+        << telemetry.transaction_build_cache_fallback_reason
+        << ",tx_build_cache_failed_attempt_ms="
+        << ns_ms(telemetry.transaction_build_cache_failed_attempt_ns)
+        << ",tx_build_cache_hard_link_fallback_sections="
+        << telemetry.transaction_build_cache_hard_link_fallback_sections
         << ",tx_build_cache_io_wall_ms="
         << ns_ms(telemetry.transaction_build_cache_io_wall_ns)
         << ",tx_build_cache_io_workers="
@@ -3770,7 +3787,204 @@ struct idempotent_save_timing final {
         return 1;
     }
 
-    return post_save_pass ? 0 : 1;
+    if (!post_save_pass)
+        return 1;
+
+    // D4L3A: hard-linked immutable sections must remain valid after the
+    // transaction that originally owned the linked directory entries is
+    // reclaimed. Verify both READY LOAD and no-change BUILD afterwards.
+    baseline_store lifecycle_store{
+        configuration_path};
+
+    baseline_probe current_probe;
+    const auto probe_status =
+        lifecycle_store.probe(
+            current_probe);
+
+    const bool current_before_gc =
+        probe_status.ok() &&
+        current_probe.transaction ==
+            save.transaction &&
+        baseline.transaction !=
+            save.transaction;
+
+    const auto gc_status =
+        current_before_gc
+            ? lifecycle_store.collect_garbage()
+            : status{
+                status_code::invalid_state};
+
+    baseline_snapshot retired_snapshot;
+    const auto retired_status =
+        gc_status.ok()
+            ? lifecycle_store.open_transaction(
+                current_probe.fingerprint,
+                baseline.transaction,
+                retired_snapshot)
+            : status{
+                status_code::invalid_state};
+
+    const bool retired_removed =
+        gc_status.ok() &&
+        !retired_status.ok();
+
+    project_manager lifecycle_manager;
+    diagnostic_buffer lifecycle_diagnostics;
+    project_load_result lifecycle_load;
+
+    const auto load_status =
+        retired_removed
+            ? lifecycle_manager.load(
+                configuration_path,
+                operation_id{4402},
+                lifecycle_diagnostics,
+                lifecycle_load)
+            : status{
+                status_code::invalid_state};
+
+    std::size_t load_source_count = 0;
+    bool load_transaction_current = false;
+
+    if (load_status.ok() &&
+        !lifecycle_diagnostics.has_errors() &&
+        lifecycle_manager.ready()) {
+
+        project_access access;
+        const auto acquire_status =
+            lifecycle_manager.acquire(access);
+
+        if (acquire_status.ok() &&
+            access) {
+            load_source_count =
+                access->sources().source_count();
+            load_transaction_current =
+                access->baseline_transaction() ==
+                    save.transaction;
+        }
+    }
+
+    const bool load_pass =
+        load_status.ok() &&
+        !lifecycle_diagnostics.has_errors() &&
+        lifecycle_manager.ready() &&
+        !lifecycle_load.build_cache_mapped &&
+        load_source_count == source_count &&
+        load_transaction_current;
+
+    const auto unload_after_load_status =
+        lifecycle_manager.ready()
+            ? lifecycle_manager.unload()
+            : status{
+                status_code::invalid_state};
+
+    lifecycle_diagnostics.clear();
+    project_build_result lifecycle_build;
+
+    const auto build_status_after_gc =
+        load_pass &&
+        unload_after_load_status.ok()
+            ? lifecycle_manager.build(
+                configuration_path,
+                operation_id{4403},
+                lifecycle_diagnostics,
+                lifecycle_build,
+                1)
+            : status{
+                status_code::invalid_state};
+
+    std::size_t build_source_count = 0;
+    bool build_transaction_current = false;
+
+    if (build_status_after_gc.ok() &&
+        !lifecycle_diagnostics.has_errors() &&
+        lifecycle_manager.ready()) {
+
+        project_access access;
+        const auto acquire_status =
+            lifecycle_manager.acquire(access);
+
+        if (acquire_status.ok() &&
+            access) {
+            build_source_count =
+                access->sources().source_count();
+            build_transaction_current =
+                access->baseline_transaction() ==
+                    save.transaction;
+        }
+    }
+
+    const bool build_after_gc_pass =
+        build_status_after_gc.ok() &&
+        !lifecycle_diagnostics.has_errors() &&
+        lifecycle_manager.ready() &&
+        validate_no_change(
+            source_count,
+            lifecycle_build) &&
+        build_source_count == source_count &&
+        build_transaction_current &&
+        lifecycle_build.telemetry.dirty_sources == 0 &&
+        lifecycle_build.telemetry.builder.graph_full_scans == 0 &&
+        lifecycle_build.telemetry.builder.contribution_full_scans == 0;
+
+    const auto final_unload_status =
+        lifecycle_manager.ready()
+            ? lifecycle_manager.unload()
+            : status{
+                status_code::invalid_state};
+
+    const bool lifecycle_pass =
+        current_before_gc &&
+        gc_status.ok() &&
+        retired_removed &&
+        load_pass &&
+        unload_after_load_status.ok() &&
+        build_after_gc_pass &&
+        final_unload_status.ok();
+
+    std::cout
+        << "D4L3A_SECTIONED_LIFECYCLE_GC,"
+        << (lifecycle_pass ? "PASS" : "FAIL")
+        << ",sources=" << source_count
+        << ",baseline_tx="
+        << baseline.transaction
+        << ",current_tx="
+        << save.transaction
+        << ",probe_status="
+        << static_cast<unsigned>(
+            probe_status.code)
+        << ",gc_status="
+        << static_cast<unsigned>(
+            gc_status.code)
+        << ",retired_open_status="
+        << static_cast<unsigned>(
+            retired_status.code)
+        << ",retired_removed="
+        << (retired_removed ? 1 : 0)
+        << ",load_status="
+        << static_cast<unsigned>(
+            load_status.code)
+        << ",load_build_cache_mapped="
+        << (lifecycle_load.build_cache_mapped ? 1 : 0)
+        << ",load_sources="
+        << load_source_count
+        << ",load_current_tx="
+        << (load_transaction_current ? 1 : 0)
+        << ",build_status="
+        << static_cast<unsigned>(
+            build_status_after_gc.code)
+        << ",build_dirty_sources="
+        << lifecycle_build.telemetry.dirty_sources
+        << ",build_sources="
+        << build_source_count
+        << ",build_current_tx="
+        << (build_transaction_current ? 1 : 0)
+        << ",graph_full_scans="
+        << lifecycle_build.telemetry.builder.graph_full_scans
+        << ",contribution_full_scans="
+        << lifecycle_build.telemetry.builder.contribution_full_scans
+        << '\n';
+
+    return lifecycle_pass ? 0 : 1;
 }
 
 
@@ -4215,6 +4429,286 @@ struct idempotent_save_timing final {
 #endif
 }
 
+
+struct d4l3b_extent_case final {
+    std::size_t update_count = 0;
+    bool distributed = false;
+    std::uint32_t required_extents = 0;
+    bool expect_sparse = false;
+};
+
+[[nodiscard]] int run_d4l3b_extent_geometry_gate(
+    std::size_t source_count) {
+
+#ifdef _WIN32
+    // For adjacent physical_state records, only the first patch needs a
+    // borrowed gap. Distributed records add one borrowed gap per later patch.
+    // Both geometries therefore exercise the same dirty-source count with
+    // different exact logical extent counts.
+    constexpr d4l3b_extent_case cases[]{
+        {13, false, 18, true},
+        {13, true, 30, true},
+        {14, false, 19, true},
+        {14, true, 32, true},
+        {15, false, 20, true},
+        {15, true, 34, false},
+        {27, false, 32, true},
+        {27, true, 58, false},
+        {28, false, 33, false},
+    };
+
+    if (source_count < 100)
+        return 2;
+
+    temporary_tree tree;
+    std::filesystem::path configuration_path;
+    std::vector<std::filesystem::path> unused_source_paths;
+
+    const auto progress_interval =
+        source_count >= 1'000'000
+            ? std::size_t{100'000}
+            : source_count >= 100'000
+                ? std::size_t{10'000}
+                : std::size_t{0};
+
+    std::cerr
+        << "D4L3B_SETUP_BEGIN,sources="
+        << source_count
+        << '\n';
+
+    if (!prepare_project(
+            source_count,
+            tree,
+            configuration_path,
+            unused_source_paths,
+            false,
+            progress_interval)) {
+        return 1;
+    }
+
+    baseline_commit_result baseline;
+    if (!create_baseline(
+            configuration_path,
+            baseline,
+            0)) {
+        std::cout
+            << "D4L3B_EXTENT_GEOMETRY_GATE,FAIL,"
+            << "stage=baseline,sources="
+            << source_count
+            << '\n';
+        return 1;
+    }
+
+    std::size_t revision = 0;
+
+    for (const auto& test : cases) {
+        ++revision;
+
+        for (std::size_t ordinal = 0;
+             ordinal < test.update_count;
+             ++ordinal) {
+
+            const auto source_index =
+                test.distributed
+                    ? ordinal * 2
+                    : ordinal;
+
+            if (source_index >= source_count)
+                return 2;
+
+            const auto changed_text =
+                "struct " +
+                type_name(source_index) +
+                " { int d4l3b_" +
+                std::to_string(revision) +
+                "; };\n";
+
+            if (!write_text(
+                    tree.path /
+                        source_name(source_index),
+                    changed_text)) {
+                return 1;
+            }
+        }
+
+        project_manager manager;
+        diagnostic_buffer diagnostics;
+        project_build_result build;
+
+        const auto build_status =
+            manager.build(
+                configuration_path,
+                operation_id{4600},
+                diagnostics,
+                build,
+                1);
+
+        const bool build_pass =
+            build_status.ok() &&
+            !diagnostics.has_errors() &&
+            manager.ready() &&
+            build.changed &&
+            !build.rebuilt &&
+            build.telemetry.baseline_sources ==
+                source_count &&
+            build.telemetry.dirty_detection_backend == 1 &&
+            build.telemetry.dirty_detection_fast &&
+            !build.telemetry.dirty_detection_fallback &&
+            build.telemetry.dirty_sources ==
+                test.update_count &&
+            build.telemetry.generation_checkpoint_available &&
+            build.telemetry.generation_anchor_available &&
+            build.telemetry.generation_change_ready &&
+            build.telemetry.generation_change_overlay &&
+            build.telemetry.generation_change_fallback_reason == 0 &&
+            build.telemetry.generation_change_file_updates ==
+                test.update_count &&
+            build.telemetry.sources.path_index_full_rebuilds == 0 &&
+            build.telemetry.sources.source_graph_full_scans == 0 &&
+            build.telemetry.builder.graph_full_scans == 0 &&
+            build.telemetry.builder.contribution_full_scans == 0;
+
+        if (!build_pass) {
+            std::cout
+                << "D4L3B_EXTENT_GEOMETRY,FAIL,"
+                << "stage=build,sources="
+                << source_count
+                << ",geometry="
+                << (test.distributed
+                        ? "distributed"
+                        : "adjacent")
+                << ",updates="
+                << test.update_count
+                << ",dirty_sources="
+                << build.telemetry.dirty_sources
+                << ",status_code="
+                << static_cast<unsigned>(
+                    build_status.code)
+                << '\n';
+
+            if (manager.ready())
+                (void)manager.unload();
+
+            return 1;
+        }
+
+        baseline_commit_result save;
+        const auto save_status =
+            manager.save(save);
+        const auto& telemetry =
+            save.telemetry;
+
+        const bool source_manager_pass =
+            test.expect_sparse
+                ? telemetry.generation_freeze_source_manager_mode == 3 &&
+                  telemetry.generation_freeze_source_manager_sparse_fallback_reason == 0 &&
+                  telemetry.generation_freeze_source_manager_extent_count ==
+                      test.required_extents
+                : telemetry.generation_freeze_source_manager_mode == 2 &&
+                  telemetry.generation_freeze_source_manager_sparse_fallback_reason == 10 &&
+                  telemetry.generation_freeze_source_manager_extent_count == 1;
+
+        const bool save_pass =
+            save_status.ok() &&
+            !save.transaction.empty() &&
+            save.bytes_written != 0 &&
+            telemetry.generation_freeze_materialize_change_file_updates ==
+                test.update_count &&
+            source_manager_pass;
+
+        std::cout
+            << "D4L3B_EXTENT_GEOMETRY,"
+            << (save_pass ? "PASS" : "FAIL")
+            << ",sources="
+            << source_count
+            << ",geometry="
+            << (test.distributed
+                    ? "distributed"
+                    : "adjacent")
+            << ",updates="
+            << test.update_count
+            << ",required_extents="
+            << test.required_extents
+            << ",budget=32"
+            << ",expect_sparse="
+            << (test.expect_sparse ? 1 : 0)
+            << ",source_manager_mode="
+            << telemetry.generation_freeze_source_manager_mode
+            << ",fallback_reason="
+            << telemetry.generation_freeze_source_manager_sparse_fallback_reason
+            << ",reported_extent_count="
+            << telemetry.generation_freeze_source_manager_extent_count
+            << ",save_total_ms="
+            << static_cast<double>(
+                telemetry.save_total_ns) /
+                1'000'000.0
+            << '\n';
+
+        if (!save_pass) {
+            if (manager.ready())
+                (void)manager.unload();
+            return 1;
+        }
+
+        if (!manager.ready() ||
+            !manager.unload().ok()) {
+            return 1;
+        }
+    }
+
+    project_manager verify_manager;
+    diagnostic_buffer verify_diagnostics;
+    project_build_result verify_build;
+
+    const auto verify_status =
+        verify_manager.build(
+            configuration_path,
+            operation_id{4601},
+            verify_diagnostics,
+            verify_build,
+            1);
+
+    const bool verify_pass =
+        verify_status.ok() &&
+        !verify_diagnostics.has_errors() &&
+        verify_manager.ready() &&
+        validate_no_change(
+            source_count,
+            verify_build) &&
+        verify_build.telemetry.dirty_detection_backend == 1 &&
+        verify_build.telemetry.dirty_detection_fast &&
+        !verify_build.telemetry.dirty_detection_fallback &&
+        verify_build.telemetry.builder.graph_full_scans == 0 &&
+        verify_build.telemetry.builder.contribution_full_scans == 0;
+
+    if (verify_manager.ready() &&
+        !verify_manager.unload().ok()) {
+        return 1;
+    }
+
+    std::cout
+        << "D4L3B_EXTENT_GEOMETRY_GATE,"
+        << (verify_pass ? "PASS" : "FAIL")
+        << ",sources="
+        << source_count
+        << ",dirty_sources="
+        << verify_build.telemetry.dirty_sources
+        << ",graph_full_scans="
+        << verify_build.telemetry.builder.graph_full_scans
+        << ",contribution_full_scans="
+        << verify_build.telemetry.builder.contribution_full_scans
+        << '\n';
+
+    return verify_pass ? 0 : 1;
+#else
+    (void)source_count;
+    std::cout
+        << "D4L3B_EXTENT_GEOMETRY_GATE,UNAVAILABLE,"
+        << "backend=0,platform=non_windows\n";
+    return 3;
+#endif
+}
+
 [[nodiscard]] bool run_matrix() {
     constexpr std::size_t matrix[]{
         1'000,
@@ -4381,6 +4875,30 @@ int main(int argc, char** argv) {
             return run_lifecycle_scale(
                 count,
                 workers);
+        }
+        catch (...) {
+            return 2;
+        }
+    }
+
+
+    if (argc == 2 &&
+        std::string_view{argv[1]} ==
+            "--d4l3b-geometry") {
+        return run_d4l3b_extent_geometry_gate(
+            100'000);
+    }
+
+    if (argc == 3 &&
+        std::string_view{argv[1]} ==
+            "--d4l3b-geometry") {
+        try {
+            const auto count =
+                static_cast<std::size_t>(
+                    std::stoull(argv[2]));
+
+            return run_d4l3b_extent_geometry_gate(
+                count);
         }
         catch (...) {
             return 2;

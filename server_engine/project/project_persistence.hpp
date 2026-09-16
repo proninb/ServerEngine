@@ -148,6 +148,11 @@ public:
     project_generation_storage& operator=(
         project_generation_storage&&) noexcept = default;
 
+    [[nodiscard]] const baseline_commit_provenance&
+    commit_provenance() const noexcept {
+        return baseline_reuse_provenance;
+    }
+
     [[nodiscard]] project_generation_segments
     segments() const noexcept {
         const auto change_segment =
@@ -188,6 +193,7 @@ public:
         sources.clear();
         native_sources.reset();
         sparse_sources.reset();
+        baseline_reuse_provenance = {};
         change_fallback.clear();
         native_change = {};
         build.clear();
@@ -198,6 +204,7 @@ private:
     std::vector<std::byte> sources;
     source_manager_native_image_storage native_sources;
     source_manager_sparse_image_storage sparse_sources;
+    baseline_commit_provenance baseline_reuse_provenance{};
     std::vector<std::byte> change_fallback;
     std::span<const std::byte> native_change;
     std::vector<std::byte> build;

@@ -1831,6 +1831,7 @@ status project_manager::save(
             fingerprint,
             configuration_state,
             generation.segments(),
+            generation.commit_provenance(),
             output);
 
         publish_save_telemetry();

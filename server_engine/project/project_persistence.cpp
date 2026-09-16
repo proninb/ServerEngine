@@ -477,6 +477,60 @@ status freeze_project_generation(
                         ? &source_manager_detail
                         : nullptr);
 
+            if (result.ok()) {
+                // D4L1 direct-borrow contract for sparse Source Manager.
+                // physical_state and both identity tables are reconstructed or
+                // materialized, so they deliberately receive no provenance.
+                constexpr std::array<
+                    source_manager_image_section,
+                    7> direct_sections{
+                    source_manager_image_section::source_core,
+                    source_manager_image_section::graph_records,
+                    source_manager_image_section::forward_edges,
+                    source_manager_image_section::reverse_edges,
+                    source_manager_image_section::roots,
+                    source_manager_image_section::path_index,
+                    source_manager_image_section::path_bytes,
+                };
+
+                for (const auto section :
+                     direct_sections) {
+
+                    const auto raw =
+                        static_cast<std::uint32_t>(
+                            section);
+
+                    if (raw == 0 ||
+                        raw >
+                            output.baseline_reuse_provenance.
+                                source_manager.size()) {
+                        return {
+                            status_code::
+                                initialization_failed};
+                    }
+
+                    const auto index =
+                        static_cast<std::size_t>(
+                            raw - 1);
+
+                    const auto bytes =
+                        baseline_source_image->
+                            section_bytes(section);
+
+                    if (bytes.empty())
+                        continue;
+
+                    output.baseline_reuse_provenance.
+                        source_manager[index] =
+                            project.
+                                prove_baseline_section_borrow(
+                                    baseline_artifact_kind::
+                                        source_manager,
+                                    index,
+                                    bytes);
+                }
+            }
+
             // not_found is an explicit structural ineligibility signal:
             // topology/source-count/extent constraints fall back to the
             // established full encoder without weakening correctness.

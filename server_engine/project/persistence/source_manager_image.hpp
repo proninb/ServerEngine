@@ -283,6 +283,11 @@ public:
     [[nodiscard]] std::size_t source_count() const noexcept { return source_count_value; }
     [[nodiscard]] std::size_t root_count() const noexcept { return root_count_value; }
 
+    // Exact logical section bytes from either contiguous or sectioned storage.
+    // The returned span is borrowed from the pinned Source Manager baseline.
+    [[nodiscard]] std::span<const std::byte> section_bytes(
+        source_manager_image_section kind) const noexcept;
+
     [[nodiscard]] std::string_view path(source_id source) const noexcept;
     [[nodiscard]] status physical(
         source_id source,

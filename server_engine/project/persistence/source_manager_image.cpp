@@ -1092,6 +1092,28 @@ status source_manager_image_view::bind_sectioned(
     return {};
 }
 
+std::span<const std::byte>
+source_manager_image_view::section_bytes(
+    source_manager_image_section kind) const noexcept {
+
+    const auto& value =
+        section(kind);
+
+    if (value.data == nullptr ||
+        value.record_size == 0 ||
+        value.count >
+            (std::numeric_limits<std::size_t>::max)() /
+                value.record_size) {
+        return {};
+    }
+
+    return {
+        value.data,
+        static_cast<std::size_t>(
+            value.count) *
+            value.record_size};
+}
+
 std::string_view source_manager_image_view::path(
     source_id source) const noexcept {
 

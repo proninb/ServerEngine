@@ -736,6 +736,39 @@ void write_u64(std::array<std::byte, manifest_size>& output, std::size_t offset,
 #endif
 }
 
+[[nodiscard]] bool hard_link_unavailable(
+    const std::error_code& error) noexcept {
+
+    if (!error)
+        return false;
+
+    if (error == std::errc::operation_not_supported ||
+        error == std::errc::function_not_supported ||
+        error == std::errc::cross_device_link ||
+        error == std::errc::operation_not_permitted ||
+        error == std::errc::permission_denied ||
+        error == std::errc::too_many_links) {
+        return true;
+    }
+
+#if defined(_WIN32)
+    if (error.category() == std::system_category()) {
+        switch (static_cast<DWORD>(error.value())) {
+        case ERROR_INVALID_FUNCTION:
+        case ERROR_NOT_SUPPORTED:
+        case ERROR_NOT_SAME_DEVICE:
+        case ERROR_PRIVILEGE_NOT_HELD:
+        case ERROR_ACCESS_DENIED:
+            return true;
+        default:
+            break;
+        }
+    }
+#endif
+
+    return false;
+}
+
 struct source_manager_storage_section final {
     std::uint32_t record_size = 0;
     std::uint64_t count = 0;
@@ -748,6 +781,7 @@ struct sectioned_source_manager_write_telemetry final {
     std::uint64_t link_ns = 0;
     std::uint64_t compare_ns = 0;
     std::uint64_t compare_bytes = 0;
+    std::uint64_t provenance_reused_bytes = 0;
     std::uint64_t io_wall_ns = 0;
     std::uint64_t directory_flush_ns = 0;
     std::uint64_t written_bytes = 0;
@@ -755,6 +789,8 @@ struct sectioned_source_manager_write_telemetry final {
     std::uint32_t written_sections = 0;
     std::uint32_t reused_sections = 0;
     std::uint32_t compare_sections = 0;
+    std::uint32_t provenance_reused_sections = 0;
+    std::uint32_t hard_link_fallback_sections = 0;
     std::uint32_t io_worker_count = 0;
     bool sectioned = false;
 };
@@ -989,6 +1025,9 @@ source_manager_section_path(
     const std::filesystem::path& transaction_directory,
     const std::filesystem::path& previous_directory,
     const project_generation_segment& image,
+    const std::array<
+        baseline_section_provenance,
+        10>& provenance,
     durable_write_telemetry& io,
     sectioned_source_manager_write_telemetry&
         detail) noexcept {
@@ -1068,22 +1107,35 @@ source_manager_section_path(
                 source_manager_image_prefix_size,
                 previous_prefix);
 
-        if (previous_result.ok() &&
-            previous_prefix.size() ==
-                source_manager_image_prefix_size) {
-
-            const auto previous_size =
-                read_u64(
-                    std::span<const std::byte>{
-                        previous_prefix},
-                    40);
-
-            previous_available =
-                parse_source_manager_prefix(
-                    previous_prefix,
-                    previous_size,
-                    previous);
+        if (!previous_result.ok()) {
+            cleanup();
+            return previous_result.code ==
+                    status_code::not_found
+                ? status{status_code::artifact_corrupt}
+                : previous_result;
         }
+
+        if (previous_prefix.size() !=
+            source_manager_image_prefix_size) {
+            cleanup();
+            return {status_code::artifact_corrupt};
+        }
+
+        const auto previous_size =
+            read_u64(
+                std::span<const std::byte>{
+                    previous_prefix},
+                40);
+
+        if (!parse_source_manager_prefix(
+                previous_prefix,
+                previous_size,
+                previous)) {
+            cleanup();
+            return {status_code::artifact_corrupt};
+        }
+
+        previous_available = true;
     }
 
     std::array<
@@ -1120,7 +1172,85 @@ source_manager_section_path(
 
         bool reused = false;
 
-        if (previous_available) {
+        // D4L1: a valid proof means this logical output section is literally
+        // the same mapped whole section file owned by a pinned immutable
+        // baseline. Pointer identity of the sliced Generation section is an
+        // additional commit-side check; no CRC or memcmp proves equality again.
+        if (index < provenance.size()) {
+            const auto& proof =
+                provenance[index];
+
+            const auto proven_bytes =
+                proof.bytes();
+
+            const bool direct_borrow =
+                proof.valid() &&
+                proof.artifact() ==
+                    baseline_artifact_kind::source_manager &&
+                proof.section() == index &&
+                proof.owner() != nullptr &&
+                proof.owner()->
+                    validate_section_borrow(proof) &&
+                section_segment.extent_count() == 1 &&
+                section_segment.extent(0).data() ==
+                    proven_bytes.data() &&
+                section_segment.extent(0).size() ==
+                    proven_bytes.size() &&
+                proven_bytes.size() ==
+                    value.byte_count;
+
+            if (direct_borrow) {
+                const auto source =
+                    transaction_directory.parent_path() /
+                    std::string{
+                        proof.owner()->transaction()} /
+                    source_manager_directory_name /
+                    ("section-" +
+                     std::to_string(index + 1) +
+                     ".bin");
+                const auto target =
+                    source_manager_section_path(
+                        section_directory,
+                        index);
+
+                const auto link_begin =
+                    std::chrono::
+                        steady_clock::now();
+
+                std::error_code link_error;
+                std::filesystem::
+                    create_hard_link(
+                        source,
+                        target,
+                        link_error);
+
+                detail.link_ns +=
+                    elapsed_ns(
+                        link_begin,
+                        std::chrono::
+                            steady_clock::now());
+
+                if (!link_error) {
+                    reused = true;
+                    ++detail.reused_sections;
+                    detail.reused_bytes +=
+                        value.byte_count;
+                    ++detail.provenance_reused_sections;
+                    detail.provenance_reused_bytes +=
+                        value.byte_count;
+                }
+                else if (hard_link_unavailable(
+                             link_error)) {
+                    ++detail.hard_link_fallback_sections;
+                }
+                else {
+                    cleanup();
+                    return {status_code::io_failed};
+                }
+            }
+        }
+
+        if (!reused && previous_available) {
             const auto& old =
                 previous[index];
 
@@ -1165,8 +1295,15 @@ source_manager_section_path(
                     value.byte_count;
                 ++detail.compare_sections;
 
-                if (compare_result.ok() &&
-                    exact_equal) {
+                if (!compare_result.ok()) {
+                    cleanup();
+                    return compare_result.code ==
+                            status_code::not_found
+                        ? status{status_code::artifact_corrupt}
+                        : compare_result;
+                }
+
+                if (exact_equal) {
 
                     const auto link_begin =
                         std::chrono::
@@ -1190,6 +1327,14 @@ source_manager_section_path(
                         ++detail.reused_sections;
                         detail.reused_bytes +=
                             value.byte_count;
+                    }
+                    else if (hard_link_unavailable(
+                                 link_error)) {
+                        ++detail.hard_link_fallback_sections;
+                    }
+                    else {
+                        cleanup();
+                        return {status_code::io_failed};
                     }
                 }
             }
@@ -1396,6 +1541,7 @@ struct sectioned_build_cache_write_telemetry final {
     std::uint32_t written_sections = 0;
     std::uint32_t reused_sections = 0;
     std::uint32_t compare_sections = 0;
+    std::uint32_t hard_link_fallback_sections = 0;
     std::uint32_t io_worker_count = 0;
     bool sectioned = false;
 };
@@ -1594,22 +1740,35 @@ build_cache_section_path(
                 build_cache_image_prefix_size,
                 previous_prefix);
 
-        if (previous_result.ok() &&
-            previous_prefix.size() ==
-                build_cache_image_prefix_size) {
-
-            const auto previous_size =
-                read_u64(
-                    std::span<const std::byte>{
-                        previous_prefix},
-                    40);
-
-            previous_available =
-                parse_build_cache_prefix(
-                    previous_prefix,
-                    previous_size,
-                    previous);
+        if (!previous_result.ok()) {
+            cleanup();
+            return previous_result.code ==
+                    status_code::not_found
+                ? status{status_code::artifact_corrupt}
+                : previous_result;
         }
+
+        if (previous_prefix.size() !=
+            build_cache_image_prefix_size) {
+            cleanup();
+            return {status_code::artifact_corrupt};
+        }
+
+        const auto previous_size =
+            read_u64(
+                std::span<const std::byte>{
+                    previous_prefix},
+                40);
+
+        if (!parse_build_cache_prefix(
+                previous_prefix,
+                previous_size,
+                previous)) {
+            cleanup();
+            return {status_code::artifact_corrupt};
+        }
+
+        previous_available = true;
     }
 
     std::array<
@@ -1697,8 +1856,15 @@ build_cache_section_path(
                     value.byte_count;
                 ++detail.compare_sections;
 
-                if (compare_result.ok() &&
-                    exact_equal) {
+                if (!compare_result.ok()) {
+                    cleanup();
+                    return compare_result.code ==
+                            status_code::not_found
+                        ? status{status_code::artifact_corrupt}
+                        : compare_result;
+                }
+
+                if (exact_equal) {
 
                     const auto link_begin =
                         std::chrono::
@@ -1722,6 +1888,14 @@ build_cache_section_path(
                         ++detail.reused_sections;
                         detail.reused_bytes +=
                             value.byte_count;
+                    }
+                    else if (hard_link_unavailable(
+                                 link_error)) {
+                        ++detail.hard_link_fallback_sections;
+                    }
+                    else {
+                        cleanup();
+                        return {status_code::io_failed};
                     }
                 }
             }
@@ -2944,6 +3118,58 @@ status read_only_file_mapping::map(const std::filesystem::path& path) noexcept {
     catch (const std::bad_alloc&) {
         return {status_code::not_available};
     }
+}
+
+baseline_section_provenance
+baseline_snapshot::prove_section_borrow(
+    baseline_artifact_kind artifact,
+    std::size_t section,
+    std::span<const std::byte> bytes) const noexcept {
+
+    if (artifact !=
+            baseline_artifact_kind::source_manager ||
+        !sectioned_source_manager ||
+        section >= source_manager_sections.size()) {
+        return {};
+    }
+
+    const auto mapped =
+        source_manager_sections[section].bytes();
+
+    if (mapped.data() != bytes.data() ||
+        mapped.size() != bytes.size()) {
+        return {};
+    }
+
+    return baseline_section_provenance{
+        this,
+        artifact,
+        static_cast<std::uint32_t>(section),
+        mapped.data(),
+        static_cast<std::uint64_t>(mapped.size())};
+}
+
+bool baseline_snapshot::validate_section_borrow(
+    const baseline_section_provenance& proof) const noexcept {
+
+    if (!proof.valid() ||
+        proof.owner() != this ||
+        proof.artifact() !=
+            baseline_artifact_kind::source_manager ||
+        !sectioned_source_manager ||
+        proof.section() >=
+            source_manager_sections.size()) {
+        return false;
+    }
+
+    const auto mapped =
+        source_manager_sections[
+            proof.section()].bytes();
+    const auto proven =
+        proof.bytes();
+
+    return mapped.data() == proven.data() &&
+        mapped.size() == proven.size();
 }
 
 status baseline_snapshot::bind_source_manager(
@@ -4694,6 +4920,21 @@ status baseline_store::commit(
     const baseline_configuration_state& configuration,
     project_generation_segments generation,
     baseline_commit_result& output) const noexcept {
+
+    return commit(
+        fingerprint,
+        configuration,
+        generation,
+        baseline_commit_provenance{},
+        output);
+}
+
+status baseline_store::commit(
+    const baseline_fingerprint& fingerprint,
+    const baseline_configuration_state& configuration,
+    project_generation_segments generation,
+    const baseline_commit_provenance& provenance,
+    baseline_commit_result& output) const noexcept {
     const auto& compiled =
         generation.compiled_segment();
     const auto& source_manager =
@@ -4763,23 +5004,31 @@ status baseline_store::commit(
                 build_cache_directory_name;
 
             std::error_code previous_error;
-            if (std::filesystem::exists(
+            const auto source_sectioned =
+                std::filesystem::exists(
                     source_candidate /
                         source_manager_prefix_name,
-                    previous_error) &&
-                !previous_error) {
+                    previous_error);
 
+            if (previous_error)
+                return {status_code::io_failed};
+
+            if (source_sectioned) {
                 previous_source_manager_directory =
                     source_candidate;
             }
 
             previous_error.clear();
-            if (std::filesystem::exists(
+            const auto build_sectioned =
+                std::filesystem::exists(
                     build_candidate /
                         build_cache_prefix_name,
-                    previous_error) &&
-                !previous_error) {
+                    previous_error);
 
+            if (previous_error)
+                return {status_code::io_failed};
+
+            if (build_sectioned) {
                 previous_build_cache_directory =
                     build_candidate;
             }
@@ -4844,9 +5093,20 @@ status baseline_store::commit(
             durable_write_telemetry source_manager_io;
             sectioned_source_manager_write_telemetry
                 source_manager_detail;
+            baseline_sectioned_fallback_reason
+                source_manager_fallback_reason =
+                    baseline_sectioned_fallback_reason::none;
+            std::uint64_t
+                source_manager_failed_attempt_ns = 0;
+
             durable_write_telemetry build_cache_io;
             sectioned_build_cache_write_telemetry
                 build_cache_detail;
+            baseline_sectioned_fallback_reason
+                build_cache_fallback_reason =
+                    baseline_sectioned_fallback_reason::none;
+            std::uint64_t
+                build_cache_failed_attempt_ns = 0;
             durable_write_telemetry change_state_io;
             durable_write_telemetry manifest_io;
 
@@ -4867,28 +5127,10 @@ status baseline_store::commit(
 
                     workers.emplace_back(
                         [&]() noexcept {
-                            if (!source_manager.is_contiguous()) {
-                                source_manager_result =
-                                    durable_write_sectioned_source_manager(
-                                        directory,
-                                        previous_source_manager_directory,
-                                        source_manager,
-                                        source_manager_io,
-                                        source_manager_detail);
-                            }
-                            else {
-                                source_manager_result = {
-                                    status_code::not_available};
-                            }
-
-                            if (!source_manager_result.ok()) {
-                                std::error_code cleanup_error;
-                                std::filesystem::remove_all(
-                                    directory /
-                                        source_manager_directory_name,
-                                    cleanup_error);
-
-                                source_manager_detail = {};
+                            if (source_manager.is_contiguous()) {
+                                source_manager_fallback_reason =
+                                    baseline_sectioned_fallback_reason::
+                                        structural_ineligible;
 
                                 source_manager_result =
                                     durable_write_file(
@@ -4897,33 +5139,70 @@ status baseline_store::commit(
                                         source_manager,
                                         {},
                                         &source_manager_io);
+                                return;
                             }
+
+                            const auto attempt_begin =
+                                std::chrono::steady_clock::now();
+
+                            source_manager_result =
+                                durable_write_sectioned_source_manager(
+                                    directory,
+                                    previous_source_manager_directory,
+                                    source_manager,
+                                    provenance.source_manager,
+                                    source_manager_io,
+                                    source_manager_detail);
+
+                            if (source_manager_result.ok())
+                                return;
+
+                            const auto attempt_ns =
+                                elapsed_ns(
+                                    attempt_begin,
+                                    std::chrono::
+                                        steady_clock::now());
+
+                            if (source_manager_result.code !=
+                                status_code::not_available) {
+                                source_manager_failed_attempt_ns =
+                                    attempt_ns;
+                                return;
+                            }
+
+                            source_manager_fallback_reason =
+                                baseline_sectioned_fallback_reason::
+                                    structural_ineligible;
+                            source_manager_failed_attempt_ns =
+                                attempt_ns;
+
+                            std::error_code cleanup_error;
+                            std::filesystem::remove_all(
+                                directory /
+                                    source_manager_directory_name,
+                                cleanup_error);
+
+                            durable_write_telemetry fallback_io;
+                            source_manager_result =
+                                durable_write_file(
+                                    directory /
+                                        source_manager_name,
+                                    source_manager,
+                                    {},
+                                    &fallback_io);
+
+                            source_manager_io.write_ns +=
+                                fallback_io.write_ns;
+                            source_manager_io.flush_ns +=
+                                fallback_io.flush_ns;
                         });
 
                     workers.emplace_back(
                         [&]() noexcept {
-                            if (build_cache.is_contiguous()) {
-                                build_cache_result =
-                                    durable_write_sectioned_build_cache(
-                                        directory,
-                                        previous_build_cache_directory,
-                                        build_cache.contiguous(),
-                                        build_cache_io,
-                                        build_cache_detail);
-                            }
-                            else {
-                                build_cache_result = {
-                                    status_code::not_available};
-                            }
-
-                            if (!build_cache_result.ok()) {
-                                std::error_code cleanup_error;
-                                std::filesystem::remove_all(
-                                    directory /
-                                        build_cache_directory_name,
-                                    cleanup_error);
-
-                                build_cache_detail = {};
+                            if (!build_cache.is_contiguous()) {
+                                build_cache_fallback_reason =
+                                    baseline_sectioned_fallback_reason::
+                                        structural_ineligible;
 
                                 build_cache_result =
                                     durable_write_file(
@@ -4932,7 +5211,61 @@ status baseline_store::commit(
                                         build_cache,
                                         {},
                                         &build_cache_io);
+                                return;
                             }
+
+                            const auto attempt_begin =
+                                std::chrono::steady_clock::now();
+
+                            build_cache_result =
+                                durable_write_sectioned_build_cache(
+                                    directory,
+                                    previous_build_cache_directory,
+                                    build_cache.contiguous(),
+                                    build_cache_io,
+                                    build_cache_detail);
+
+                            if (build_cache_result.ok())
+                                return;
+
+                            const auto attempt_ns =
+                                elapsed_ns(
+                                    attempt_begin,
+                                    std::chrono::
+                                        steady_clock::now());
+
+                            if (build_cache_result.code !=
+                                status_code::not_available) {
+                                build_cache_failed_attempt_ns =
+                                    attempt_ns;
+                                return;
+                            }
+
+                            build_cache_fallback_reason =
+                                baseline_sectioned_fallback_reason::
+                                    structural_ineligible;
+                            build_cache_failed_attempt_ns =
+                                attempt_ns;
+
+                            std::error_code cleanup_error;
+                            std::filesystem::remove_all(
+                                directory /
+                                    build_cache_directory_name,
+                                cleanup_error);
+
+                            durable_write_telemetry fallback_io;
+                            build_cache_result =
+                                durable_write_file(
+                                    directory /
+                                        build_cache_name,
+                                    build_cache,
+                                    {},
+                                    &fallback_io);
+
+                            build_cache_io.write_ns +=
+                                fallback_io.write_ns;
+                            build_cache_io.flush_ns +=
+                                fallback_io.flush_ns;
                         });
 
                     workers.emplace_back(
@@ -4988,6 +5321,17 @@ status baseline_store::commit(
                 source_manager_detail.compare_bytes;
             output.telemetry.transaction_source_manager_compare_sections =
                 source_manager_detail.compare_sections;
+            output.telemetry.transaction_source_manager_provenance_reused_bytes =
+                source_manager_detail.provenance_reused_bytes;
+            output.telemetry.transaction_source_manager_provenance_reused_sections =
+                source_manager_detail.provenance_reused_sections;
+            output.telemetry.transaction_source_manager_failed_attempt_ns =
+                source_manager_failed_attempt_ns;
+            output.telemetry.transaction_source_manager_fallback_reason =
+                static_cast<std::uint32_t>(
+                    source_manager_fallback_reason);
+            output.telemetry.transaction_source_manager_hard_link_fallback_sections =
+                source_manager_detail.hard_link_fallback_sections;
             output.telemetry.transaction_source_manager_io_wall_ns =
                 source_manager_detail.io_wall_ns;
             output.telemetry.transaction_source_manager_io_worker_count =
@@ -5017,6 +5361,13 @@ status baseline_store::commit(
                 build_cache_detail.compare_bytes;
             output.telemetry.transaction_build_cache_compare_sections =
                 build_cache_detail.compare_sections;
+            output.telemetry.transaction_build_cache_failed_attempt_ns =
+                build_cache_failed_attempt_ns;
+            output.telemetry.transaction_build_cache_fallback_reason =
+                static_cast<std::uint32_t>(
+                    build_cache_fallback_reason);
+            output.telemetry.transaction_build_cache_hard_link_fallback_sections =
+                build_cache_detail.hard_link_fallback_sections;
             output.telemetry.transaction_build_cache_io_wall_ns =
                 build_cache_detail.io_wall_ns;
             output.telemetry.transaction_build_cache_io_worker_count =

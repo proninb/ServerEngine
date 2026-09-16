@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -118,6 +119,21 @@ public:
 
     [[nodiscard]] std::string_view baseline_transaction() const noexcept {
         return baseline != nullptr ? baseline->transaction() : std::string_view{};
+    }
+
+    // Persistence-only capability boundary. The pinned baseline is the sole
+    // authority that can mint a valid whole-section direct-borrow proof.
+    [[nodiscard]] baseline_section_provenance prove_baseline_section_borrow(
+        baseline_artifact_kind artifact,
+        std::size_t section,
+        std::span<const std::byte> bytes) const noexcept {
+
+        return baseline != nullptr
+            ? baseline->prove_section_borrow(
+                artifact,
+                section,
+                bytes)
+            : baseline_section_provenance{};
     }
 
     // Identifies the transaction known to contain the exact active Project
