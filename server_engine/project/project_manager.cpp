@@ -1419,6 +1419,9 @@ status project_manager::save(
             generation_freeze_detail.source_manager_crc_worker_count;
         output.telemetry.generation_freeze_source_manager_extent_count =
             generation_freeze_detail.source_manager_extent_count;
+        output.telemetry.generation_freeze_source_manager_sparse_required_extent_count =
+            generation_freeze_detail.
+                source_manager_sparse_required_extent_count;
         output.telemetry.generation_freeze_source_manager_sparse_fallback_reason =
             generation_freeze_detail.source_manager_sparse_fallback_reason;
         output.telemetry.generation_freeze_change_state_ns =

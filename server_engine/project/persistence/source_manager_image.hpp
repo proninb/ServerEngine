@@ -111,7 +111,15 @@ struct source_manager_freeze_telemetry final {
     // 3 = sparse baseline scatter/gather.
     std::uint32_t mode = 0;
     std::uint32_t crc_worker_count = 0;
+
+    // Actual extent count emitted by the selected representation. For dense
+    // fallback this is the dense image carrier count, not the rejected sparse
+    // geometry.
     std::uint32_t extent_count = 0;
+
+    // Exact sparse extent count computed by preflight before the extent-budget
+    // decision. Preserved even when mode 3 is rejected and mode 2 is emitted.
+    std::uint64_t sparse_required_extent_count = 0;
 
     // D4D1_SPARSE_FALLBACK_REASON
     // 0 none; 1 endian; 2 baseline binding; 3 root proof unavailable;

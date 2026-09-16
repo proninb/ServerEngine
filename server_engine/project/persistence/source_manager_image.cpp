@@ -29,8 +29,8 @@ constexpr std::size_t directory_bytes =
 constexpr std::size_t first_section_offset =
     source_manager_image_prefix_size;
 
-// Preserve the D4E sparse replacement budget even though the generic
-// scatter/gather carrier is larger for sectioned physical storage.
+// Frozen sparse replacement budget. D4L3B validates that the decision
+// is based on exact logical extent geometry, not dirty-source count.
 constexpr std::size_t source_manager_sparse_extent_budget = 32;
 
 constexpr std::uint32_t physical_present = 0x00000001u;
@@ -2678,6 +2678,12 @@ status freeze_source_manager_sparse_baseline_image(
         if (baseline.logical_size_value >
             extent_cursor) {
             ++required_extent_count;
+        }
+
+        if (telemetry != nullptr) {
+            telemetry->sparse_required_extent_count =
+                static_cast<std::uint64_t>(
+                    required_extent_count);
         }
 
         if (required_extent_count >

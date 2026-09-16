@@ -539,6 +539,9 @@ status freeze_project_generation(
 
                 const auto sparse_fallback_reason =
                     source_manager_detail.sparse_fallback_reason;
+                const auto sparse_required_extent_count =
+                    source_manager_detail.
+                        sparse_required_extent_count;
 
                 output.sparse_sources.reset();
 
@@ -553,6 +556,8 @@ status freeze_project_generation(
 
                 source_manager_detail.sparse_fallback_reason =
                     sparse_fallback_reason;
+                source_manager_detail.sparse_required_extent_count =
+                    sparse_required_extent_count;
             }
         }
         else {
@@ -653,6 +658,9 @@ status freeze_project_generation(
                 source_manager_detail.crc_worker_count;
             telemetry->source_manager_extent_count =
                 source_manager_detail.extent_count;
+            telemetry->source_manager_sparse_required_extent_count =
+                source_manager_detail.
+                    sparse_required_extent_count;
             telemetry->source_manager_sparse_fallback_reason =
                 source_manager_detail.sparse_fallback_reason;
         }

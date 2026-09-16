@@ -3492,6 +3492,9 @@ struct idempotent_save_timing final {
             telemetry.generation_freeze_source_manager_identity_copy_ns)
         << ",source_manager_extent_count="
         << telemetry.generation_freeze_source_manager_extent_count
+        << ",source_manager_required_extent_count="
+        << telemetry.
+            generation_freeze_source_manager_sparse_required_extent_count
         << ",freeze_change_state_ms="
         << ns_ms(
             telemetry.generation_freeze_change_state_ns)
@@ -4280,15 +4283,21 @@ struct d4l3b_extent_case final {
         const auto& telemetry =
             save.telemetry;
 
+        const bool required_extents_preserved =
+            telemetry.
+                generation_freeze_source_manager_sparse_required_extent_count ==
+            test.required_extents;
+
         const bool source_manager_pass =
-            test.expect_sparse
+            required_extents_preserved &&
+            (test.expect_sparse
                 ? telemetry.generation_freeze_source_manager_mode == 3 &&
                   telemetry.generation_freeze_source_manager_sparse_fallback_reason == 0 &&
                   telemetry.generation_freeze_source_manager_extent_count ==
                       test.required_extents
                 : telemetry.generation_freeze_source_manager_mode == 2 &&
                   telemetry.generation_freeze_source_manager_sparse_fallback_reason == 10 &&
-                  telemetry.generation_freeze_source_manager_extent_count == 1;
+                  telemetry.generation_freeze_source_manager_extent_count == 1);
 
         const bool save_pass =
             save_status.ok() &&
@@ -4318,6 +4327,9 @@ struct d4l3b_extent_case final {
             << telemetry.generation_freeze_source_manager_mode
             << ",fallback_reason="
             << telemetry.generation_freeze_source_manager_sparse_fallback_reason
+            << ",required_extent_count="
+            << telemetry.
+                generation_freeze_source_manager_sparse_required_extent_count
             << ",reported_extent_count="
             << telemetry.generation_freeze_source_manager_extent_count
             << ",save_total_ms="
