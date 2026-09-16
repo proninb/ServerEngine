@@ -779,63 +779,6 @@ status freeze_project_generation(
     if (!result.ok())
         return result;
 
-    // D4O1A: translate only encoder-proven whole-section identity into a
-    // baseline-owned capability. The commit layer intentionally does not
-    // consume Build Cache provenance yet; D4O1A establishes the proof model.
-    const auto* baseline_build_cache =
-        project.frontend_cache().
-            baseline_persistence_image();
-
-    if (baseline_build_cache != nullptr &&
-        baseline_build_cache->valid()) {
-
-        for (std::size_t index = 0;
-             index <
-                build_cache_image_directory_count;
-             ++index) {
-
-            if (!build_cache_provenance.
-                    baseline_exact_sections[index]) {
-                continue;
-            }
-
-            const auto section =
-                static_cast<
-                    build_cache_image_section>(
-                        index + 1);
-
-            const auto bytes =
-                baseline_build_cache->
-                    section_bytes(section);
-
-            if (bytes.empty())
-                continue;
-
-            const auto proof =
-                project.
-                    prove_baseline_section_borrow(
-                        baseline_artifact_kind::
-                            build_cache,
-                        index,
-                        bytes);
-
-            if (!proof.valid())
-                continue;
-
-            output.baseline_reuse_provenance.
-                build_cache[index] =
-                    proof;
-
-            if (telemetry != nullptr) {
-                telemetry->
-                    build_cache_provenance_bytes +=
-                        bytes.size();
-                ++telemetry->
-                    build_cache_provenance_sections;
-            }
-        }
-    }
-
     compiled_image_view compiled;
     source_manager_image_view sources;
     change_state_image_view change_state;
@@ -920,11 +863,75 @@ status freeze_project_generation(
     if (telemetry != nullptr) {
         telemetry->verify_build_cache_ns =
             elapsed(verify_build_begin);
-        telemetry->internal_ns =
-            elapsed(freeze_begin);
     }
 
-    return result;
+    if (!result.ok())
+        return result;
+
+    // D4P1: mint durable capabilities only after the complete frozen
+    // Generation has passed cross-artifact validation. From this boundary to
+    // synchronous commit, project_generation_storage exposes these bytes only
+    // through const spans.
+    const auto* baseline_build_cache =
+        project.frontend_cache().
+            baseline_persistence_image();
+
+    if (baseline_build_cache != nullptr &&
+        baseline_build_cache->valid()) {
+
+        for (std::size_t index = 0;
+             index <
+                build_cache_image_directory_count;
+             ++index) {
+
+            if (!build_cache_provenance.exact(index))
+                continue;
+
+            const auto section =
+                static_cast<
+                    build_cache_image_section>(
+                        index + 1);
+
+            const auto bytes =
+                baseline_build_cache->
+                    section_bytes(section);
+
+            if (bytes.empty())
+                continue;
+
+            const auto proof =
+                project.
+                    prove_baseline_section_borrow(
+                        baseline_artifact_kind::
+                            build_cache,
+                        index,
+                        bytes);
+
+            if (!proof.valid())
+                continue;
+
+            if (!output.bind_build_cache_provenance(
+                    index,
+                    proof)) {
+                return {
+                    status_code::initialization_failed};
+            }
+
+            if (telemetry != nullptr) {
+                telemetry->
+                    build_cache_provenance_bytes +=
+                        bytes.size();
+                ++telemetry->
+                    build_cache_provenance_sections;
+            }
+        }
+    }
+
+    if (telemetry != nullptr)
+        telemetry->internal_ns =
+            elapsed(freeze_begin);
+
+    return {};
 }
 
 status freeze_project_generation(

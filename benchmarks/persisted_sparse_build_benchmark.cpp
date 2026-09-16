@@ -2,6 +2,7 @@
 #include "../server_engine/project/persistence/baseline_store.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -4079,6 +4080,110 @@ struct idempotent_save_timing final {
         lifecycle_pass &&
         d4n2_pass;
 
+    const auto section_mask_count =
+        [](std::uint32_t mask) noexcept {
+            std::uint32_t count = 0;
+            while (mask != 0) {
+                count += mask & 1u;
+                mask >>= 1u;
+            }
+            return count;
+        };
+
+    constexpr std::uint32_t build_cache_section_mask =
+        (std::uint32_t{1} <<
+            build_cache_image_directory_count) -
+        std::uint32_t{1};
+
+    const auto provenance_mask =
+        telemetry.transaction_build_cache_provenance_reused_mask;
+    const auto compare_attempt_mask =
+        telemetry.transaction_build_cache_compare_attempt_mask;
+    const auto compare_reused_mask =
+        telemetry.transaction_build_cache_compare_reused_mask;
+
+    const bool d4o2a_mask_contract =
+        (provenance_mask & ~build_cache_section_mask) == 0 &&
+        (compare_attempt_mask & ~build_cache_section_mask) == 0 &&
+        (compare_reused_mask & ~build_cache_section_mask) == 0 &&
+        (provenance_mask & compare_attempt_mask) == 0 &&
+        (compare_reused_mask & ~compare_attempt_mask) == 0 &&
+        section_mask_count(provenance_mask) ==
+            telemetry.transaction_build_cache_provenance_reused_sections &&
+        section_mask_count(compare_attempt_mask) ==
+            telemetry.transaction_build_cache_compare_sections &&
+        section_mask_count(compare_reused_mask) ==
+            telemetry.transaction_build_cache_reused_sections -
+            telemetry.transaction_build_cache_provenance_reused_sections &&
+        compare_reused_mask != 0;
+
+    const bool d4o2a_pass =
+        d4o1c_pass &&
+        d4o2a_mask_contract;
+
+    const auto build_cache_section_bit =
+        [](build_cache_image_section section) noexcept {
+            const auto raw =
+                static_cast<std::uint32_t>(section);
+            return raw >= 1 &&
+                    raw <= build_cache_image_directory_count
+                ? std::uint32_t{1} << (raw - 1)
+                : std::uint32_t{0};
+        };
+
+    // D4O2D freezes the architectural result, not an optimizer-specific
+    // implementation detail. These sections must be encoder-proven exact for
+    // the deterministic dirty-one workload. Additional future provenance is
+    // allowed. The residual exact-compare path must remain exercised so the
+    // generic durable fallback continues to have regression coverage.
+    const std::uint32_t d4o2d_required_provenance_mask =
+        build_cache_section_bit(
+            build_cache_image_section::frontend_local_types) |
+        build_cache_section_bit(
+            build_cache_image_section::frontend_type_slots) |
+        build_cache_section_bit(
+            build_cache_image_section::graph_named_refs) |
+        build_cache_section_bit(
+            build_cache_image_section::graph_derived_index) |
+        build_cache_section_bit(
+            build_cache_image_section::
+                graph_reverse_dependency_heads) |
+        build_cache_section_bit(
+            build_cache_image_section::
+                graph_type_identity_index) |
+        build_cache_section_bit(
+            build_cache_image_section::
+                graph_object_identity_index) |
+        build_cache_section_bit(
+            build_cache_image_section::
+                graph_link_target_index);
+
+    const bool d4o2d_identity_contract =
+        (provenance_mask &
+            d4o2d_required_provenance_mask) ==
+                d4o2d_required_provenance_mask &&
+        (provenance_mask & compare_attempt_mask) == 0 &&
+        compare_reused_mask != 0 &&
+        telemetry.transaction_build_cache_compare_bytes != 0 &&
+        telemetry.transaction_build_cache_compare_bytes <= 256 &&
+        telemetry.transaction_build_cache_fallback_reason == 0 &&
+        telemetry.transaction_build_cache_hard_link_fallback_sections == 0;
+
+    const bool d4o2d_pass =
+        d4o2a_pass &&
+        d4o2d_identity_contract &&
+        lifecycle_pass &&
+        d4n2_pass;
+
+    const bool d4p1_pass =
+        d4o2d_pass &&
+        telemetry.
+            transaction_build_cache_provenance_binding_rejected_sections == 0 &&
+        telemetry.transaction_build_cache_provenance_reused_sections ==
+            telemetry.generation_freeze_build_cache_provenance_sections &&
+        telemetry.transaction_build_cache_provenance_reused_bytes ==
+            telemetry.generation_freeze_build_cache_provenance_bytes;
+
     std::cout
         << "D4L3A_SECTIONED_LIFECYCLE_GC,"
         << (lifecycle_pass ? "PASS" : "FAIL")
@@ -4189,7 +4294,139 @@ struct idempotent_save_timing final {
         << (d4n2_pass ? 1 : 0)
         << '\n';
 
-    return d4o1c_pass ? 0 : 1;
+    constexpr std::array<std::string_view, 25>
+        d4o2a_section_names{
+            "source_directory",
+            "source_bytes",
+            "frontend_local_types",
+            "frontend_type_slots",
+            "frontend_object_slots",
+            "frontend_member_slots",
+            "contribution_states",
+            "contribution_types",
+            "contribution_members",
+            "contribution_modifiers",
+            "contribution_enum_values",
+            "contribution_objects",
+            "contribution_links",
+            "construction_states",
+            "graph_intrinsic_refs",
+            "graph_named_refs",
+            "graph_derived_index",
+            "graph_dependency_versions",
+            "graph_reverse_dependency_heads",
+            "graph_dependency_edges",
+            "graph_type_identity_index",
+            "graph_object_identity_index",
+            "graph_link_target_index",
+            "source_file_identity_index",
+            "tracked_directory_identity_index",
+        };
+
+    std::cout
+        << "D4O2A_BUILD_CACHE_SECTION_AUDIT,"
+        << (d4o2a_pass ? "PASS" : "FAIL")
+        << ",sources=" << source_count
+        << ",provenance_mask="
+        << provenance_mask
+        << ",compare_attempt_mask="
+        << compare_attempt_mask
+        << ",compare_reused_mask="
+        << compare_reused_mask
+        << ",provenance_sections="
+        << telemetry.transaction_build_cache_provenance_reused_sections
+        << ",compare_sections="
+        << telemetry.transaction_build_cache_compare_sections
+        << ",reused_sections="
+        << telemetry.transaction_build_cache_reused_sections
+        << ",provenance_bytes="
+        << telemetry.transaction_build_cache_provenance_reused_bytes
+        << ",compare_bytes="
+        << telemetry.transaction_build_cache_compare_bytes
+        << ",reused_bytes="
+        << telemetry.transaction_build_cache_reused_bytes
+        << '\n';
+
+    for (std::size_t index = 0;
+         index < d4o2a_section_names.size();
+         ++index) {
+
+        const auto bit =
+            std::uint32_t{1} << index;
+
+        if ((provenance_mask |
+             compare_attempt_mask |
+             compare_reused_mask) & bit) {
+
+            std::cout
+                << "D4O2A_BUILD_CACHE_SECTION,"
+                << "index=" << (index + 1)
+                << ",name="
+                << d4o2a_section_names[index]
+                << ",provenance="
+                << ((provenance_mask & bit) != 0 ? 1 : 0)
+                << ",compare_attempt="
+                << ((compare_attempt_mask & bit) != 0 ? 1 : 0)
+                << ",compare_reused="
+                << ((compare_reused_mask & bit) != 0 ? 1 : 0)
+                << '\n';
+        }
+    }
+
+    std::cout
+        << "D4O2D_BUILD_CACHE_IDENTITY_CONTRACT,"
+        << (d4o2d_pass ? "PASS" : "FAIL")
+        << ",sources=" << source_count
+        << ",required_provenance_mask="
+        << d4o2d_required_provenance_mask
+        << ",actual_provenance_mask="
+        << provenance_mask
+        << ",compare_attempt_mask="
+        << compare_attempt_mask
+        << ",compare_reused_mask="
+        << compare_reused_mask
+        << ",provenance_sections="
+        << telemetry.transaction_build_cache_provenance_reused_sections
+        << ",compare_sections="
+        << telemetry.transaction_build_cache_compare_sections
+        << ",provenance_bytes="
+        << telemetry.transaction_build_cache_provenance_reused_bytes
+        << ",compare_bytes="
+        << telemetry.transaction_build_cache_compare_bytes
+        << ",reused_bytes="
+        << telemetry.transaction_build_cache_reused_bytes
+        << ",fallback_reason="
+        << telemetry.transaction_build_cache_fallback_reason
+        << ",hard_link_fallback_sections="
+        << telemetry.transaction_build_cache_hard_link_fallback_sections
+        << ",lifecycle_pass="
+        << (lifecycle_pass ? 1 : 0)
+        << ",dirty_after_gc_pass="
+        << (d4n2_pass ? 1 : 0)
+        << '\n';
+
+    std::cout
+        << "D4P1_FROZEN_BUILD_CACHE_CAPABILITY,"
+        << (d4p1_pass ? "PASS" : "FAIL")
+        << ",sources=" << source_count
+        << ",freeze_provenance_sections="
+        << telemetry.generation_freeze_build_cache_provenance_sections
+        << ",commit_provenance_sections="
+        << telemetry.transaction_build_cache_provenance_reused_sections
+        << ",freeze_provenance_bytes="
+        << telemetry.generation_freeze_build_cache_provenance_bytes
+        << ",commit_provenance_bytes="
+        << telemetry.transaction_build_cache_provenance_reused_bytes
+        << ",binding_rejected_sections="
+        << telemetry.
+            transaction_build_cache_provenance_binding_rejected_sections
+        << ",compare_bytes="
+        << telemetry.transaction_build_cache_compare_bytes
+        << ",fallback_reason="
+        << telemetry.transaction_build_cache_fallback_reason
+        << '\n';
+
+    return d4p1_pass ? 0 : 1;
 }
 
 

@@ -1776,6 +1776,10 @@ struct sectioned_build_cache_write_telemetry final {
     std::uint32_t reused_sections = 0;
     std::uint32_t compare_sections = 0;
     std::uint32_t provenance_reused_sections = 0;
+    std::uint32_t provenance_binding_rejected_sections = 0;
+    std::uint32_t provenance_reused_mask = 0;
+    std::uint32_t compare_attempt_mask = 0;
+    std::uint32_t compare_reused_mask = 0;
     std::uint32_t hard_link_fallback_sections = 0;
     std::uint32_t io_worker_count = 0;
     bool sectioned = false;
@@ -1905,7 +1909,7 @@ build_cache_section_path(
     const std::filesystem::path& previous_directory,
     std::span<const std::byte> image,
     const std::array<
-        baseline_section_provenance,
+        frozen_baseline_section_provenance,
         25>& provenance,
     transaction_io_executor& io_executor,
     durable_write_telemetry& io,
@@ -2061,14 +2065,24 @@ build_cache_section_path(
         // commit validates that owner/section capability before hard-linking
         // directly; no metadata/CRC/memcmp equality proof is repeated here.
         if (index < provenance.size()) {
-            const auto& proof =
+            const auto& frozen_proof =
                 provenance[index];
+            const auto& proof =
+                frozen_proof.baseline();
 
             const auto proven_bytes =
                 proof.bytes();
+            const bool frozen_binding_valid =
+                frozen_proof.valid_for(bytes);
+
+            if (frozen_proof.valid() &&
+                !frozen_binding_valid) {
+                ++detail.
+                    provenance_binding_rejected_sections;
+            }
 
             const bool direct_provenance =
-                proof.valid() &&
+                frozen_binding_valid &&
                 proof.artifact() ==
                     baseline_artifact_kind::build_cache &&
                 proof.section() == index &&
@@ -2076,9 +2090,7 @@ build_cache_section_path(
                 proof.owner()->
                     validate_section_borrow(proof) &&
                 proven_bytes.size() ==
-                    value.byte_count &&
-                bytes.size() ==
-                    proven_bytes.size();
+                    value.byte_count;
 
             if (direct_provenance) {
                 const auto source =
@@ -2112,6 +2124,11 @@ build_cache_section_path(
                     ++detail.provenance_reused_sections;
                     detail.provenance_reused_bytes +=
                         value.byte_count;
+
+                    if (index < 32) {
+                        detail.provenance_reused_mask |=
+                            std::uint32_t{1} << index;
+                    }
                 }
                 else if (classify_hard_link_failure(
                              link_error) ==
@@ -2144,6 +2161,11 @@ build_cache_section_path(
                         index);
 
                 bool exact_equal = false;
+
+                if (index < 32) {
+                    detail.compare_attempt_mask |=
+                        std::uint32_t{1} << index;
+                }
 
                 const auto compare_begin =
                     std::chrono::
@@ -2197,6 +2219,11 @@ build_cache_section_path(
                         ++detail.reused_sections;
                         detail.reused_bytes +=
                             value.byte_count;
+
+                        if (index < 32) {
+                            detail.compare_reused_mask |=
+                                std::uint32_t{1} << index;
+                        }
                     }
                     else if (classify_hard_link_failure(
                                  link_error) ==
@@ -5688,6 +5715,14 @@ status baseline_store::commit(
                 build_cache_detail.provenance_reused_bytes;
             output.telemetry.transaction_build_cache_provenance_reused_sections =
                 build_cache_detail.provenance_reused_sections;
+            output.telemetry.transaction_build_cache_provenance_binding_rejected_sections =
+                build_cache_detail.provenance_binding_rejected_sections;
+            output.telemetry.transaction_build_cache_provenance_reused_mask =
+                build_cache_detail.provenance_reused_mask;
+            output.telemetry.transaction_build_cache_compare_attempt_mask =
+                build_cache_detail.compare_attempt_mask;
+            output.telemetry.transaction_build_cache_compare_reused_mask =
+                build_cache_detail.compare_reused_mask;
             output.telemetry.transaction_build_cache_failed_attempt_ns =
                 build_cache_failed_attempt_ns;
             output.telemetry.transaction_build_cache_fallback_reason =

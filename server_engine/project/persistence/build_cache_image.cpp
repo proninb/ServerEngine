@@ -195,6 +195,75 @@ struct layout_section final {
         : build_cache_image_directory_count;
 }
 
+// Tracks one architectural fact only: whether each logical output section is
+// still byte-identical to its whole pinned-baseline section. A baseline copy
+// establishes exact identity; a geometry change invalidates it; an overwrite
+// preserves it only when the serialized replacement bytes equal the bytes they
+// replaced. This same mechanism is shared by every baseline-backed encoder path.
+class build_cache_section_identity_tracker final {
+public:
+    explicit build_cache_section_identity_tracker(
+        build_cache_encode_provenance* output_value) noexcept
+        : output(output_value) {}
+
+    void establish_exact(
+        build_cache_image_section kind) noexcept {
+
+        if (output == nullptr)
+            return;
+
+        const auto index = section_index(kind);
+        if (index >= output->sections.size())
+            return;
+
+        output->sections[index] =
+            build_cache_baseline_section_identity::exact;
+    }
+
+    void invalidate(
+        build_cache_image_section kind) noexcept {
+
+        if (output == nullptr)
+            return;
+
+        const auto index = section_index(kind);
+        if (index >= output->sections.size())
+            return;
+
+        output->sections[index] =
+            build_cache_baseline_section_identity::none;
+    }
+
+    void observe_overwrite(
+        build_cache_image_section kind,
+        std::span<const std::byte> encoded,
+        std::span<const std::byte> baseline) noexcept {
+
+        if (output == nullptr)
+            return;
+
+        const auto index = section_index(kind);
+        if (index >= output->sections.size() ||
+            !output->exact(index)) {
+            return;
+        }
+
+        if (encoded.size() != baseline.size() ||
+            (!encoded.empty() &&
+             std::memcmp(
+                 encoded.data(),
+                 baseline.data(),
+                 encoded.size()) != 0)) {
+
+            output->sections[index] =
+                build_cache_baseline_section_identity::none;
+        }
+    }
+
+private:
+    build_cache_encode_provenance* output = nullptr;
+};
+
 [[nodiscard]] constexpr std::uint64_t align64(std::uint64_t value) noexcept {
     return (value + 63u) & ~std::uint64_t{63u};
 }
@@ -3414,6 +3483,9 @@ status encode_build_cache_image(
     if (provenance != nullptr)
         *provenance = {};
 
+    build_cache_section_identity_tracker
+        section_identity{provenance};
+
     const auto encode_begin =
         std::chrono::steady_clock::now();
     const auto layout_begin = encode_begin;
@@ -3660,13 +3732,30 @@ status encode_build_cache_image(
                     baseline_bytes.size());
             }
 
+            section_identity.establish_exact(kind);
+
+            if (!local_values.empty())
+                section_identity.invalidate(kind);
+
             values.for_each_materialized(
                 [&](std::size_t index,
                     const auto& value) noexcept {
 
+                    auto* record =
+                        target + index * record_size;
+
                     write_record(
-                        target + index * record_size,
+                        record,
                         value);
+
+                    section_identity.observe_overwrite(
+                        kind,
+                        std::span<const std::byte>{
+                            record,
+                            record_size},
+                        baseline_bytes.subspan(
+                            index * record_size,
+                            record_size));
                 });
 
             for (std::size_t index = 0;
@@ -3688,25 +3777,6 @@ status encode_build_cache_image(
                 telemetry->mapped_baseline_append_records +=
                     local_values.size();
                 ++telemetry->mapped_baseline_bulk_sections;
-            }
-
-            // A whole-section proof is valid only when this path performed the
-            // baseline memcpy and no patch or append subsequently changed the
-            // section. No byte comparison is needed for this classification.
-            if (provenance != nullptr &&
-                patch_records == 0 &&
-                local_values.empty()) {
-
-                const auto index =
-                    section_index(kind);
-
-                if (index <
-                    provenance->
-                        baseline_exact_sections.size()) {
-                    provenance->
-                        baseline_exact_sections[index] =
-                            true;
-                }
             }
 
             return true;
@@ -3829,6 +3899,10 @@ status encode_build_cache_image(
 
                 const auto clear_section =
                     [&](build_cache_image_section kind) noexcept {
+
+                        // D4O2C: any abandoned sparse reconstruction proof is
+                        // invalid before the canonical fallback rewrites bytes.
+                        section_identity.invalidate(kind);
 
                         const auto& value =
                             layout[section_index(kind)];
@@ -3990,6 +4064,7 @@ status encode_build_cache_image(
                         baseline_directory.size();
 
                     struct sparse_arena_state final {
+                        build_cache_image_section kind{};
                         std::span<const std::byte> baseline;
                         std::byte* output = nullptr;
                         std::size_t record_size = 0;
@@ -4003,6 +4078,8 @@ status encode_build_cache_image(
                     std::array<sparse_arena_state, 4>
                         arenas{{
                             {
+                                build_cache_image_section::
+                                    frontend_local_types,
                                 baseline_build_cache->
                                     section_bytes(
                                         build_cache_image_section::
@@ -4014,6 +4091,8 @@ status encode_build_cache_image(
                                 local_type_count,
                             },
                             {
+                                build_cache_image_section::
+                                    frontend_type_slots,
                                 baseline_build_cache->
                                     section_bytes(
                                         build_cache_image_section::
@@ -4025,6 +4104,8 @@ status encode_build_cache_image(
                                 type_slot_count,
                             },
                             {
+                                build_cache_image_section::
+                                    frontend_object_slots,
                                 baseline_build_cache->
                                     section_bytes(
                                         build_cache_image_section::
@@ -4036,6 +4117,8 @@ status encode_build_cache_image(
                                 object_slot_count,
                             },
                             {
+                                build_cache_image_section::
+                                    frontend_member_slots,
                                 baseline_build_cache->
                                     section_bytes(
                                         build_cache_image_section::
@@ -4048,7 +4131,7 @@ status encode_build_cache_image(
                             },
                         }};
 
-                    for (const auto& arena : arenas) {
+                    for (auto& arena : arenas) {
                         if (arena.record_size == 0 ||
                             arena.baseline_count >
                                 (std::numeric_limits<
@@ -4058,6 +4141,27 @@ status encode_build_cache_image(
                                 arena.baseline_count *
                                     arena.record_size) {
                             return false;
+                        }
+
+                        // D4O2C: equal geometry lets reconstruction start from
+                        // one exact whole-baseline copy. Subsequent moved or
+                        // replacement ranges are the only bytes that can
+                        // invalidate identity.
+                        if (arena.baseline_count ==
+                            arena.current_count) {
+
+                            if (!arena.baseline.empty()) {
+                                std::memcpy(
+                                    arena.output,
+                                    arena.baseline.data(),
+                                    arena.baseline.size());
+
+                                baseline_bytes_copied +=
+                                    arena.baseline.size();
+                            }
+
+                            section_identity.establish_exact(
+                                arena.kind);
                         }
                     }
 
@@ -4089,17 +4193,51 @@ status encode_build_cache_image(
                                 arena.record_size;
 
                             if (bytes != 0) {
-                                std::memcpy(
-                                    arena.output +
-                                        arena.output_cursor *
-                                            arena.record_size,
-                                    arena.baseline.data() +
-                                        arena.copy_cursor *
-                                            arena.record_size,
-                                    bytes);
+                                const auto output_offset =
+                                    arena.output_cursor *
+                                    arena.record_size;
+                                const auto baseline_offset =
+                                    arena.copy_cursor *
+                                    arena.record_size;
 
-                                baseline_bytes_copied +=
-                                    bytes;
+                                // Equal-geometry arenas were copied wholesale
+                                // once above. A baseline run that remains at
+                                // the same offset is therefore already present.
+                                // Shifted runs are copied and audited only over
+                                // the bytes actually moved.
+                                const bool already_exact_at_target =
+                                    arena.baseline_count ==
+                                        arena.current_count &&
+                                    output_offset ==
+                                        baseline_offset;
+
+                                if (!already_exact_at_target) {
+                                    auto* target =
+                                        arena.output +
+                                        output_offset;
+
+                                    std::memcpy(
+                                        target,
+                                        arena.baseline.data() +
+                                            baseline_offset,
+                                        bytes);
+
+                                    baseline_bytes_copied +=
+                                        bytes;
+
+                                    if (arena.baseline_count ==
+                                        arena.current_count) {
+
+                                        section_identity.observe_overwrite(
+                                            arena.kind,
+                                            std::span<const std::byte>{
+                                                target,
+                                                bytes},
+                                            arena.baseline.subspan(
+                                                output_offset,
+                                                bytes));
+                                    }
+                                }
                             }
 
                             arena.output_cursor +=
@@ -4243,12 +4381,30 @@ status encode_build_cache_image(
                             };
 
                             if (!replacement.empty()) {
-                                std::memcpy(
+                                const auto output_offset =
+                                    arena.output_cursor *
+                                    arena.record_size;
+                                auto* target =
                                     arena.output +
-                                        arena.output_cursor *
-                                            arena.record_size,
+                                    output_offset;
+
+                                std::memcpy(
+                                    target,
                                     replacement.data(),
                                     replacement.size());
+
+                                if (arena.baseline_count ==
+                                    arena.current_count) {
+
+                                    section_identity.observe_overwrite(
+                                        arena.kind,
+                                        std::span<const std::byte>{
+                                            target,
+                                            replacement.size()},
+                                        arena.baseline.subspan(
+                                            output_offset,
+                                            replacement.size()));
+                                }
                             }
 
                             arena.output_cursor +=

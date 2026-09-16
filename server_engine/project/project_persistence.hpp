@@ -9,6 +9,7 @@
 #include "project_configuration.hpp"
 
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <span>
 #include <vector>
@@ -156,6 +157,62 @@ public:
         return baseline_reuse_provenance;
     }
 
+    // Safe cold-path capability conversion. Unlike the private freeze fast path,
+    // this entry point does not trust encoder state: it validates the pinned
+    // baseline capability and exact current section bytes before binding them
+    // to this storage.
+    [[nodiscard]] bool bind_verified_build_cache_provenance(
+        std::size_t index,
+        const baseline_section_provenance& baseline) noexcept {
+
+        if (!baseline.valid() ||
+            baseline.artifact() !=
+                baseline_artifact_kind::build_cache ||
+            baseline.section() != index ||
+            baseline.owner() == nullptr ||
+            !baseline.owner()->
+                validate_section_borrow(baseline) ||
+            index >=
+                baseline_reuse_provenance.build_cache.size()) {
+            return false;
+        }
+
+        build_cache_image_view image;
+        if (!image.bind(build).ok())
+            return false;
+
+        const auto raw =
+            static_cast<std::uint32_t>(index + 1);
+        if (raw == 0 ||
+            raw > build_cache_image_directory_count) {
+            return false;
+        }
+
+        const auto section =
+            static_cast<build_cache_image_section>(raw);
+        const auto current =
+            image.section_bytes(section);
+        const auto expected =
+            baseline.bytes();
+
+        if (current.empty() ||
+            current.size() != expected.size() ||
+            std::memcmp(
+                current.data(),
+                expected.data(),
+                current.size()) != 0) {
+            return false;
+        }
+
+        baseline_reuse_provenance.build_cache[index] =
+            frozen_baseline_section_provenance{
+                baseline,
+                current};
+
+        return baseline_reuse_provenance.
+            build_cache[index].valid_for(current);
+    }
+
     [[nodiscard]] project_generation_segments
     segments() const noexcept {
         const auto change_segment =
@@ -203,6 +260,50 @@ public:
     }
 
 private:
+    // Minting the durable Build Cache capability is a freeze-only operation.
+    // The section span is derived again from this storage's own encoded image,
+    // so callers cannot bind a valid baseline proof to arbitrary same-sized
+    // bytes. After freeze, build is reachable only through const segments().
+    [[nodiscard]] bool bind_build_cache_provenance(
+        std::size_t index,
+        const baseline_section_provenance& baseline) noexcept {
+
+        if (!baseline.valid() ||
+            index >=
+                baseline_reuse_provenance.build_cache.size()) {
+            return false;
+        }
+
+        build_cache_image_view image;
+        if (!image.bind(build).ok())
+            return false;
+
+        const auto raw =
+            static_cast<std::uint32_t>(index + 1);
+        if (raw == 0 ||
+            raw > build_cache_image_directory_count) {
+            return false;
+        }
+
+        const auto section =
+            static_cast<build_cache_image_section>(raw);
+        const auto frozen =
+            image.section_bytes(section);
+
+        if (frozen.empty() ||
+            frozen.size() != baseline.bytes().size()) {
+            return false;
+        }
+
+        baseline_reuse_provenance.build_cache[index] =
+            frozen_baseline_section_provenance{
+                baseline,
+                frozen};
+
+        return baseline_reuse_provenance.
+            build_cache[index].valid_for(frozen);
+    }
+
     std::vector<std::byte> compiled;
     std::vector<std::byte> sources;
     source_manager_native_image_storage native_sources;

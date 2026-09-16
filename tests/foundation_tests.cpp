@@ -24,6 +24,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -4617,6 +4618,212 @@ struct persistent_lifecycle_fixture final {
     return manager.unload().ok();
 }
 
+bool test_frozen_build_cache_capability_rejects_rebound_span() {
+    build_cache_fixture fixture;
+    if (!prepare_build_cache_fixture(fixture))
+        return false;
+
+    const auto cleanup = [&]() noexcept {
+        std::error_code error;
+        std::filesystem::remove_all(
+            fixture.directory,
+            error);
+    };
+
+    project_generation_storage storage;
+    if (!freeze_project_generation(
+            *fixture.context,
+            fixture.context->configuration(),
+            storage).ok()) {
+        cleanup();
+        return false;
+    }
+
+    const auto original_generation =
+        storage.segments();
+    if (!original_generation.persistable() ||
+        original_generation.build().empty()) {
+        cleanup();
+        return false;
+    }
+
+    const auto project_path =
+        fixture.directory / "project.json";
+    {
+        std::ofstream file(project_path);
+        file << "{}";
+        if (!file) {
+            cleanup();
+            return false;
+        }
+    }
+
+    baseline_store store{project_path};
+    const auto fingerprint =
+        baseline_test_fingerprint(181);
+
+    baseline_commit_result baseline_commit;
+    if (!store.commit(
+            fingerprint,
+            baseline_configuration_state{},
+            original_generation,
+            baseline_commit).ok()) {
+        cleanup();
+        return false;
+    }
+
+    baseline_snapshot snapshot;
+    if (!store.open(
+            fingerprint,
+            snapshot).ok()) {
+        cleanup();
+        return false;
+    }
+
+    build_cache_image_view baseline_cache;
+    if (!snapshot.bind_build_cache(
+            baseline_cache).ok()) {
+        cleanup();
+        return false;
+    }
+
+    constexpr auto section =
+        build_cache_image_section::
+            graph_named_refs;
+    constexpr auto raw_section =
+        static_cast<std::uint32_t>(section);
+    static_assert(raw_section != 0);
+    constexpr std::size_t section_index =
+        static_cast<std::size_t>(
+            raw_section - 1);
+
+    const auto baseline_bytes =
+        baseline_cache.section_bytes(section);
+    if (baseline_bytes.empty()) {
+        cleanup();
+        return false;
+    }
+
+    const auto baseline_proof =
+        snapshot.prove_section_borrow(
+            baseline_artifact_kind::build_cache,
+            section_index,
+            baseline_bytes);
+
+    if (!baseline_proof.valid() ||
+        !storage.bind_verified_build_cache_provenance(
+            section_index,
+            baseline_proof)) {
+        cleanup();
+        return false;
+    }
+
+    std::vector<std::byte> rebound_build;
+    try {
+        const auto original_build =
+            original_generation.build();
+        rebound_build.assign(
+            original_build.begin(),
+            original_build.end());
+    }
+    catch (...) {
+        cleanup();
+        return false;
+    }
+
+    const auto original_build =
+        original_generation.build();
+    if (rebound_build.empty() ||
+        rebound_build.data() ==
+            original_build.data() ||
+        rebound_build.size() !=
+            original_build.size()) {
+        cleanup();
+        return false;
+    }
+
+    const project_generation_segments rebound_generation{
+        original_generation.compiled_segment(),
+        original_generation.sources_segment(),
+        original_generation.change_segment(),
+        project_generation_segment{
+            std::span<const std::byte>{
+                rebound_build.data(),
+                rebound_build.size()}},
+    };
+
+    baseline_commit_result rebound_commit;
+    const auto rebound_result =
+        store.commit(
+            fingerprint,
+            baseline_configuration_state{},
+            rebound_generation,
+            storage.commit_provenance(),
+            rebound_commit);
+
+    if (!rebound_result.ok()) {
+        cleanup();
+        return false;
+    }
+
+    const auto& telemetry =
+        rebound_commit.telemetry;
+
+    const bool boundary_pass =
+        telemetry.
+            transaction_build_cache_provenance_binding_rejected_sections ==
+                1 &&
+        telemetry.
+            transaction_build_cache_provenance_reused_sections ==
+                0 &&
+        telemetry.
+            transaction_build_cache_compare_sections !=
+                0 &&
+        telemetry.
+            transaction_build_cache_reused_sections !=
+                0 &&
+        telemetry.
+            transaction_build_cache_fallback_reason ==
+                0 &&
+        telemetry.
+            transaction_build_cache_hard_link_fallback_sections ==
+                0;
+
+    baseline_snapshot committed_snapshot;
+    build_cache_image_view committed_cache;
+
+    const bool durable_pass =
+        boundary_pass &&
+        store.open(
+            fingerprint,
+            committed_snapshot).ok() &&
+        committed_snapshot.bind_build_cache(
+            committed_cache).ok() &&
+        committed_cache.verify_contents().ok();
+
+    const auto committed_bytes =
+        committed_cache.section_bytes(section);
+
+    const bool bytes_preserved =
+        committed_bytes.size() ==
+            baseline_bytes.size() &&
+        (committed_bytes.empty() ||
+         std::memcmp(
+             committed_bytes.data(),
+             baseline_bytes.data(),
+             committed_bytes.size()) == 0);
+
+    const bool pass =
+        durable_pass &&
+        bytes_preserved;
+
+    committed_snapshot = {};
+    snapshot = {};
+    cleanup();
+    return pass;
+}
+
+
 bool test_project_persistence_save_load() {
     persistent_lifecycle_fixture fixture;
     if (!prepare_persistent_lifecycle_fixture(
@@ -6117,6 +6324,9 @@ constexpr std::array tests{
     test_case{"build_cache_image_mapped_baseline", &test_build_cache_image_mapped_baseline},
     test_case{"build_cache_image_incremental_lineage", &test_build_cache_image_incremental_lineage},
     test_case{"build_cache_image_integrity", &test_build_cache_image_integrity},
+    test_case{
+        "frozen_build_cache_capability_rejects_rebound_span",
+        &test_frozen_build_cache_capability_rejects_rebound_span},
     test_case{"project_persistence_save_load", &test_project_persistence_save_load},
     test_case{"project_load_does_not_map_build_cache", &test_project_load_does_not_map_build_cache},
     test_case{"project_load_fingerprint_guard", &test_project_load_fingerprint_guard},

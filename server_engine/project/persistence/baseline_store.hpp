@@ -20,6 +20,7 @@ namespace cw::server {
 class build_cache_image_view;
 class source_manager_image_view;
 class baseline_snapshot;
+class project_generation_storage;
 
 inline constexpr std::uint32_t baseline_format_version = 1;
 inline constexpr std::size_t baseline_fingerprint_size = 32;
@@ -99,13 +100,88 @@ private:
     friend class baseline_snapshot;
 };
 
-// Commit-scoped provenance. It does not own the baseline; project_context keeps
-// the referenced baseline_snapshot alive for the synchronous SAVE/commit call.
+// Capability binding one encoder-proven exact baseline section to the immutable
+// Build Cache bytes owned by one frozen project_generation_storage. The object
+// is move-only so a caller cannot detach a valid binding from the frozen
+// storage lifetime and later pair it with an unrelated Generation.
+class frozen_baseline_section_provenance final {
+public:
+    frozen_baseline_section_provenance() noexcept = default;
+
+    frozen_baseline_section_provenance(
+        const frozen_baseline_section_provenance&) = delete;
+    frozen_baseline_section_provenance& operator=(
+        const frozen_baseline_section_provenance&) = delete;
+
+    frozen_baseline_section_provenance(
+        frozen_baseline_section_provenance&&) noexcept = default;
+    frozen_baseline_section_provenance& operator=(
+        frozen_baseline_section_provenance&&) noexcept = default;
+
+    [[nodiscard]] bool valid() const noexcept {
+        return baseline_value.valid() &&
+            data_value != nullptr &&
+            size_value != 0 &&
+            baseline_value.bytes().size() == size_value;
+    }
+
+    [[nodiscard]] const baseline_section_provenance&
+    baseline() const noexcept {
+        return baseline_value;
+    }
+
+    [[nodiscard]] std::span<const std::byte>
+    frozen_bytes() const noexcept {
+        return {
+            data_value,
+            static_cast<std::size_t>(size_value)};
+    }
+
+    // Pointer identity is intentional. project_generation_storage owns the
+    // Build Cache vector privately and exposes only const spans after freeze;
+    // therefore the bound bytes cannot be replaced without changing this span.
+    [[nodiscard]] bool valid_for(
+        std::span<const std::byte> current) const noexcept {
+
+        return valid() &&
+            current.data() == data_value &&
+            current.size() == size_value;
+    }
+
+private:
+    frozen_baseline_section_provenance(
+        const baseline_section_provenance& baseline,
+        std::span<const std::byte> frozen) noexcept
+        : baseline_value(baseline),
+          data_value(frozen.data()),
+          size_value(frozen.size()) {}
+
+    baseline_section_provenance baseline_value{};
+    const std::byte* data_value = nullptr;
+    std::uint64_t size_value = 0;
+
+    friend class project_generation_storage;
+};
+
+// Commit-scoped provenance. It is move-only and remains owned by the frozen
+// project_generation_storage for the complete synchronous SAVE/commit call.
 struct baseline_commit_provenance final {
+    baseline_commit_provenance() noexcept = default;
+
+    baseline_commit_provenance(
+        const baseline_commit_provenance&) = delete;
+    baseline_commit_provenance& operator=(
+        const baseline_commit_provenance&) = delete;
+
+    baseline_commit_provenance(
+        baseline_commit_provenance&&) noexcept = default;
+    baseline_commit_provenance& operator=(
+        baseline_commit_provenance&&) noexcept = default;
+
     std::array<baseline_section_provenance, 10>
         source_manager{};
     std::array<
-        baseline_section_provenance,
+        frozen_baseline_section_provenance,
         25> build_cache{};
 };
 
@@ -277,6 +353,15 @@ struct baseline_commit_telemetry final {
     std::uint32_t transaction_build_cache_compare_sections = 0;
     std::uint64_t transaction_build_cache_provenance_reused_bytes = 0;
     std::uint32_t transaction_build_cache_provenance_reused_sections = 0;
+    std::uint32_t transaction_build_cache_provenance_binding_rejected_sections = 0;
+
+    // D4O2A section audit. Bit N corresponds to Build Cache section N+1.
+    // attempt_mask identifies exact-file compares that were executed;
+    // reused_mask identifies compares that proved equality and hard-linked.
+    std::uint32_t transaction_build_cache_provenance_reused_mask = 0;
+    std::uint32_t transaction_build_cache_compare_attempt_mask = 0;
+    std::uint32_t transaction_build_cache_compare_reused_mask = 0;
+
     std::uint64_t transaction_build_cache_failed_attempt_ns = 0;
     std::uint32_t transaction_build_cache_fallback_reason = 0;
     std::uint32_t transaction_build_cache_hard_link_fallback_sections = 0;

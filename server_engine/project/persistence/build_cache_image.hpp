@@ -82,15 +82,26 @@ struct build_cache_derived_index_slot final {
     TypeRef type{};
 };
 
-// Encoder-side proof model for whole Build Cache sections copied byte-for-byte
-// from the pinned baseline. This is not a durable-commit decision: the freeze
-// boundary may translate only these exact logical sections into baseline
-// section provenance capabilities.
+enum class build_cache_baseline_section_identity : std::uint8_t {
+    none = 0,
+    exact = 1,
+};
+
+// Encoder-owned proof state for logical Build Cache sections. exact means the
+// complete encoded section is byte-identical to the corresponding whole
+// section in the pinned baseline. Persistence may translate only exact state
+// into a baseline-owned section provenance capability.
 struct build_cache_encode_provenance final {
     std::array<
-        bool,
+        build_cache_baseline_section_identity,
         build_cache_image_directory_count>
-        baseline_exact_sections{};
+        sections{};
+
+    [[nodiscard]] bool exact(std::size_t index) const noexcept {
+        return index < sections.size() &&
+            sections[index] ==
+                build_cache_baseline_section_identity::exact;
+    }
 };
 
 struct build_cache_encode_telemetry final {
