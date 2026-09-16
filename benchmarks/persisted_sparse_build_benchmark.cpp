@@ -3218,6 +3218,30 @@ struct idempotent_save_timing final {
             phase_sum_ns
         : 0;
 
+    // D4O1C: for this deterministic dirty-one workload, every reused Build
+    // Cache section must be explained by exactly one of two disjoint proofs:
+    // direct baseline provenance or the existing exact-file compare path.
+    // This guards against accidentally routing provenance sections back
+    // through memcmp while preserving the non-proven exact proof path.
+    const bool d4o1c_provenance_contract =
+        telemetry.transaction_build_cache_sectioned == 1 &&
+        telemetry.generation_freeze_build_cache_provenance_sections != 0 &&
+        telemetry.generation_freeze_build_cache_provenance_bytes != 0 &&
+        telemetry.transaction_build_cache_provenance_reused_sections ==
+            telemetry.generation_freeze_build_cache_provenance_sections &&
+        telemetry.transaction_build_cache_provenance_reused_bytes ==
+            telemetry.generation_freeze_build_cache_provenance_bytes &&
+        telemetry.transaction_build_cache_compare_sections != 0 &&
+        telemetry.transaction_build_cache_compare_bytes != 0 &&
+        telemetry.transaction_build_cache_reused_sections ==
+            telemetry.transaction_build_cache_provenance_reused_sections +
+            telemetry.transaction_build_cache_compare_sections &&
+        telemetry.transaction_build_cache_reused_bytes ==
+            telemetry.transaction_build_cache_provenance_reused_bytes +
+            telemetry.transaction_build_cache_compare_bytes &&
+        telemetry.transaction_build_cache_fallback_reason == 0 &&
+        telemetry.transaction_build_cache_hard_link_fallback_sections == 0;
+
     const bool save_pass =
         save_status.ok() &&
         !save.transaction.empty() &&
@@ -3238,7 +3262,8 @@ struct idempotent_save_timing final {
         telemetry.transaction_build_cache_provenance_reused_bytes ==
             telemetry.generation_freeze_build_cache_provenance_bytes &&
         telemetry.transaction_build_cache_provenance_reused_sections ==
-            telemetry.generation_freeze_build_cache_provenance_sections;
+            telemetry.generation_freeze_build_cache_provenance_sections &&
+        d4o1c_provenance_contract;
 
     std::cout
         << "D4A_SPARSE_SAVE_MATERIALIZATION,"
@@ -4049,6 +4074,11 @@ struct idempotent_save_timing final {
         build_after_gc_pass &&
         final_unload_status.ok();
 
+    const bool d4o1c_pass =
+        d4o1c_provenance_contract &&
+        lifecycle_pass &&
+        d4n2_pass;
+
     std::cout
         << "D4L3A_SECTIONED_LIFECYCLE_GC,"
         << (lifecycle_pass ? "PASS" : "FAIL")
@@ -4125,7 +4155,41 @@ struct idempotent_save_timing final {
                 .builder.contribution_full_scans
         << '\n';
 
-    return lifecycle_pass && d4n2_pass ? 0 : 1;
+    std::cout
+        << "D4O1C_BUILD_CACHE_PROVENANCE_GATE,"
+        << (d4o1c_pass ? "PASS" : "FAIL")
+        << ",sources=" << source_count
+        << ",freeze_provenance_sections="
+        << telemetry.generation_freeze_build_cache_provenance_sections
+        << ",commit_provenance_sections="
+        << telemetry.transaction_build_cache_provenance_reused_sections
+        << ",compare_sections="
+        << telemetry.transaction_build_cache_compare_sections
+        << ",reused_sections="
+        << telemetry.transaction_build_cache_reused_sections
+        << ",freeze_provenance_bytes="
+        << telemetry.generation_freeze_build_cache_provenance_bytes
+        << ",commit_provenance_bytes="
+        << telemetry.transaction_build_cache_provenance_reused_bytes
+        << ",compare_bytes="
+        << telemetry.transaction_build_cache_compare_bytes
+        << ",reused_bytes="
+        << telemetry.transaction_build_cache_reused_bytes
+        << ",fallback_reason="
+        << telemetry.transaction_build_cache_fallback_reason
+        << ",hard_link_fallback_sections="
+        << telemetry.transaction_build_cache_hard_link_fallback_sections
+        << ",retired_removed="
+        << (retired_removed ? 1 : 0)
+        << ",dirty_build_cache_mapped="
+        << (dirty_build_cache_mapped ? 1 : 0)
+        << ",lifecycle_pass="
+        << (lifecycle_pass ? 1 : 0)
+        << ",dirty_after_gc_pass="
+        << (d4n2_pass ? 1 : 0)
+        << '\n';
+
+    return d4o1c_pass ? 0 : 1;
 }
 
 
