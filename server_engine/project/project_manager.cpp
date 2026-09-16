@@ -1235,7 +1235,8 @@ status project_manager::construct_reserved(
 }
 
 status project_manager::save(
-    baseline_commit_result& output) noexcept {
+    baseline_commit_result& output,
+    std::size_t io_worker_budget) noexcept {
 
     output = {};
 
@@ -1832,7 +1833,8 @@ status project_manager::save(
             configuration_state,
             generation.segments(),
             generation.commit_provenance(),
-            output);
+            output,
+            io_worker_budget);
 
         publish_save_telemetry();
 

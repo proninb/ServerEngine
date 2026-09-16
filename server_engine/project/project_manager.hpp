@@ -220,7 +220,8 @@ public:
         std::size_t acquisition_worker_limit = 0) noexcept;
 
     [[nodiscard]] status save(
-        baseline_commit_result& output) noexcept;
+        baseline_commit_result& output,
+        std::size_t io_worker_budget = 0) noexcept;
 
     [[nodiscard]] status acquire(project_access& output) const noexcept;
 

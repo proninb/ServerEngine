@@ -236,7 +236,10 @@ struct baseline_commit_telemetry final {
     std::uint64_t transaction_write_ns = 0;
     std::uint64_t transaction_flush_ns = 0;
     std::uint64_t transaction_io_wall_ns = 0;
+    std::uint64_t transaction_io_budget_wait_ns = 0;
     std::uint32_t transaction_io_worker_count = 0;
+    std::uint32_t transaction_io_budget = 0;
+    std::uint32_t transaction_io_peak_active = 0;
     std::uint64_t transaction_compiled_write_ns = 0;
     std::uint64_t transaction_compiled_flush_ns = 0;
     std::uint64_t transaction_build_state_write_ns = 0;
@@ -547,7 +550,8 @@ public:
         const baseline_configuration_state& configuration,
         project_generation_segments generation,
         const baseline_commit_provenance& provenance,
-        baseline_commit_result& output) const noexcept;
+        baseline_commit_result& output,
+        std::size_t io_worker_budget = 0) const noexcept;
 
     [[nodiscard]] status commit(
         const baseline_fingerprint& fingerprint,

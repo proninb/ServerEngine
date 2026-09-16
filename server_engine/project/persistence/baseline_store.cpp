@@ -6,9 +6,11 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <mutex>
 #include <new>
 #include <system_error>
 #include <thread>
@@ -92,6 +94,305 @@ std::atomic<std::uint64_t> transaction_counter{0};
 struct durable_write_telemetry final {
     std::uint64_t write_ns = 0;
     std::uint64_t flush_ns = 0;
+};
+
+constexpr std::size_t default_transaction_io_workers = 10;
+
+// One executor owns all transaction I/O scheduling. Artifact tasks and
+// section tasks share this pool; nested persistence code never creates threads.
+struct transaction_io_batch final {
+    std::atomic<std::size_t> remaining{0};
+};
+
+struct transaction_io_job final {
+    void (*invoke)(const void*) noexcept = nullptr;
+    const void* context = nullptr;
+    transaction_io_batch* batch = nullptr;
+};
+
+class transaction_io_executor final {
+public:
+    explicit transaction_io_executor(
+        std::size_t requested) noexcept {
+
+        const auto target =
+            (std::min)(
+                requested != 0
+                    ? requested
+                    : default_transaction_io_workers,
+                maximum_workers);
+
+        worker_count_value = 1;
+
+        for (std::size_t index = 1;
+             index < target;
+             ++index) {
+
+            try {
+                workers[launched] =
+                    std::jthread(
+                        [this]() noexcept {
+                            worker_loop();
+                        });
+                ++launched;
+                ++worker_count_value;
+            }
+            catch (const std::bad_alloc&) {
+                break;
+            }
+            catch (const std::system_error&) {
+                break;
+            }
+        }
+    }
+
+    ~transaction_io_executor() noexcept {
+        {
+            std::lock_guard lock{queue_mutex};
+            stopping = true;
+        }
+
+        queue_condition.notify_all();
+
+        for (std::size_t index = 0;
+             index < launched;
+             ++index) {
+
+            if (workers[index].joinable())
+                workers[index].join();
+        }
+    }
+
+    transaction_io_executor(
+        const transaction_io_executor&) = delete;
+    transaction_io_executor& operator=(
+        const transaction_io_executor&) = delete;
+
+    [[nodiscard]] std::size_t worker_count() const noexcept {
+        return worker_count_value;
+    }
+
+    [[nodiscard]] std::size_t peak_active() const noexcept {
+        return peak_active_workers.load(
+            std::memory_order_relaxed);
+    }
+
+    template <typename... Functions>
+    void run(Functions&... functions) noexcept {
+        transaction_io_batch batch;
+        (submit(batch, functions), ...);
+        wait(batch);
+    }
+
+    template <typename Function>
+    void run_workers(
+        std::size_t count,
+        Function& function) noexcept {
+
+        transaction_io_batch batch;
+
+        for (std::size_t index = 0;
+             index < count;
+             ++index) {
+            submit(batch, function);
+        }
+
+        wait(batch);
+    }
+
+private:
+    static constexpr std::size_t maximum_workers = 16;
+    static constexpr std::size_t queue_capacity = 128;
+
+    template <typename Function>
+    static void invoke_function(const void* context) noexcept {
+        (*static_cast<const Function*>(context))();
+    }
+
+    template <typename Function>
+    void submit(
+        transaction_io_batch& batch,
+        Function& function) noexcept {
+
+        batch.remaining.fetch_add(
+            1,
+            std::memory_order_relaxed);
+
+        transaction_io_job job{
+            &transaction_io_executor::
+                invoke_function<Function>,
+            &function,
+            &batch,
+        };
+
+        if (!enqueue(job))
+            execute(job);
+    }
+
+    [[nodiscard]] bool enqueue(
+        transaction_io_job job) noexcept {
+
+        {
+            std::lock_guard lock{queue_mutex};
+
+            if (queue_size == queue_capacity)
+                return false;
+
+            queue[queue_tail] = job;
+            queue_tail =
+                (queue_tail + 1) %
+                queue_capacity;
+            ++queue_size;
+        }
+
+        queue_condition.notify_one();
+        return true;
+    }
+
+    [[nodiscard]] bool try_take(
+        transaction_io_job& output) noexcept {
+
+        std::lock_guard lock{queue_mutex};
+
+        if (queue_size == 0)
+            return false;
+
+        output = queue[queue_head];
+        queue_head =
+            (queue_head + 1) %
+            queue_capacity;
+        --queue_size;
+        return true;
+    }
+
+    void execute(
+        const transaction_io_job& job) noexcept {
+
+        thread_local const transaction_io_executor*
+            active_executor = nullptr;
+
+        const auto* previous_executor =
+            active_executor;
+        const bool outermost =
+            previous_executor != this;
+
+        if (outermost) {
+            active_executor = this;
+            const auto candidate =
+                active_workers.fetch_add(
+                    1,
+                    std::memory_order_acq_rel) + 1;
+            update_peak_active(candidate);
+        }
+
+        job.invoke(job.context);
+
+        if (outermost) {
+            active_workers.fetch_sub(
+                1,
+                std::memory_order_release);
+            active_executor =
+                previous_executor;
+        }
+
+        if (job.batch->remaining.fetch_sub(
+                1,
+                std::memory_order_acq_rel) == 1) {
+            job.batch->remaining.notify_all();
+        }
+    }
+
+    void wait(
+        transaction_io_batch& batch) noexcept {
+
+        for (;;) {
+            auto remaining =
+                batch.remaining.load(
+                    std::memory_order_acquire);
+
+            if (remaining == 0)
+                return;
+
+            transaction_io_job job;
+            if (try_take(job)) {
+                execute(job);
+                continue;
+            }
+
+            remaining =
+                batch.remaining.load(
+                    std::memory_order_acquire);
+
+            if (remaining != 0) {
+                batch.remaining.wait(
+                    remaining,
+                    std::memory_order_acquire);
+            }
+        }
+    }
+
+    void update_peak_active(
+        std::size_t candidate) noexcept {
+
+        auto current =
+            peak_active_workers.load(
+                std::memory_order_relaxed);
+
+        while (candidate > current &&
+               !peak_active_workers.compare_exchange_weak(
+                   current,
+                   candidate,
+                   std::memory_order_relaxed,
+                   std::memory_order_relaxed)) {
+        }
+    }
+
+    void worker_loop() noexcept {
+        for (;;) {
+            transaction_io_job job;
+
+            {
+                std::unique_lock lock{queue_mutex};
+
+                queue_condition.wait(
+                    lock,
+                    [this]() noexcept {
+                        return stopping ||
+                            queue_size != 0;
+                    });
+
+                if (stopping &&
+                    queue_size == 0) {
+                    return;
+                }
+
+                job = queue[queue_head];
+                queue_head =
+                    (queue_head + 1) %
+                    queue_capacity;
+                --queue_size;
+            }
+
+            execute(job);
+        }
+    }
+
+    std::array<std::jthread, maximum_workers - 1>
+        workers{};
+    std::array<transaction_io_job, queue_capacity>
+        queue{};
+
+    std::mutex queue_mutex;
+    std::condition_variable queue_condition;
+
+    std::size_t queue_head = 0;
+    std::size_t queue_tail = 0;
+    std::size_t queue_size = 0;
+    std::size_t launched = 0;
+    std::size_t worker_count_value = 1;
+    std::atomic<std::size_t> active_workers{0};
+    std::atomic<std::size_t> peak_active_workers{0};
+    bool stopping = false;
 };
 
 void write_u32(std::array<std::byte, manifest_size>& output, std::size_t offset, std::uint32_t value) noexcept {
@@ -1028,6 +1329,7 @@ source_manager_section_path(
     const std::array<
         baseline_section_provenance,
         10>& provenance,
+    transaction_io_executor& io_executor,
     durable_write_telemetry& io,
     sectioned_source_manager_write_telemetry&
         detail) noexcept {
@@ -1378,19 +1680,12 @@ source_manager_section_path(
             status_code::not_available};
     }
 
-    const auto hardware_workers =
-        (std::max)(
-            std::size_t{1},
-            static_cast<std::size_t>(
-                std::thread::
-                    hardware_concurrency()));
-
     const auto worker_count =
         (std::min)(
             task_count,
             (std::min)(
                 maximum_workers,
-                hardware_workers));
+                io_executor.worker_count()));
 
     detail.io_worker_count =
         static_cast<std::uint32_t>(
@@ -1439,44 +1734,11 @@ source_manager_section_path(
         }
     };
 
-    std::array<
-        std::jthread,
-        maximum_workers - 1>
-        workers{};
+        io_executor.run_workers(
+        worker_count,
+        worker);
 
-    std::size_t launched = 0;
-
-    try {
-        for (std::size_t index = 1;
-             index < worker_count;
-             ++index) {
-
-            workers[launched] =
-                std::jthread(
-                    [&]() noexcept {
-                        worker();
-                    });
-
-            ++launched;
-        }
-    }
-    catch (const std::bad_alloc&) {
-        // Caller completes all unclaimed tasks.
-    }
-    catch (const std::system_error&) {
-        // Caller completes all unclaimed tasks.
-    }
-
-    worker();
-
-    for (std::size_t index = 0;
-         index < launched;
-         ++index) {
-        if (workers[index].joinable())
-            workers[index].join();
-    }
-
-    detail.io_wall_ns =
+detail.io_wall_ns =
         elapsed_ns(
             io_begin,
             std::chrono::
@@ -1669,6 +1931,7 @@ build_cache_section_path(
     const std::filesystem::path& transaction_directory,
     const std::filesystem::path& previous_directory,
     std::span<const std::byte> image,
+    transaction_io_executor& io_executor,
     durable_write_telemetry& io,
     sectioned_build_cache_write_telemetry&
         detail) noexcept {
@@ -1936,19 +2199,12 @@ build_cache_section_path(
             status_code::not_available};
     }
 
-    const auto hardware_workers =
-        (std::max)(
-            std::size_t{1},
-            static_cast<std::size_t>(
-                std::thread::
-                    hardware_concurrency()));
-
     const auto worker_count =
         (std::min)(
             task_count,
             (std::min)(
                 maximum_workers,
-                hardware_workers));
+                io_executor.worker_count()));
 
     detail.io_worker_count =
         static_cast<std::uint32_t>(
@@ -2006,45 +2262,11 @@ build_cache_section_path(
         }
     };
 
-    std::array<
-        std::jthread,
-        maximum_workers - 1>
-        workers{};
+        io_executor.run_workers(
+        worker_count,
+        worker);
 
-    std::size_t launched = 0;
-
-    try {
-        for (std::size_t index = 1;
-             index < worker_count;
-             ++index) {
-
-            workers[launched] =
-                std::jthread(
-                    [&]() noexcept {
-                        worker();
-                    });
-
-            ++launched;
-        }
-    }
-    catch (const std::bad_alloc&) {
-        // The caller thread completes all tasks not already claimed.
-    }
-    catch (const std::system_error&) {
-        // The caller thread completes all tasks not already claimed.
-    }
-
-    worker();
-
-    for (std::size_t index = 0;
-         index < launched;
-         ++index) {
-
-        if (workers[index].joinable())
-            workers[index].join();
-    }
-
-    for (std::size_t index = 0;
+for (std::size_t index = 0;
          index < task_count;
          ++index) {
 
@@ -4934,7 +5156,8 @@ status baseline_store::commit(
     const baseline_configuration_state& configuration,
     project_generation_segments generation,
     const baseline_commit_provenance& provenance,
-    baseline_commit_result& output) const noexcept {
+    baseline_commit_result& output,
+    std::size_t io_worker_budget) const noexcept {
     const auto& compiled =
         generation.compiled_segment();
     const auto& source_manager =
@@ -4955,6 +5178,24 @@ status baseline_store::commit(
         std::chrono::steady_clock::now();
 
     durable_write_telemetry io;
+    transaction_io_executor transaction_executor{
+        io_worker_budget};
+
+    output.telemetry.transaction_io_budget =
+        static_cast<std::uint32_t>(
+            transaction_executor.worker_count());
+
+    const auto transaction_write =
+        [&](const auto& path,
+            const auto& first,
+            project_generation_segment,
+            durable_write_telemetry* telemetry) noexcept {
+            return durable_write_file(
+                path,
+                first,
+                {},
+                telemetry);
+        };
 
     const auto record_transaction_io =
         [&](const durable_write_telemetry& value) noexcept {
@@ -5110,199 +5351,191 @@ status baseline_store::commit(
             durable_write_telemetry change_state_io;
             durable_write_telemetry manifest_io;
 
-            try {
-                {
-                    std::vector<std::jthread> workers;
-                    workers.reserve(5);
+            const auto compiled_task =
+                [&]() noexcept {
+                    compiled_result =
+                        transaction_write(
+                            directory / compiled_name,
+                            compiled,
+                            {},
+                            &compiled_io);
+                };
 
-                    workers.emplace_back(
-                        [&]() noexcept {
-                            compiled_result =
-                                durable_write_file(
-                                    directory / compiled_name,
-                                    compiled,
-                                    {},
-                                    &compiled_io);
-                        });
+            const auto source_manager_task =
+                [&]() noexcept {
+                    if (source_manager.is_contiguous()) {
+                        source_manager_fallback_reason =
+                            baseline_sectioned_fallback_reason::
+                                structural_ineligible;
 
-                    workers.emplace_back(
-                        [&]() noexcept {
-                            if (source_manager.is_contiguous()) {
-                                source_manager_fallback_reason =
-                                    baseline_sectioned_fallback_reason::
-                                        structural_ineligible;
-
-                                source_manager_result =
-                                    durable_write_file(
-                                        directory /
-                                            source_manager_name,
-                                        source_manager,
-                                        {},
-                                        &source_manager_io);
-                                return;
-                            }
-
-                            const auto attempt_begin =
-                                std::chrono::steady_clock::now();
-
-                            source_manager_result =
-                                durable_write_sectioned_source_manager(
-                                    directory,
-                                    previous_source_manager_directory,
-                                    source_manager,
-                                    provenance.source_manager,
-                                    source_manager_io,
-                                    source_manager_detail);
-
-                            if (source_manager_result.ok())
-                                return;
-
-                            const auto attempt_ns =
-                                elapsed_ns(
-                                    attempt_begin,
-                                    std::chrono::
-                                        steady_clock::now());
-
-                            if (source_manager_result.code !=
-                                status_code::not_available) {
-                                source_manager_failed_attempt_ns =
-                                    attempt_ns;
-                                return;
-                            }
-
-                            source_manager_fallback_reason =
-                                baseline_sectioned_fallback_reason::
-                                    structural_ineligible;
-                            source_manager_failed_attempt_ns =
-                                attempt_ns;
-
-                            std::error_code cleanup_error;
-                            std::filesystem::remove_all(
+                        source_manager_result =
+                            transaction_write(
                                 directory /
-                                    source_manager_directory_name,
-                                cleanup_error);
+                                    source_manager_name,
+                                source_manager,
+                                {},
+                                &source_manager_io);
+                        return;
+                    }
 
-                            durable_write_telemetry fallback_io;
-                            source_manager_result =
-                                durable_write_file(
-                                    directory /
-                                        source_manager_name,
-                                    source_manager,
-                                    {},
-                                    &fallback_io);
+                    const auto attempt_begin =
+                        std::chrono::steady_clock::now();
 
-                            source_manager_io.write_ns +=
-                                fallback_io.write_ns;
-                            source_manager_io.flush_ns +=
-                                fallback_io.flush_ns;
-                        });
+                    source_manager_result =
+                        durable_write_sectioned_source_manager(
+                            directory,
+                            previous_source_manager_directory,
+                            source_manager,
+                            provenance.source_manager,
+                            transaction_executor,
+                            source_manager_io,
+                            source_manager_detail);
 
-                    workers.emplace_back(
-                        [&]() noexcept {
-                            if (!build_cache.is_contiguous()) {
-                                build_cache_fallback_reason =
-                                    baseline_sectioned_fallback_reason::
-                                        structural_ineligible;
+                    if (source_manager_result.ok())
+                        return;
 
-                                build_cache_result =
-                                    durable_write_file(
-                                        directory /
-                                            build_cache_name,
-                                        build_cache,
-                                        {},
-                                        &build_cache_io);
-                                return;
-                            }
+                    const auto attempt_ns =
+                        elapsed_ns(
+                            attempt_begin,
+                            std::chrono::
+                                steady_clock::now());
 
-                            const auto attempt_begin =
-                                std::chrono::steady_clock::now();
+                    if (source_manager_result.code !=
+                        status_code::not_available) {
+                        source_manager_failed_attempt_ns =
+                            attempt_ns;
+                        return;
+                    }
 
-                            build_cache_result =
-                                durable_write_sectioned_build_cache(
-                                    directory,
-                                    previous_build_cache_directory,
-                                    build_cache.contiguous(),
-                                    build_cache_io,
-                                    build_cache_detail);
+                    source_manager_fallback_reason =
+                        baseline_sectioned_fallback_reason::
+                            structural_ineligible;
+                    source_manager_failed_attempt_ns =
+                        attempt_ns;
 
-                            if (build_cache_result.ok())
-                                return;
+                    std::error_code cleanup_error;
+                    std::filesystem::remove_all(
+                        directory /
+                            source_manager_directory_name,
+                        cleanup_error);
 
-                            const auto attempt_ns =
-                                elapsed_ns(
-                                    attempt_begin,
-                                    std::chrono::
-                                        steady_clock::now());
+                    durable_write_telemetry fallback_io;
+                    source_manager_result =
+                        transaction_write(
+                            directory /
+                                source_manager_name,
+                            source_manager,
+                            {},
+                            &fallback_io);
 
-                            if (build_cache_result.code !=
-                                status_code::not_available) {
-                                build_cache_failed_attempt_ns =
-                                    attempt_ns;
-                                return;
-                            }
+                    source_manager_io.write_ns +=
+                        fallback_io.write_ns;
+                    source_manager_io.flush_ns +=
+                        fallback_io.flush_ns;
+                };
 
-                            build_cache_fallback_reason =
-                                baseline_sectioned_fallback_reason::
-                                    structural_ineligible;
-                            build_cache_failed_attempt_ns =
-                                attempt_ns;
+            const auto build_cache_task =
+                [&]() noexcept {
+                    if (!build_cache.is_contiguous()) {
+                        build_cache_fallback_reason =
+                            baseline_sectioned_fallback_reason::
+                                structural_ineligible;
 
-                            std::error_code cleanup_error;
-                            std::filesystem::remove_all(
+                        build_cache_result =
+                            transaction_write(
                                 directory /
-                                    build_cache_directory_name,
-                                cleanup_error);
+                                    build_cache_name,
+                                build_cache,
+                                {},
+                                &build_cache_io);
+                        return;
+                    }
 
-                            durable_write_telemetry fallback_io;
-                            build_cache_result =
-                                durable_write_file(
-                                    directory /
-                                        build_cache_name,
-                                    build_cache,
-                                    {},
-                                    &fallback_io);
+                    const auto attempt_begin =
+                        std::chrono::steady_clock::now();
 
-                            build_cache_io.write_ns +=
-                                fallback_io.write_ns;
-                            build_cache_io.flush_ns +=
-                                fallback_io.flush_ns;
-                        });
+                    build_cache_result =
+                        durable_write_sectioned_build_cache(
+                            directory,
+                            previous_build_cache_directory,
+                            build_cache.contiguous(),
+                            transaction_executor,
+                            build_cache_io,
+                            build_cache_detail);
 
-                    workers.emplace_back(
-                        [&]() noexcept {
-                            change_state_result =
-                                durable_write_file(
-                                    directory / change_state_name,
-                                    change_state,
-                                    {},
-                                    &change_state_io);
-                        });
+                    if (build_cache_result.ok())
+                        return;
 
-                    workers.emplace_back(
-                        [&]() noexcept {
-                            manifest_result =
-                                durable_write_file(
-                                    directory / manifest_name,
-                                    manifest,
-                                    {},
-                                    &manifest_io);
-                        });
-                }
-            }
-            catch (const std::bad_alloc&) {
-                cleanup_failed_transaction();
-                return {status_code::not_available};
-            }
-            catch (const std::length_error&) {
-                cleanup_failed_transaction();
-                return {status_code::not_available};
-            }
-            catch (const std::system_error&) {
-                cleanup_failed_transaction();
-                return {status_code::persistence_failed};
-            }
+                    const auto attempt_ns =
+                        elapsed_ns(
+                            attempt_begin,
+                            std::chrono::
+                                steady_clock::now());
 
-            output.telemetry.transaction_io_worker_count = 5;
+                    if (build_cache_result.code !=
+                        status_code::not_available) {
+                        build_cache_failed_attempt_ns =
+                            attempt_ns;
+                        return;
+                    }
+
+                    build_cache_fallback_reason =
+                        baseline_sectioned_fallback_reason::
+                            structural_ineligible;
+                    build_cache_failed_attempt_ns =
+                        attempt_ns;
+
+                    std::error_code cleanup_error;
+                    std::filesystem::remove_all(
+                        directory /
+                            build_cache_directory_name,
+                        cleanup_error);
+
+                    durable_write_telemetry fallback_io;
+                    build_cache_result =
+                        transaction_write(
+                            directory /
+                                build_cache_name,
+                            build_cache,
+                            {},
+                            &fallback_io);
+
+                    build_cache_io.write_ns +=
+                        fallback_io.write_ns;
+                    build_cache_io.flush_ns +=
+                        fallback_io.flush_ns;
+                };
+
+            const auto change_state_task =
+                [&]() noexcept {
+                    change_state_result =
+                        transaction_write(
+                            directory / change_state_name,
+                            change_state,
+                            {},
+                            &change_state_io);
+                };
+
+            const auto manifest_task =
+                [&]() noexcept {
+                    manifest_result =
+                        transaction_write(
+                            directory / manifest_name,
+                            manifest,
+                            {},
+                            &manifest_io);
+                };
+
+            transaction_executor.run(
+                compiled_task,
+                source_manager_task,
+                build_cache_task,
+                change_state_task,
+                manifest_task);
+
+            output.telemetry.transaction_io_worker_count =
+                static_cast<std::uint32_t>(
+                    transaction_executor.worker_count());
 
             output.telemetry.transaction_compiled_write_ns =
                 compiled_io.write_ns;
@@ -5419,7 +5652,7 @@ status baseline_store::commit(
         else {
             output.telemetry.transaction_io_worker_count = 1;
 
-            result = durable_write_file(
+            result = transaction_write(
                 directory / compiled_name,
                 compiled,
                 {},
@@ -5434,7 +5667,7 @@ status baseline_store::commit(
                 return {status_code::persistence_failed};
             }
 
-            result = durable_write_file(
+            result = transaction_write(
                 directory / source_manager_name,
                 source_manager,
                 {},
@@ -5454,7 +5687,7 @@ status baseline_store::commit(
             }
 
             if (!change_state.empty()) {
-                result = durable_write_file(
+                result = transaction_write(
                     directory / change_state_name,
                     change_state,
                     {},
@@ -5470,7 +5703,7 @@ status baseline_store::commit(
                 }
             }
 
-            result = durable_write_file(
+            result = transaction_write(
                 directory / build_cache_name,
                 build_cache,
                 {},
@@ -5489,7 +5722,7 @@ status baseline_store::commit(
                 return {status_code::persistence_failed};
             }
 
-            result = durable_write_file(
+            result = transaction_write(
                 directory / manifest_name,
                 manifest,
                 {},
@@ -5509,6 +5742,12 @@ status baseline_store::commit(
             elapsed_ns(
                 transaction_io_begin,
                 std::chrono::steady_clock::now());
+        output.telemetry.transaction_io_budget_wait_ns = 0;
+        output.telemetry.transaction_io_peak_active =
+            static_cast<std::uint32_t>(
+                parallel_build_state
+                    ? transaction_executor.peak_active()
+                    : std::size_t{1});
 
         auto directory_flush_begin =
             std::chrono::steady_clock::now();
@@ -5544,7 +5783,7 @@ status baseline_store::commit(
                 selector_bytes.size()};
         const auto selector_temp = root / ("CURRENT.tmp-" + std::to_string(process_id()) + "-" +
             std::to_string(transaction_counter.fetch_add(1, std::memory_order_relaxed)));
-        result = durable_write_file(
+        result = transaction_write(
             selector_temp,
             selector,
             {},

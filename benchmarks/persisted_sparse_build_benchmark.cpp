@@ -3011,7 +3011,8 @@ struct idempotent_save_timing final {
 
 
 [[nodiscard]] int run_d4a_sparse_save_materialization_profile(
-    std::size_t source_count) {
+    std::size_t source_count,
+    std::size_t io_worker_budget = 0) {
 
     if (source_count == 0)
         return 2;
@@ -3185,7 +3186,9 @@ struct idempotent_save_timing final {
     const auto save_begin =
         lifecycle_clock::now();
     const auto save_status =
-        manager.save(save);
+        manager.save(
+            save,
+            io_worker_budget);
     const auto save_end =
         lifecycle_clock::now();
 
@@ -3606,6 +3609,15 @@ struct idempotent_save_timing final {
         << ns_ms(telemetry.transaction_io_wall_ns)
         << ",transaction_io_workers="
         << telemetry.transaction_io_worker_count
+        << ",transaction_io_budget_requested="
+        << io_worker_budget
+        << ",transaction_io_budget="
+        << telemetry.transaction_io_budget
+        << ",transaction_io_peak_active="
+        << telemetry.transaction_io_peak_active
+        << ",transaction_io_budget_wait_ms="
+        << ns_ms(
+            telemetry.transaction_io_budget_wait_ns)
         << ",tx_compiled_write_ms="
         << ns_ms(telemetry.transaction_compiled_write_ns)
         << ",tx_compiled_flush_ms="
@@ -4881,6 +4893,31 @@ int main(int argc, char** argv) {
         }
     }
 
+
+    if (argc == 4 &&
+        std::string_view{argv[1]} ==
+            "--d4m1-io-budget") {
+        try {
+            const auto count =
+                static_cast<std::size_t>(
+                    std::stoull(argv[2]));
+            const auto budget =
+                static_cast<std::size_t>(
+                    std::stoull(argv[3]));
+
+            if (count == 0 ||
+                budget == 0) {
+                return 2;
+            }
+
+            return run_d4a_sparse_save_materialization_profile(
+                count,
+                budget);
+        }
+        catch (...) {
+            return 2;
+        }
+    }
 
     if (argc == 2 &&
         std::string_view{argv[1]} ==
