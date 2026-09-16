@@ -129,6 +129,8 @@ struct project_generation_freeze_telemetry final {
     std::uint64_t build_cache_mapped_baseline_patch_records = 0;
     std::uint64_t build_cache_mapped_baseline_append_records = 0;
     std::uint32_t build_cache_mapped_baseline_bulk_sections = 0;
+    std::uint64_t build_cache_provenance_bytes = 0;
+    std::uint32_t build_cache_provenance_sections = 0;
     std::uint64_t bind_ns = 0;
     std::uint64_t verify_change_state_ns = 0;
     std::uint64_t verify_build_cache_ns = 0;

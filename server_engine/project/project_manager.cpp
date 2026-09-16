@@ -1484,6 +1484,10 @@ status project_manager::save(
             generation_freeze_detail.build_cache_mapped_baseline_append_records;
         output.telemetry.generation_freeze_build_cache_mapped_baseline_bulk_sections =
             generation_freeze_detail.build_cache_mapped_baseline_bulk_sections;
+        output.telemetry.generation_freeze_build_cache_provenance_bytes =
+            generation_freeze_detail.build_cache_provenance_bytes;
+        output.telemetry.generation_freeze_build_cache_provenance_sections =
+            generation_freeze_detail.build_cache_provenance_sections;
         output.telemetry.generation_freeze_bind_ns =
             generation_freeze_detail.bind_ns;
         output.telemetry.generation_freeze_verify_change_state_ns =

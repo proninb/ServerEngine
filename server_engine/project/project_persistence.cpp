@@ -703,6 +703,8 @@ status freeze_project_generation(
         std::chrono::steady_clock::now();
 
     build_cache_encode_telemetry build_cache_detail;
+    build_cache_encode_provenance
+        build_cache_provenance;
 
     result = encode_build_cache_image(
         project,
@@ -710,7 +712,8 @@ status freeze_project_generation(
         output.build,
         telemetry != nullptr
             ? &build_cache_detail
-            : nullptr);
+            : nullptr,
+        &build_cache_provenance);
 
     if (telemetry != nullptr) {
         telemetry->build_cache_ns =
@@ -775,6 +778,63 @@ status freeze_project_generation(
 
     if (!result.ok())
         return result;
+
+    // D4O1A: translate only encoder-proven whole-section identity into a
+    // baseline-owned capability. The commit layer intentionally does not
+    // consume Build Cache provenance yet; D4O1A establishes the proof model.
+    const auto* baseline_build_cache =
+        project.frontend_cache().
+            baseline_persistence_image();
+
+    if (baseline_build_cache != nullptr &&
+        baseline_build_cache->valid()) {
+
+        for (std::size_t index = 0;
+             index <
+                build_cache_image_directory_count;
+             ++index) {
+
+            if (!build_cache_provenance.
+                    baseline_exact_sections[index]) {
+                continue;
+            }
+
+            const auto section =
+                static_cast<
+                    build_cache_image_section>(
+                        index + 1);
+
+            const auto bytes =
+                baseline_build_cache->
+                    section_bytes(section);
+
+            if (bytes.empty())
+                continue;
+
+            const auto proof =
+                project.
+                    prove_baseline_section_borrow(
+                        baseline_artifact_kind::
+                            build_cache,
+                        index,
+                        bytes);
+
+            if (!proof.valid())
+                continue;
+
+            output.baseline_reuse_provenance.
+                build_cache[index] =
+                    proof;
+
+            if (telemetry != nullptr) {
+                telemetry->
+                    build_cache_provenance_bytes +=
+                        bytes.size();
+                ++telemetry->
+                    build_cache_provenance_sections;
+            }
+        }
+    }
 
     compiled_image_view compiled;
     source_manager_image_view sources;

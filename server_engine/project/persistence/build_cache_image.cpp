@@ -3405,11 +3405,14 @@ status encode_build_cache_image(
     const project_context& project,
     const source_change_capture& change_capture,
     std::vector<std::byte>& output,
-    build_cache_encode_telemetry* telemetry) noexcept {
+    build_cache_encode_telemetry* telemetry,
+    build_cache_encode_provenance* provenance) noexcept {
 
     output.clear();
     if (telemetry != nullptr)
         *telemetry = {};
+    if (provenance != nullptr)
+        *provenance = {};
 
     const auto encode_begin =
         std::chrono::steady_clock::now();
@@ -3685,6 +3688,25 @@ status encode_build_cache_image(
                 telemetry->mapped_baseline_append_records +=
                     local_values.size();
                 ++telemetry->mapped_baseline_bulk_sections;
+            }
+
+            // A whole-section proof is valid only when this path performed the
+            // baseline memcpy and no patch or append subsequently changed the
+            // section. No byte comparison is needed for this classification.
+            if (provenance != nullptr &&
+                patch_records == 0 &&
+                local_values.empty()) {
+
+                const auto index =
+                    section_index(kind);
+
+                if (index <
+                    provenance->
+                        baseline_exact_sections.size()) {
+                    provenance->
+                        baseline_exact_sections[index] =
+                            true;
+                }
             }
 
             return true;

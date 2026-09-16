@@ -3320,15 +3320,33 @@ baseline_snapshot::prove_section_borrow(
     std::size_t section,
     std::span<const std::byte> bytes) const noexcept {
 
-    if (artifact !=
-            baseline_artifact_kind::source_manager ||
-        !sectioned_source_manager ||
-        section >= source_manager_sections.size()) {
+    std::span<const std::byte> mapped;
+
+    switch (artifact) {
+    case baseline_artifact_kind::source_manager:
+        if (!sectioned_source_manager ||
+            section >= source_manager_sections.size()) {
+            return {};
+        }
+
+        mapped =
+            source_manager_sections[section].bytes();
+        break;
+
+    case baseline_artifact_kind::build_cache:
+        if (!sectioned_build_cache ||
+            section >= build_cache_sections.size()) {
+            return {};
+        }
+
+        mapped =
+            build_cache_sections[section].bytes();
+        break;
+
+    case baseline_artifact_kind::compiled:
+    case baseline_artifact_kind::change_state:
         return {};
     }
-
-    const auto mapped =
-        source_manager_sections[section].bytes();
 
     if (mapped.data() != bytes.data() ||
         mapped.size() != bytes.size()) {
@@ -3347,18 +3365,42 @@ bool baseline_snapshot::validate_section_borrow(
     const baseline_section_provenance& proof) const noexcept {
 
     if (!proof.valid() ||
-        proof.owner() != this ||
-        proof.artifact() !=
-            baseline_artifact_kind::source_manager ||
-        !sectioned_source_manager ||
-        proof.section() >=
-            source_manager_sections.size()) {
+        proof.owner() != this) {
         return false;
     }
 
-    const auto mapped =
-        source_manager_sections[
-            proof.section()].bytes();
+    std::span<const std::byte> mapped;
+
+    switch (proof.artifact()) {
+    case baseline_artifact_kind::source_manager:
+        if (!sectioned_source_manager ||
+            proof.section() >=
+                source_manager_sections.size()) {
+            return false;
+        }
+
+        mapped =
+            source_manager_sections[
+                proof.section()].bytes();
+        break;
+
+    case baseline_artifact_kind::build_cache:
+        if (!sectioned_build_cache ||
+            proof.section() >=
+                build_cache_sections.size()) {
+            return false;
+        }
+
+        mapped =
+            build_cache_sections[
+                proof.section()].bytes();
+        break;
+
+    case baseline_artifact_kind::compiled:
+    case baseline_artifact_kind::change_state:
+        return false;
+    }
+
     const auto proven =
         proof.bytes();
 

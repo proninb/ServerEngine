@@ -82,6 +82,17 @@ struct build_cache_derived_index_slot final {
     TypeRef type{};
 };
 
+// Encoder-side proof model for whole Build Cache sections copied byte-for-byte
+// from the pinned baseline. This is not a durable-commit decision: the freeze
+// boundary may translate only these exact logical sections into baseline
+// section provenance capabilities.
+struct build_cache_encode_provenance final {
+    std::array<
+        bool,
+        build_cache_image_directory_count>
+        baseline_exact_sections{};
+};
+
 struct build_cache_encode_telemetry final {
     std::uint64_t total_ns = 0;
     std::uint64_t layout_allocate_ns = 0;
@@ -422,6 +433,7 @@ private:
     const project_context& project,
     const source_change_capture& change_capture,
     std::vector<std::byte>& output,
-    build_cache_encode_telemetry* telemetry) noexcept;
+    build_cache_encode_telemetry* telemetry,
+    build_cache_encode_provenance* provenance = nullptr) noexcept;
 
 } // namespace cw::server

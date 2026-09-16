@@ -104,6 +104,9 @@ private:
 struct baseline_commit_provenance final {
     std::array<baseline_section_provenance, 10>
         source_manager{};
+    std::array<
+        baseline_section_provenance,
+        25> build_cache{};
 };
 
 struct baseline_commit_telemetry final {
@@ -228,6 +231,8 @@ struct baseline_commit_telemetry final {
     std::uint64_t generation_freeze_build_cache_mapped_baseline_patch_records = 0;
     std::uint64_t generation_freeze_build_cache_mapped_baseline_append_records = 0;
     std::uint32_t generation_freeze_build_cache_mapped_baseline_bulk_sections = 0;
+    std::uint64_t generation_freeze_build_cache_provenance_bytes = 0;
+    std::uint32_t generation_freeze_build_cache_provenance_sections = 0;
     std::uint64_t generation_freeze_bind_ns = 0;
     std::uint64_t generation_freeze_verify_change_state_ns = 0;
     std::uint64_t generation_freeze_verify_build_cache_ns = 0;
