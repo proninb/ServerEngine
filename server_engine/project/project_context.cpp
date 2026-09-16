@@ -39,9 +39,9 @@ status project_context::activate_ready_baseline(
     source_manager_image_view source_view;
     if (snapshot.mapped(
             baseline_artifact_kind::source_manager)) {
-        result = source_view.bind(
-            snapshot.artifact(
-                baseline_artifact_kind::source_manager));
+        result =
+            snapshot.bind_source_manager(
+                source_view);
         if (!result.ok())
             return result;
     }
@@ -76,7 +76,7 @@ status project_context::activate_build_baseline(
 
     if (!snapshot.valid() ||
         snapshot.artifact(baseline_artifact_kind::compiled).empty() ||
-        snapshot.artifact(baseline_artifact_kind::source_manager).empty() ||
+        !snapshot.mapped(baseline_artifact_kind::source_manager) ||
         !snapshot.mapped(baseline_artifact_kind::build_cache)) {
         return {status_code::artifact_corrupt};
     }
@@ -88,8 +88,9 @@ status project_context::activate_build_baseline(
         return result;
 
     source_manager_image_view source_view;
-    result = source_view.bind(
-        snapshot.artifact(baseline_artifact_kind::source_manager));
+    result =
+        snapshot.bind_source_manager(
+            source_view);
     if (!result.ok())
         return result;
 
@@ -170,9 +171,9 @@ status project_context::ensure_sources_mapped() const noexcept {
         }
     }
 
-    auto result = mapped_sources.bind(
-        baseline->artifact(
-            baseline_artifact_kind::source_manager));
+    auto result =
+        baseline->bind_source_manager(
+            mapped_sources);
 
     source_mapping_status = result;
 

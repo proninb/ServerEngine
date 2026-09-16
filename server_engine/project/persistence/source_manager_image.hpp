@@ -187,7 +187,17 @@ private:
     std::array<
         std::byte,
         source_manager_image_prefix_size> prefix{};
-    std::span<const std::byte> baseline;
+
+    // Borrow exact logical baseline sections independently of their physical
+    // storage backend. Legacy baselines point into one mmap; D4K sectioned
+    // baselines point into ten immutable section mappings.
+    std::array<
+        std::span<const std::byte>,
+        source_manager_image_directory_count> baseline_sections{};
+    std::array<
+        std::uint64_t,
+        source_manager_image_directory_count> baseline_offsets{};
+
     std::vector<source_id> patch_sources;
     std::vector<source_generation_physical_record>
         physical_patches;
@@ -195,9 +205,6 @@ private:
         file_identity_index;
     std::vector<source_change_directory_index_slot>
         directory_identity_index;
-    std::size_t physical_offset = 0;
-    std::size_t file_identity_offset = 0;
-    std::size_t directory_identity_offset = 0;
     std::size_t size_value = 0;
     bool valid_value = false;
 
@@ -257,9 +264,21 @@ public:
     source_manager_image_view() noexcept = default;
 
     [[nodiscard]] status bind(std::span<const std::byte> image) noexcept;
+
+    // Binds source_manager.bin v3 from an immutable physical section store.
+    // The logical image format is unchanged: prefix contains the canonical
+    // header/directory and section_images contain the exact section bytes.
+    [[nodiscard]] status bind_sectioned(
+        std::span<const std::byte> prefix,
+        const std::array<
+            std::span<const std::byte>,
+            source_manager_image_directory_count>& section_images) noexcept;
+
     void reset() noexcept;
 
-    [[nodiscard]] bool valid() const noexcept { return bytes.data() != nullptr; }
+    [[nodiscard]] bool valid() const noexcept {
+        return prefix_bytes.data() != nullptr;
+    }
     [[nodiscard]] std::uint64_t generation() const noexcept { return generation_value; }
     [[nodiscard]] std::size_t source_count() const noexcept { return source_count_value; }
     [[nodiscard]] std::size_t root_count() const noexcept { return root_count_value; }
@@ -328,6 +347,7 @@ private:
         std::uint64_t count = 0;
         std::uint32_t record_size = 0;
         std::uint64_t crc64 = 0;
+        std::uint64_t offset = 0;
     };
 
     [[nodiscard]] const section_view& section(source_manager_image_section kind) const noexcept;
@@ -335,7 +355,12 @@ private:
         return source && static_cast<std::size_t>(source.value()) <= source_count_value;
     }
 
+    // bytes is populated only for the legacy contiguous backend.
+    // prefix_bytes and sections are storage-neutral and are authoritative for
+    // both contiguous and sectioned Source Manager images.
     std::span<const std::byte> bytes;
+    std::span<const std::byte> prefix_bytes;
+    std::size_t logical_size_value = 0;
     section_view sections[source_manager_image_directory_count]{};
     std::uint64_t generation_value = 0;
     std::size_t source_count_value = 0;

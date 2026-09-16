@@ -3617,6 +3617,31 @@ struct idempotent_save_timing final {
         << ns_ms(telemetry.transaction_source_manager_write_ns)
         << ",tx_source_manager_flush_ms="
         << ns_ms(telemetry.transaction_source_manager_flush_ns)
+        << ",tx_source_manager_sectioned="
+        << telemetry.transaction_source_manager_sectioned
+        << ",tx_source_manager_link_ms="
+        << ns_ms(telemetry.transaction_source_manager_link_ns)
+        << ",tx_source_manager_compare_ms="
+        << ns_ms(telemetry.transaction_source_manager_compare_ns)
+        << ",tx_source_manager_compare_bytes="
+        << telemetry.transaction_source_manager_compare_bytes
+        << ",tx_source_manager_compare_sections="
+        << telemetry.transaction_source_manager_compare_sections
+        << ",tx_source_manager_io_wall_ms="
+        << ns_ms(telemetry.transaction_source_manager_io_wall_ns)
+        << ",tx_source_manager_io_workers="
+        << telemetry.transaction_source_manager_io_worker_count
+        << ",tx_source_manager_directory_flush_ms="
+        << ns_ms(
+            telemetry.transaction_source_manager_directory_flush_ns)
+        << ",tx_source_manager_written_bytes="
+        << telemetry.transaction_source_manager_written_bytes
+        << ",tx_source_manager_reused_bytes="
+        << telemetry.transaction_source_manager_reused_bytes
+        << ",tx_source_manager_written_sections="
+        << telemetry.transaction_source_manager_written_sections
+        << ",tx_source_manager_reused_sections="
+        << telemetry.transaction_source_manager_reused_sections
         << ",tx_build_cache_write_ms="
         << ns_ms(telemetry.transaction_build_cache_write_ns)
         << ",tx_build_cache_flush_ms="
@@ -3625,6 +3650,12 @@ struct idempotent_save_timing final {
         << telemetry.transaction_build_cache_sectioned
         << ",tx_build_cache_link_ms="
         << ns_ms(telemetry.transaction_build_cache_link_ns)
+        << ",tx_build_cache_compare_ms="
+        << ns_ms(telemetry.transaction_build_cache_compare_ns)
+        << ",tx_build_cache_compare_bytes="
+        << telemetry.transaction_build_cache_compare_bytes
+        << ",tx_build_cache_compare_sections="
+        << telemetry.transaction_build_cache_compare_sections
         << ",tx_build_cache_io_wall_ms="
         << ns_ms(telemetry.transaction_build_cache_io_wall_ns)
         << ",tx_build_cache_io_workers="

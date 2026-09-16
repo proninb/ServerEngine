@@ -602,8 +602,9 @@ status project_manager::build(
                 return map_result;
         }
         if (!full_sources.valid()) {
-            auto bind_result = full_sources.bind(
-                snapshot.artifact(baseline_artifact_kind::source_manager));
+            auto bind_result =
+                snapshot.bind_source_manager(
+                    full_sources);
             if (!bind_result.ok())
                 return bind_result;
         }
@@ -1856,13 +1857,15 @@ status project_manager::save(
     if (!result.ok())
         return result;
 
-    result = sources.bind(
-        active.artifact(baseline_artifact_kind::source_manager));
+    result =
+        active.bind_source_manager(
+            sources);
     if (!result.ok())
         return result;
 
-    result = cache.bind(
-        active.artifact(baseline_artifact_kind::build_cache));
+    result =
+        active.bind_build_cache(
+            cache);
     if (!result.ok())
         return result;
 

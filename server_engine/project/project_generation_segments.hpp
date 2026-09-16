@@ -20,7 +20,11 @@ inline constexpr std::size_t project_generation_segment_count =
     static_cast<std::size_t>(
         project_generation_segment_kind::count);
 
-inline constexpr std::size_t project_generation_segment_max_extents = 32;
+// Storage capacity for scatter/gather persistence. Source Manager keeps its
+// architectural sparse patch budget at 32 logical replacement extents; the
+// larger carrier capacity also accommodates sectioned baseline mappings and
+// alignment spans without changing that sparse fallback threshold.
+inline constexpr std::size_t project_generation_segment_max_extents = 96;
 
 // Storage-neutral immutable segment view. A loaded Generation normally has one
 // mmap extent; a construction Generation may expose several native extents

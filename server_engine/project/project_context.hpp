@@ -113,7 +113,7 @@ public:
 
     [[nodiscard]] bool build_cache_mapped() const noexcept {
         return baseline != nullptr &&
-            !baseline->artifact(baseline_artifact_kind::build_cache).empty();
+            baseline->mapped(baseline_artifact_kind::build_cache);
     }
 
     [[nodiscard]] std::string_view baseline_transaction() const noexcept {

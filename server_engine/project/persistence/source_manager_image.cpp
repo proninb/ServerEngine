@@ -27,7 +27,11 @@ constexpr std::size_t directory_offset = source_manager_image_header_size;
 constexpr std::size_t directory_bytes =
     source_manager_image_directory_count * source_manager_image_directory_entry_size;
 constexpr std::size_t first_section_offset =
-    (directory_offset + directory_bytes + 63u) & ~std::size_t{63u};
+    source_manager_image_prefix_size;
+
+// Preserve the D4E sparse replacement budget even though the generic
+// scatter/gather carrier is larger for sectioned physical storage.
+constexpr std::size_t source_manager_sparse_extent_budget = 32;
 
 constexpr std::uint32_t physical_present = 0x00000001u;
 
@@ -347,6 +351,8 @@ const source_manager_image_view::section_view& source_manager_image_view::sectio
 
 void source_manager_image_view::reset() noexcept {
     bytes = {};
+    prefix_bytes = {};
+    logical_size_value = 0;
     for (auto& item : sections)
         item = {};
     generation_value = 0;
@@ -500,6 +506,7 @@ status source_manager_image_view::bind(
             count,
             record_size,
             section_crc,
+            offset,
         };
 
         previous_end = end;
@@ -692,6 +699,10 @@ status source_manager_image_view::bind(
     }
 
     bytes = image;
+    prefix_bytes =
+        image.first(first_section_offset);
+    logical_size_value = image.size();
+
     std::copy(
         std::begin(candidate),
         std::end(candidate),
@@ -699,6 +710,376 @@ status source_manager_image_view::bind(
 
     generation_value =
         read_u64(image.data() + 48);
+    source_count_value =
+        static_cast<std::size_t>(
+            source_count);
+    root_count_value =
+        static_cast<std::size_t>(
+            root_count);
+    change_checkpoint_value =
+        change_checkpoint;
+
+    return {};
+}
+
+status source_manager_image_view::bind_sectioned(
+    std::span<const std::byte> prefix,
+    const std::array<
+        std::span<const std::byte>,
+        source_manager_image_directory_count>& section_images) noexcept {
+
+    reset();
+
+    if (prefix.size() != first_section_offset)
+        return {status_code::artifact_corrupt};
+
+    if (!std::equal(
+            image_magic.begin(),
+            image_magic.end(),
+            prefix.begin())) {
+        return {status_code::artifact_corrupt};
+    }
+
+    if (read_u32(prefix.data() + 8) !=
+        source_manager_image_format_version) {
+        return {status_code::rebuild_required};
+    }
+
+    if (read_u32(prefix.data() + 12) != endian_marker)
+        return {status_code::artifact_corrupt};
+
+    if (read_u32(prefix.data() + 16) !=
+            source_manager_image_header_size ||
+        read_u32(prefix.data() + 20) !=
+            source_manager_image_directory_count ||
+        read_u32(prefix.data() + 24) !=
+            source_manager_image_directory_entry_size) {
+        return {status_code::artifact_corrupt};
+    }
+
+    const auto stored_directory_offset =
+        read_u64(prefix.data() + 32);
+    const auto stored_file_size =
+        read_u64(prefix.data() + 40);
+
+    if (stored_directory_offset != directory_offset ||
+        stored_file_size < first_section_offset) {
+        return {status_code::artifact_corrupt};
+    }
+
+    std::array<
+        std::byte,
+        source_manager_image_header_size>
+        header{};
+
+    std::memcpy(
+        header.data(),
+        prefix.data(),
+        header.size());
+
+    const auto stored_header_crc =
+        read_u64(
+            header.data() +
+            header_crc_offset);
+
+    write_u64(
+        header.data() +
+            header_crc_offset,
+        0);
+
+    if (persistence_crc64(header) !=
+        stored_header_crc) {
+        return {status_code::artifact_corrupt};
+    }
+
+    const auto directory_crc =
+        read_u64(
+            prefix.data() +
+            header_directory_crc_offset);
+
+    const auto directory_span =
+        prefix.subspan(
+            directory_offset,
+            directory_bytes);
+
+    if (persistence_crc64(directory_span) !=
+        directory_crc) {
+        return {status_code::artifact_corrupt};
+    }
+
+    section_view
+        candidate[source_manager_image_directory_count]{};
+
+    std::uint64_t previous_end =
+        first_section_offset;
+
+    for (std::size_t index = 0;
+         index <
+            source_manager_image_directory_count;
+         ++index) {
+
+        const auto* entry =
+            prefix.data() +
+            directory_offset +
+            index *
+                source_manager_image_directory_entry_size;
+
+        const auto raw_kind =
+            read_u32(entry);
+        const auto record_size =
+            read_u32(entry + 4);
+        const auto offset =
+            read_u64(entry + 8);
+        const auto count =
+            read_u64(entry + 16);
+        const auto section_crc =
+            read_u64(entry + 24);
+        const auto expected_offset =
+            align64(previous_end);
+
+        std::uint64_t byte_count = 0;
+        std::uint64_t end = 0;
+
+        if (raw_kind != index + 1 ||
+            record_size == 0 ||
+            offset != expected_offset ||
+            !multiply_u64(
+                count,
+                record_size,
+                byte_count) ||
+            !add_u64(
+                offset,
+                byte_count,
+                end) ||
+            end > stored_file_size ||
+            byte_count >
+                (std::numeric_limits<
+                    std::size_t>::max)() ||
+            section_images[index].size() !=
+                static_cast<std::size_t>(
+                    byte_count)) {
+            return {status_code::artifact_corrupt};
+        }
+
+        candidate[index] = section_view{
+            section_images[index].data(),
+            count,
+            record_size,
+            section_crc,
+            offset,
+        };
+
+        previous_end = end;
+    }
+
+    if (previous_end != stored_file_size)
+        return {status_code::artifact_corrupt};
+
+    if (candidate[
+            section_index(
+                source_manager_image_section::source_core)]
+                .record_size != source_core_size ||
+        candidate[
+            section_index(
+                source_manager_image_section::physical_state)]
+                .record_size != physical_state_size ||
+        candidate[
+            section_index(
+                source_manager_image_section::graph_records)]
+                .record_size != graph_record_size ||
+        candidate[
+            section_index(
+                source_manager_image_section::forward_edges)]
+                .record_size != 4 ||
+        candidate[
+            section_index(
+                source_manager_image_section::reverse_edges)]
+                .record_size != 4 ||
+        candidate[
+            section_index(
+                source_manager_image_section::roots)]
+                .record_size != root_record_size ||
+        candidate[
+            section_index(
+                source_manager_image_section::path_index)]
+                .record_size != path_index_record_size ||
+        candidate[
+            section_index(
+                source_manager_image_section::path_bytes)]
+                .record_size != 1 ||
+        candidate[
+            section_index(
+                source_manager_image_section::
+                    source_file_identity_index)]
+                .record_size !=
+                    source_file_identity_index_record_size ||
+        candidate[
+            section_index(
+                source_manager_image_section::
+                    tracked_directory_identity_index)]
+                .record_size !=
+                    tracked_directory_identity_index_record_size) {
+        return {status_code::artifact_corrupt};
+    }
+
+    const auto source_count =
+        read_u64(prefix.data() + 56);
+    const auto root_count =
+        read_u64(prefix.data() + 64);
+    const auto path_index_count =
+        read_u64(prefix.data() + 72);
+    const auto forward_edge_count =
+        read_u64(prefix.data() + 80);
+    const auto reverse_edge_count =
+        read_u64(prefix.data() + 88);
+
+    if (source_count >
+            (std::numeric_limits<
+                std::uint32_t>::max)() ||
+        source_count >
+            (std::numeric_limits<
+                std::size_t>::max)() ||
+        root_count >
+            (std::numeric_limits<
+                std::size_t>::max)()) {
+        return {status_code::artifact_corrupt};
+    }
+
+    const auto& source_core =
+        candidate[
+            section_index(
+                source_manager_image_section::source_core)];
+    const auto& physical =
+        candidate[
+            section_index(
+                source_manager_image_section::physical_state)];
+    const auto& graph =
+        candidate[
+            section_index(
+                source_manager_image_section::graph_records)];
+    const auto& forward_edges =
+        candidate[
+            section_index(
+                source_manager_image_section::forward_edges)];
+    const auto& reverse_edges =
+        candidate[
+            section_index(
+                source_manager_image_section::reverse_edges)];
+    const auto& roots =
+        candidate[
+            section_index(
+                source_manager_image_section::roots)];
+    const auto& path_index =
+        candidate[
+            section_index(
+                source_manager_image_section::path_index)];
+    const auto& source_file_identity_index =
+        candidate[
+            section_index(
+                source_manager_image_section::
+                    source_file_identity_index)];
+    const auto&
+        tracked_directory_identity_index =
+        candidate[
+            section_index(
+                source_manager_image_section::
+                    tracked_directory_identity_index)];
+
+    const auto raw_change_backend =
+        read_u32(
+            prefix.data() +
+            header_change_backend_offset);
+
+    if (read_u32(
+            prefix.data() +
+            header_change_backend_offset + 4) != 0 ||
+        raw_change_backend >
+            static_cast<std::uint32_t>(
+                source_change_backend::windows_usn)) {
+        return {status_code::artifact_corrupt};
+    }
+
+    source_change_checkpoint change_checkpoint;
+    change_checkpoint.backend =
+        static_cast<source_change_backend>(
+            raw_change_backend);
+    change_checkpoint.volume_serial =
+        read_u64(
+            prefix.data() +
+            header_change_volume_offset);
+    change_checkpoint.journal_id =
+        read_u64(
+            prefix.data() +
+            header_change_journal_offset);
+    change_checkpoint.next_usn =
+        static_cast<std::int64_t>(
+            read_u64(
+                prefix.data() +
+                header_change_usn_offset));
+
+    const auto valid_optional_index =
+        [](std::uint64_t count) noexcept {
+            return count == 0 ||
+                (count & (count - 1)) == 0;
+        };
+
+    if ((!change_checkpoint &&
+         (change_checkpoint.volume_serial != 0 ||
+          change_checkpoint.journal_id != 0 ||
+          change_checkpoint.next_usn != 0 ||
+          source_file_identity_index.count != 0 ||
+          tracked_directory_identity_index.count != 0)) ||
+        (change_checkpoint &&
+         (change_checkpoint.volume_serial == 0 ||
+          change_checkpoint.journal_id == 0 ||
+          change_checkpoint.next_usn < 0 ||
+          (source_count != 0 &&
+           source_file_identity_index.count == 0))) ||
+        !valid_optional_index(
+            source_file_identity_index.count) ||
+        !valid_optional_index(
+            tracked_directory_identity_index.count)) {
+        return {status_code::artifact_corrupt};
+    }
+
+    for (std::size_t index =
+             header_reserved_begin;
+         index <
+             source_manager_image_header_size;
+         ++index) {
+        if (prefix[index] != std::byte{0})
+            return {status_code::artifact_corrupt};
+    }
+
+    if (source_core.count != source_count ||
+        physical.count != source_count ||
+        graph.count != source_count ||
+        forward_edges.count !=
+            forward_edge_count ||
+        reverse_edges.count !=
+            reverse_edge_count ||
+        roots.count != root_count ||
+        path_index.count !=
+            path_index_count ||
+        path_index_count == 0 ||
+        (path_index_count &
+         (path_index_count - 1)) != 0) {
+        return {status_code::artifact_corrupt};
+    }
+
+    bytes = {};
+    prefix_bytes = prefix;
+    logical_size_value =
+        static_cast<std::size_t>(
+            stored_file_size);
+
+    std::copy(
+        std::begin(candidate),
+        std::end(candidate),
+        std::begin(sections));
+
+    generation_value =
+        read_u64(prefix.data() + 48);
     source_count_value =
         static_cast<std::size_t>(
             source_count);
@@ -1296,14 +1677,12 @@ source_manager_native_image_storage::segment() const noexcept {
 
 void source_manager_sparse_image_storage::reset() noexcept {
     prefix = {};
-    baseline = {};
+    baseline_sections = {};
+    baseline_offsets = {};
     patch_sources.clear();
     physical_patches.clear();
     file_identity_index.clear();
     directory_identity_index.clear();
-    physical_offset = 0;
-    file_identity_offset = 0;
-    directory_identity_offset = 0;
     size_value = 0;
     valid_value = false;
 }
@@ -1315,107 +1694,170 @@ source_manager_sparse_image_storage::segment() const noexcept {
 
     if (!valid_value ||
         patch_sources.size() !=
-            physical_patches.size() ||
-        baseline.size() != size_value ||
-        physical_offset < prefix.size() ||
-        file_identity_offset < physical_offset ||
-        directory_identity_offset < file_identity_offset) {
+            physical_patches.size()) {
         return output;
     }
 
     if (!output.append(prefix))
         return {};
 
-    std::size_t cursor = prefix.size();
+    const auto physical_index =
+        section_index(
+            source_manager_image_section::
+                physical_state);
+    const auto file_identity_index_value =
+        section_index(
+            source_manager_image_section::
+                source_file_identity_index);
+    const auto directory_identity_index_value =
+        section_index(
+            source_manager_image_section::
+                tracked_directory_identity_index);
 
-    for (std::size_t index = 0;
-         index < patch_sources.size();
-         ++index) {
+    std::size_t logical_cursor =
+        prefix.size();
 
-        const auto source = patch_sources[index];
-        if (!source)
-            return {};
+    for (std::size_t section_number = 0;
+         section_number <
+            source_manager_image_directory_count;
+         ++section_number) {
 
-        const auto patch_offset =
-            physical_offset +
+        const auto logical_offset =
             static_cast<std::size_t>(
-                source.value() - 1) *
-                sizeof(source_generation_physical_record);
+                baseline_offsets[
+                    section_number]);
 
-        if (patch_offset < cursor ||
-            patch_offset >
-                file_identity_offset ||
-            sizeof(source_generation_physical_record) >
-                file_identity_offset - patch_offset) {
+        if (logical_offset <
+            logical_cursor) {
             return {};
         }
 
-        if (!output.append(
-                baseline.subspan(
-                    cursor,
-                    patch_offset - cursor))) {
-            return {};
+        const auto padding =
+            logical_offset -
+            logical_cursor;
+
+        if (padding != 0) {
+            if (padding >
+                    native_zero_padding.size() ||
+                !output.append(
+                    std::span<const std::byte>{
+                        native_zero_padding.data(),
+                        padding})) {
+                return {};
+            }
         }
 
-        const auto patch_bytes =
-            std::as_bytes(
-                std::span<
-                    const source_generation_physical_record>{
-                    &physical_patches[index],
-                    1});
+        const auto baseline_section =
+            baseline_sections[
+                section_number];
 
-        if (!output.append(patch_bytes))
-            return {};
+        if (section_number ==
+            physical_index) {
 
-        cursor =
-            patch_offset +
-            patch_bytes.size();
-    }
+            std::size_t cursor = 0;
 
-    if (cursor > file_identity_offset ||
-        !output.append(
-            baseline.subspan(
-                cursor,
-                file_identity_offset - cursor))) {
-        return {};
-    }
+            for (std::size_t index = 0;
+                 index <
+                    patch_sources.size();
+                 ++index) {
 
-    const auto file_bytes =
-        std::as_bytes(
-            std::span<const source_change_file_index_slot>{
-                file_identity_index});
+                const auto source =
+                    patch_sources[index];
 
-    if (!output.append(file_bytes))
-        return {};
+                if (!source)
+                    return {};
 
-    cursor =
-        file_identity_offset +
-        file_bytes.size();
+                const auto patch_offset =
+                    static_cast<std::size_t>(
+                        source.value() - 1) *
+                    sizeof(
+                        source_generation_physical_record);
 
-    if (cursor > directory_identity_offset ||
-        !output.append(
-            baseline.subspan(
-                cursor,
-                directory_identity_offset - cursor))) {
-        return {};
-    }
+                if (patch_offset < cursor ||
+                    patch_offset >
+                        baseline_section.size() ||
+                    sizeof(
+                        source_generation_physical_record) >
+                        baseline_section.size() -
+                            patch_offset) {
+                    return {};
+                }
 
-    const auto directory_bytes_value =
-        std::as_bytes(
-            std::span<const source_change_directory_index_slot>{
-                directory_identity_index});
+                if (!output.append(
+                        baseline_section.subspan(
+                            cursor,
+                            patch_offset -
+                                cursor))) {
+                    return {};
+                }
 
-    if (!output.append(directory_bytes_value))
-        return {};
+                const auto patch_bytes =
+                    std::as_bytes(
+                        std::span<
+                            const source_generation_physical_record>{
+                            &physical_patches[index],
+                            1});
 
-    cursor =
-        directory_identity_offset +
-        directory_bytes_value.size();
+                if (!output.append(
+                        patch_bytes)) {
+                    return {};
+                }
 
-    if (cursor > baseline.size() ||
-        !output.append(
-            baseline.subspan(cursor))) {
-        return {};
+                cursor =
+                    patch_offset +
+                    patch_bytes.size();
+            }
+
+            if (cursor >
+                    baseline_section.size() ||
+                !output.append(
+                    baseline_section.subspan(
+                        cursor))) {
+                return {};
+            }
+        }
+        else if (section_number ==
+                 file_identity_index_value) {
+
+            const auto bytes_value =
+                std::as_bytes(
+                    std::span<
+                        const source_change_file_index_slot>{
+                        file_identity_index});
+
+            if (bytes_value.size() !=
+                    baseline_section.size() ||
+                !output.append(
+                    bytes_value)) {
+                return {};
+            }
+        }
+        else if (section_number ==
+                 directory_identity_index_value) {
+
+            const auto bytes_value =
+                std::as_bytes(
+                    std::span<
+                        const source_change_directory_index_slot>{
+                        directory_identity_index});
+
+            if (bytes_value.size() !=
+                    baseline_section.size() ||
+                !output.append(
+                    bytes_value)) {
+                return {};
+            }
+        }
+        else {
+            if (!output.append(
+                    baseline_section)) {
+                return {};
+            }
+        }
+
+        logical_cursor =
+            logical_offset +
+            baseline_section.size();
     }
 
     return output.size() == size_value
@@ -2094,18 +2536,17 @@ status freeze_source_manager_sparse_baseline_image(
 
     const auto physical_offset_value =
         static_cast<std::size_t>(
-            physical.data -
-            baseline.bytes.data());
+            physical.offset);
     const auto file_identity_offset_value =
         static_cast<std::size_t>(
-            file_identity.data -
-            baseline.bytes.data());
+            file_identity.offset);
     const auto directory_identity_offset_value =
         static_cast<std::size_t>(
-            directory_identity.data -
-            baseline.bytes.data());
+            directory_identity.offset);
 
-    if (baseline.bytes.size() <
+    if (baseline.prefix_bytes.size() !=
+            source_manager_image_prefix_size ||
+        baseline.logical_size_value <
             source_manager_image_prefix_size ||
         physical_offset_value <
             source_manager_image_prefix_size ||
@@ -2212,17 +2653,23 @@ status freeze_source_manager_sparse_baseline_image(
             directory_identity_offset_value +
             directory_bytes_value.size();
 
-        if (baseline.bytes.size() >
+        if (baseline.logical_size_value >
             extent_cursor) {
             ++required_extent_count;
         }
 
         if (required_extent_count >
-            project_generation_segment_max_extents) {
+            source_manager_sparse_extent_budget) {
             if (telemetry != nullptr)
                 telemetry->sparse_fallback_reason = 10;
             output.reset();
             return {status_code::not_found};
+        }
+
+        if (telemetry != nullptr) {
+            telemetry->extent_count =
+                static_cast<std::uint32_t>(
+                    required_extent_count);
         }
 
         // Only include topology can change Source Manager graph topology.
@@ -2417,7 +2864,7 @@ status freeze_source_manager_sparse_baseline_image(
 
     std::memcpy(
         output.prefix.data(),
-        baseline.bytes.data(),
+        baseline.prefix_bytes.data(),
         output.prefix.size());
 
     auto* base =
@@ -2555,15 +3002,37 @@ status freeze_source_manager_sparse_baseline_image(
                 identity_copy_begin);
     }
 
-    output.baseline = baseline.bytes;
-    output.physical_offset =
-        physical_offset_value;
-    output.file_identity_offset =
-        file_identity_offset_value;
-    output.directory_identity_offset =
-        directory_identity_offset_value;
+    for (std::size_t index = 0;
+         index <
+            source_manager_image_directory_count;
+         ++index) {
+
+        const auto& item =
+            baseline.sections[index];
+
+        std::uint64_t byte_count = 0;
+        if (!multiply_u64(
+                item.count,
+                item.record_size,
+                byte_count) ||
+            byte_count >
+                (std::numeric_limits<
+                    std::size_t>::max)()) {
+            output.reset();
+            return {status_code::not_found};
+        }
+
+        output.baseline_sections[index] =
+            std::span<const std::byte>{
+                item.data,
+                static_cast<std::size_t>(
+                    byte_count)};
+        output.baseline_offsets[index] =
+            item.offset;
+    }
+
     output.size_value =
-        baseline.bytes.size();
+        baseline.logical_size_value;
     output.valid_value = true;
 
     const auto segment_begin =
@@ -2587,9 +3056,6 @@ status freeze_source_manager_sparse_baseline_image(
     }
 
     if (telemetry != nullptr) {
-        telemetry->extent_count =
-            static_cast<std::uint32_t>(
-                segment.extent_count());
         telemetry->internal_ns =
             source_manager_elapsed_ns(
                 internal_begin);

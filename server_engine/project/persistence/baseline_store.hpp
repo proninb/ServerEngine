@@ -18,6 +18,7 @@
 namespace cw::server {
 
 class build_cache_image_view;
+class source_manager_image_view;
 
 inline constexpr std::uint32_t baseline_format_version = 1;
 inline constexpr std::size_t baseline_fingerprint_size = 32;
@@ -174,9 +175,24 @@ struct baseline_commit_telemetry final {
     std::uint64_t transaction_build_state_flush_ns = 0;
     std::uint64_t transaction_source_manager_write_ns = 0;
     std::uint64_t transaction_source_manager_flush_ns = 0;
+    std::uint64_t transaction_source_manager_link_ns = 0;
+    std::uint64_t transaction_source_manager_compare_ns = 0;
+    std::uint64_t transaction_source_manager_compare_bytes = 0;
+    std::uint32_t transaction_source_manager_compare_sections = 0;
+    std::uint64_t transaction_source_manager_io_wall_ns = 0;
+    std::uint32_t transaction_source_manager_io_worker_count = 0;
+    std::uint64_t transaction_source_manager_directory_flush_ns = 0;
+    std::uint64_t transaction_source_manager_written_bytes = 0;
+    std::uint64_t transaction_source_manager_reused_bytes = 0;
+    std::uint32_t transaction_source_manager_written_sections = 0;
+    std::uint32_t transaction_source_manager_reused_sections = 0;
+    std::uint32_t transaction_source_manager_sectioned = 0;
     std::uint64_t transaction_build_cache_write_ns = 0;
     std::uint64_t transaction_build_cache_flush_ns = 0;
     std::uint64_t transaction_build_cache_link_ns = 0;
+    std::uint64_t transaction_build_cache_compare_ns = 0;
+    std::uint64_t transaction_build_cache_compare_bytes = 0;
+    std::uint32_t transaction_build_cache_compare_sections = 0;
     std::uint64_t transaction_build_cache_io_wall_ns = 0;
     std::uint32_t transaction_build_cache_io_worker_count = 0;
     std::uint64_t transaction_build_cache_directory_flush_ns = 0;
@@ -278,6 +294,11 @@ public:
     [[nodiscard]] project_generation_segments
     segments() const noexcept;
 
+    // Binds either legacy contiguous/packed Source Manager storage or the
+    // immutable sectioned physical backend to the same logical v3 view.
+    [[nodiscard]] status bind_source_manager(
+        source_manager_image_view& output) const noexcept;
+
     // Binds either legacy contiguous/packed Build Cache storage or the new
     // immutable sectioned physical backend to the same logical v4 view.
     [[nodiscard]] status bind_build_cache(
@@ -300,6 +321,14 @@ private:
     std::string transaction_value;
     read_only_file_mapping compiled;
     read_only_file_mapping source_manager;
+
+    // D4K sectioned Source Manager physical backend.
+    read_only_file_mapping source_manager_prefix;
+    std::array<
+        read_only_file_mapping,
+        10> source_manager_sections;
+    bool sectioned_source_manager = false;
+
     read_only_file_mapping change_state;
 
     // CURRENT v3 may own the compact BUILD decision gate directly. Canonical
@@ -466,6 +495,12 @@ private:
         bool include_change_state,
         bool include_build_cache,
         baseline_snapshot& output,
+        baseline_open_telemetry* telemetry) const noexcept;
+
+    [[nodiscard]] status map_source_manager_artifact(
+        const std::filesystem::path& directory,
+        std::uint64_t expected_size,
+        baseline_snapshot& snapshot,
         baseline_open_telemetry* telemetry) const noexcept;
 
     [[nodiscard]] status map_build_cache_artifact(
