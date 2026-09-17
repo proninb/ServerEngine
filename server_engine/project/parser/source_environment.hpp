@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -55,6 +56,59 @@ struct source_interface_data_view final {
     std::span<const source_interface_member_slot> member_slots;
 };
 
+class source_interface;
+
+struct source_interface_runtime_write_view final {
+    std::span<identity_ref> local_types;
+    std::span<source_interface_type_slot> type_slots;
+    std::span<source_interface_object_slot> object_slots;
+    std::span<source_interface_member_slot> member_slots;
+    std::span<const source_interface*> imports;
+};
+
+struct source_interface_runtime_data_view final {
+    std::span<const identity_ref> local_types;
+    std::span<const source_interface_type_slot> type_slots;
+    std::span<const source_interface_object_slot> object_slots;
+    std::span<const source_interface_member_slot> member_slots;
+    std::span<const source_interface* const> imports;
+};
+
+// Owns page-backed Parser acceleration storage for one full Frontend context.
+// Individual Sources receive stable spans and allocate no G0 lookup vectors.
+class source_interface_runtime_store final {
+public:
+    source_interface_runtime_store() noexcept;
+    ~source_interface_runtime_store();
+
+    source_interface_runtime_store(
+        const source_interface_runtime_store&) = delete;
+    source_interface_runtime_store& operator=(
+        const source_interface_runtime_store&) = delete;
+
+    source_interface_runtime_store(
+        source_interface_runtime_store&&) noexcept;
+    source_interface_runtime_store& operator=(
+        source_interface_runtime_store&&) noexcept;
+
+    [[nodiscard]] status initialize() noexcept;
+
+    [[nodiscard]] status allocate(
+        std::size_t local_type_count,
+        std::size_t type_slot_count,
+        std::size_t object_slot_count,
+        std::size_t member_slot_count,
+        std::size_t import_count,
+        source_interface_runtime_write_view& output) noexcept;
+
+    [[nodiscard]] std::size_t page_count() const noexcept;
+    [[nodiscard]] std::size_t reserved_bytes() const noexcept;
+
+private:
+    struct implementation;
+    std::unique_ptr<implementation> value;
+};
+
 // Move boundary used when a full Frontend generation consolidates per-Source
 // persistence payload into cache-wide arenas. Parser lookup tables are excluded.
 struct source_interface_owned_persistence_data final {
@@ -88,7 +142,8 @@ public:
         const source_facts& facts,
         identity_view identities,
         std::span<const source_interface* const> imports = {},
-        bool retain_compact_persistence = true) noexcept;
+        bool retain_compact_persistence = true,
+        source_interface_runtime_store* runtime_store = nullptr) noexcept;
 
     // Restores one immutable Parser interface from the persisted Build Cache
     // image without reparsing its Source. Import pointers are rebound process-locally.
@@ -110,18 +165,16 @@ public:
         string_id name) const noexcept;
 
     [[nodiscard]] std::span<const identity_ref> local_types() const noexcept {
+        if (runtime_externalized_state)
+            return external_runtime_data.local_types;
+
         return persistence_externalized_state
             ? external_persistence_data.local_types
             : std::span<const identity_ref>{local_type_values};
     }
 
     [[nodiscard]] source_interface_data_view data_view() const noexcept {
-        return {
-            local_types(),
-            type_slots,
-            object_slots,
-            member_slots,
-        };
+        return runtime_data_view();
     }
 
     // Compact SAVE representation. A fully published native Frontend may bind
@@ -157,8 +210,17 @@ public:
 
     [[nodiscard]] source_interface_data_view
     runtime_data_view() const noexcept {
+        if (runtime_externalized_state) {
+            return {
+                external_runtime_data.local_types,
+                external_runtime_data.type_slots,
+                external_runtime_data.object_slots,
+                external_runtime_data.member_slots,
+            };
+        }
+
         return {
-            local_type_values,
+            local_types(),
             type_slots,
             object_slots,
             member_slots,
@@ -195,6 +257,20 @@ private:
         string_id name,
         std::uint32_t depth) const noexcept;
 
+    [[nodiscard]] status initialize_external(
+        const source_facts& facts,
+        identity_view identities,
+        std::span<const source_interface* const> imports,
+        source_interface_runtime_store& runtime_store) noexcept;
+
+    [[nodiscard]] std::span<const source_interface* const>
+    runtime_imports() const noexcept {
+        return runtime_externalized_state
+            ? external_runtime_data.imports
+            : std::span<const source_interface* const>{
+                imported_interfaces};
+    }
+
     std::vector<identity_ref> local_type_values;
 
     // Parser lookup tables.
@@ -207,6 +283,7 @@ private:
     std::vector<object_slot> persistence_object_slots;
     std::vector<member_slot> persistence_member_slots;
 
+    source_interface_runtime_data_view external_runtime_data{};
     source_interface_data_view external_persistence_data{};
     std::size_t persistence_local_type_count = 0;
     std::size_t persistence_type_slot_count = 0;
@@ -214,6 +291,7 @@ private:
     std::size_t persistence_member_slot_count = 0;
     bool persistence_compact_state = true;
     bool persistence_externalized_state = false;
+    bool runtime_externalized_state = false;
 
     std::vector<const source_interface*> imported_interfaces;
 };

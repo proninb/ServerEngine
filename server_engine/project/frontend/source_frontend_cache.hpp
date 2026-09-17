@@ -93,6 +93,11 @@ public:
             auto candidate =
                 std::make_unique<storage>();
 
+            const auto runtime_result =
+                candidate->runtime.initialize();
+            if (!runtime_result.ok())
+                return runtime_result;
+
             candidate->base.resize(source_slots);
             candidate->current.assign(
                 source_slots,
@@ -118,6 +123,27 @@ public:
     [[nodiscard]] std::size_t source_slots() const noexcept {
         return value != nullptr
             ? value->current.size()
+            : 0;
+    }
+
+    [[nodiscard]] source_interface_runtime_store*
+    runtime_storage() noexcept {
+        return value != nullptr
+            ? &value->runtime
+            : nullptr;
+    }
+
+    [[nodiscard]] std::size_t
+    runtime_page_count() const noexcept {
+        return value != nullptr
+            ? value->runtime.page_count()
+            : 0;
+    }
+
+    [[nodiscard]] std::size_t
+    runtime_reserved_bytes() const noexcept {
+        return value != nullptr
+            ? value->runtime.reserved_bytes()
             : 0;
     }
 
@@ -227,6 +253,7 @@ public:
 
 private:
     struct storage final {
+        source_interface_runtime_store runtime;
         std::vector<source_interface> base;
         std::vector<source_interface*> current;
 

@@ -51,6 +51,11 @@ struct source_frontend_summary final {
     // R5E3-B1: full G0 Source interfaces are owned by one dense context.
     bool context_backed = false;
     std::size_t context_sources = 0;
+
+    // R5E3-B2: full G0 lookup tables/imports live in context-owned pages.
+    bool context_runtime_externalized = false;
+    std::size_t context_runtime_pages = 0;
+    std::size_t context_runtime_reserved_bytes = 0;
 };
 
 struct source_frontend_entry final {

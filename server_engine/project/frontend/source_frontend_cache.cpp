@@ -149,13 +149,11 @@ template <typename InterfaceAt>
 
             auto owned = interface_value->release_persistence_data();
 
-            if (owned.local_types.size() != counts.local_types)
-                return {status_code::initialization_failed};
-
             source_interface_data_view data;
 
             if (compact_available) {
-                if (owned.type_slots.size() != counts.type_slots ||
+                if (owned.local_types.size() != counts.local_types ||
+                    owned.type_slots.size() != counts.type_slots ||
                     owned.object_slots.size() != counts.object_slots ||
                     owned.member_slots.size() != counts.member_slots) {
                     return {status_code::initialization_failed};
@@ -171,7 +169,8 @@ template <typename InterfaceAt>
             else {
                 if (!owned.type_slots.empty() ||
                     !owned.object_slots.empty() ||
-                    !owned.member_slots.empty()) {
+                    !owned.member_slots.empty() ||
+                    runtime.local_types.size() != counts.local_types) {
                     return {status_code::initialization_failed};
                 }
 
@@ -186,7 +185,7 @@ template <typename InterfaceAt>
                 if (member_scratch.capacity() < counts.member_slots)
                     member_scratch.reserve(counts.member_slots);
 
-                for (const auto identity : owned.local_types) {
+                for (const auto identity : runtime.local_types) {
                     const source_interface_type_slot* found = nullptr;
 
                     for (const auto& slot : runtime.type_slots) {
@@ -219,7 +218,7 @@ template <typename InterfaceAt>
                 }
 
                 data = {
-                    owned.local_types,
+                    runtime.local_types,
                     type_scratch,
                     object_scratch,
                     member_scratch,

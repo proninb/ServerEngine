@@ -5396,6 +5396,11 @@ struct d4l3b_extent_case final {
          rebuild.telemetry.frontend.context_sources ==
              source_count);
 
+    const bool r5e3b2_frontend_runtime =
+        !finalized ||
+        rebuild.telemetry.frontend.
+            context_runtime_externalized;
+
     const auto pass =
         canonical &&
         reconstructed_payloads == 0 &&
@@ -5404,7 +5409,8 @@ struct d4l3b_extent_case final {
         native_compiled_graph &&
         r5e2d_build_cache_storage &&
         r5e3a_frontend_handoff &&
-        r5e3b1_frontend_context;
+        r5e3b1_frontend_context &&
+        r5e3b2_frontend_runtime;
 
     std::cout
         << "R5C_CANONICAL_GENERATION_STORAGE_GATE,"
@@ -5447,6 +5453,17 @@ struct d4l3b_extent_case final {
             : 0)
         << ",frontend_context_sources="
         << rebuild.telemetry.frontend.context_sources
+        << ",frontend_runtime_externalized="
+        << (rebuild.telemetry.frontend.
+                context_runtime_externalized
+            ? 1
+            : 0)
+        << ",frontend_runtime_pages="
+        << rebuild.telemetry.frontend.
+            context_runtime_pages
+        << ",frontend_runtime_reserved_bytes="
+        << rebuild.telemetry.frontend.
+            context_runtime_reserved_bytes
         << ",frontend_handoff_ms="
         << static_cast<double>(
             rebuild.telemetry.

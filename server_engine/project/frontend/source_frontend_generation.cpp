@@ -847,11 +847,23 @@ status source_frontend_generation::build(
                                         // GEN-02C18.1: retain compact persistence only for incremental
                     // frontend construction. Full REBUILD has no baseline cache and
                     // publishes directly into canonical cache-wide arenas.
-                    state.work_status = state.interface->initialize(
-                        facts,
-                        semantic.identities(),
-                        interface_imports,
-                        cache != nullptr);
+                    auto* runtime_storage =
+                        dense_context.runtime_storage();
+
+                    if (runtime_storage == nullptr) {
+                        state.work_status = {
+                            status_code::
+                                initialization_failed};
+                        return;
+                    }
+
+                    state.work_status =
+                        state.interface->initialize(
+                            facts,
+                            semantic.identities(),
+                            interface_imports,
+                            false,
+                            runtime_storage);
 
                     if (state.work_status.ok()) {
                         dense_context.publish(
@@ -895,6 +907,12 @@ status source_frontend_generation::build(
             frontend_elapsed_ns(
                 parse_begin,
                 frontend_clock::now());
+
+        summary.context_runtime_externalized = true;
+        summary.context_runtime_pages =
+            dense_context.runtime_page_count();
+        summary.context_runtime_reserved_bytes =
+            dense_context.runtime_reserved_bytes();
 
         const auto result_materialize_begin = frontend_clock::now();
         source_frontend_result candidate;
