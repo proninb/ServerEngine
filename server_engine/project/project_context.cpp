@@ -24,6 +24,27 @@ project_context::project_context(
 
 project_context::~project_context() noexcept = default;
 
+status project_context::
+release_frontend_generation_storage(
+    project_generation_storage& output) noexcept {
+
+    if (compiled == nullptr)
+        return {status_code::invalid_state};
+
+    source_frontend_block_store storage;
+    auto result =
+        compiled->frontend_cache.
+            release_native_frontend_block_storage(
+                storage);
+
+    if (!result.ok())
+        return result;
+
+    return output.adopt_frontend_generation_storage(
+        std::move(storage));
+}
+
+
 status project_context::activate_ready_generation(
     project_generation_storage&& storage,
     project_ready_generation_activation_telemetry* telemetry) noexcept {

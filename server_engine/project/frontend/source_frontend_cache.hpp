@@ -186,6 +186,11 @@ public:
             : source_frontend_block_store_lifetime{};
     }
 
+    // Construction-to-Generation ownership handoff. Valid only for a complete
+    // native Frontend after all Parser/Builder consumers have finished.
+    [[nodiscard]] status release_native_frontend_block_storage(
+        source_frontend_block_store& output) noexcept;
+
     [[nodiscard]] status native_frontend_block(
         source_id source,
         source_frontend_block_ref& output) const noexcept;

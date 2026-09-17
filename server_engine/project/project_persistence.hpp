@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -292,8 +293,34 @@ public:
 
     [[nodiscard]] bool
     frontend_generation_owned() const noexcept {
-        return static_cast<bool>(
-            frontend_generation_lifetime);
+        return
+            (frontend_generation_storage.has_value() &&
+             frontend_generation_storage->valid()) ||
+            static_cast<bool>(
+                frontend_generation_lifetime);
+    }
+
+    [[nodiscard]] bool
+    frontend_generation_move_owned() const noexcept {
+        return
+            frontend_generation_storage.has_value() &&
+            frontend_generation_storage->valid() &&
+            !frontend_generation_lifetime;
+    }
+
+    [[nodiscard]] status adopt_frontend_generation_storage(
+        source_frontend_block_store&& storage) noexcept {
+
+        if (!storage.valid())
+            return {status_code::invalid_argument};
+
+        frontend_generation_storage.emplace(
+            std::move(storage));
+        frontend_generation_lifetime = {};
+
+        return frontend_generation_storage->valid()
+            ? status{}
+            : status{status_code::initialization_failed};
     }
 
     [[nodiscard]] const build_cache_generation_segments&
@@ -507,6 +534,7 @@ public:
         change_fallback.clear();
         native_change = {};
         frontend_generation_lifetime = {};
+        frontend_generation_storage.reset();
         build_sections.reset();
         build_owned_sections.reset();
         build.clear();
@@ -577,6 +605,10 @@ private:
     std::vector<std::byte> build;
     build_cache_encode_owned_sections build_owned_sections;
     build_cache_generation_segments build_sections;
+
+    // R5E3-A: committed Frontend pages have one explicit Generation owner.
+    std::optional<source_frontend_block_store>
+        frontend_generation_storage;
     source_frontend_block_store_lifetime frontend_generation_lifetime;
 
     friend status freeze_project_generation(

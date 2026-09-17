@@ -555,6 +555,10 @@ private:
                 output);
     }
 
+    [[nodiscard]] status
+    release_frontend_generation_storage(
+        project_generation_storage& output) noexcept;
+
     void replace_compiled(std::unique_ptr<compiled_project_state> replacement) noexcept {
         compiled.swap(replacement);
     }

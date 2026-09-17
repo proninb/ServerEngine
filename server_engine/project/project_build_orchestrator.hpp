@@ -72,6 +72,8 @@ struct project_build_telemetry final {
     std::uint64_t generation_finalize_compiled_crc_ns = 0;
     std::uint64_t generation_finalize_compiled_header_ns = 0;
     std::uint64_t generation_finalize_release_graph_ns = 0;
+    std::uint64_t generation_finalize_frontend_handoff_ns = 0;
+    bool generation_finalize_frontend_move_owned = false;
     std::uint64_t generation_finalize_segment_snapshot_ns = 0;
     std::uint64_t generation_finalize_activate_ready_ns = 0;
     std::uint64_t generation_finalize_activate_owner_ns = 0;

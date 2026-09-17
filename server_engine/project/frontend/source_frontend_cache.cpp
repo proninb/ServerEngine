@@ -281,6 +281,27 @@ persistence_record_of(
 } // namespace
 
 
+status source_frontend_cache::
+release_native_frontend_block_storage(
+    source_frontend_block_store& output) noexcept {
+
+    if (!native_frontend_block_storage_complete() ||
+        !native_frontend_block_bulk_complete_state ||
+        !frontend_blocks.valid()) {
+        return {status_code::invalid_state};
+    }
+
+    output = std::move(frontend_blocks);
+
+    native_frontend_block_complete_state = false;
+    native_frontend_block_bulk_complete_state = false;
+
+    return output.valid()
+        ? status{}
+        : status{status_code::initialization_failed};
+}
+
+
 status source_frontend_cache::native_frontend_block(
     source_id source,
     source_frontend_block_ref& output) const noexcept {

@@ -1339,6 +1339,31 @@ status project_manager::construct_reserved(
             generation_finalize_compiled_expected_nonzero_graph_mask =
                 finalized.compiled_expected_nonzero_graph_mask();
 
+        const auto frontend_handoff_begin =
+            std::chrono::steady_clock::now();
+
+        result =
+            candidate->release_frontend_generation_storage(
+                finalized);
+
+        output.telemetry.
+            generation_finalize_frontend_handoff_ns =
+                static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<
+                        std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() -
+                            frontend_handoff_begin).count());
+
+        output.telemetry.
+            generation_finalize_frontend_move_owned =
+                result.ok() &&
+                finalized.frontend_generation_move_owned();
+
+        if (!result.ok()) {
+            abandon_construction();
+            return result;
+        }
+
         const auto materialize_begin =
             std::chrono::steady_clock::now();
 

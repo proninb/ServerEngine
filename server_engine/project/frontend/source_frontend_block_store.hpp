@@ -123,6 +123,10 @@ public:
         source_frontend_block_store&&) noexcept;
     ~source_frontend_block_store();
 
+    [[nodiscard]] bool valid() const noexcept {
+        return value != nullptr;
+    }
+
     [[nodiscard]] status append(
         source_id source,
         source_interface_data_view data,
