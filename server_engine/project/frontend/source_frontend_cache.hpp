@@ -114,6 +114,7 @@ public:
     source_frontend_cache& operator=(const source_frontend_cache&) = delete;
 
     [[nodiscard]] bool complete() const noexcept { return complete_state; }
+
     [[nodiscard]] const source_interface* interface(source_id source) const noexcept;
 
     // Allocation-free SAVE boundary. Untouched baseline interface records are
@@ -171,6 +172,18 @@ public:
             native_frontend_block_bulk_complete_state
             ? &frontend_blocks
             : nullptr;
+    }
+
+    // Lifetime capability for the exact same native Frontend pages exposed by
+    // native_frontend_block_bulk_storage(). The committed Generation may retain
+    // this token and therefore keep Build Cache frontend spans valid after
+    // construction-only source_interface objects are destroyed.
+    [[nodiscard]] source_frontend_block_store_lifetime
+    native_frontend_block_lifetime() const noexcept {
+        return native_frontend_block_storage_complete() &&
+            native_frontend_block_bulk_complete_state
+            ? frontend_blocks.pin_lifetime()
+            : source_frontend_block_store_lifetime{};
     }
 
     [[nodiscard]] status native_frontend_block(

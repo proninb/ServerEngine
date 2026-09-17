@@ -4,8 +4,10 @@
 #include "../../status.hpp"
 #include "../../string_id.hpp"
 #include "../graph/graph.hpp"
+#include "../project_generation_segments.hpp"
 #include "../identity/identity_node.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -20,6 +22,12 @@ inline constexpr std::uint32_t compiled_image_format_version = 1;
 inline constexpr std::size_t compiled_image_header_size = 256;
 inline constexpr std::size_t compiled_image_directory_count = 16;
 inline constexpr std::size_t compiled_image_directory_entry_size = 32;
+inline constexpr std::size_t compiled_image_prefix_size =
+    (compiled_image_header_size +
+     compiled_image_directory_count *
+         compiled_image_directory_entry_size +
+     63u) &
+    ~std::size_t{63u};
 
 enum class compiled_image_section : std::uint32_t {
     string_core = 1,
@@ -132,10 +140,20 @@ public:
     compiled_image_view() noexcept = default;
 
     [[nodiscard]] status bind(std::span<const std::byte> image) noexcept;
+
+    // Binds the same compiled.bin v1 logical image from independent immutable
+    // sections. Directory offsets remain file offsets; no contiguous in-memory
+    // copy is required.
+    [[nodiscard]] status bind_sectioned(
+        std::span<const std::byte> prefix,
+        const std::array<
+            std::span<const std::byte>,
+            compiled_image_directory_count>& section_images) noexcept;
+
     void reset() noexcept;
 
     [[nodiscard]] bool valid() const noexcept {
-        return bytes.data() != nullptr;
+        return prefix_bytes.data() != nullptr;
     }
 
     [[nodiscard]] std::size_t string_count() const noexcept {
@@ -295,12 +313,128 @@ private:
         compiled_image_link_record& output) const noexcept;
 
     std::span<const std::byte> bytes;
+    std::span<const std::byte> prefix_bytes;
     section_view sections[compiled_image_directory_count]{};
     std::size_t string_live_count = 0;
     std::size_t identity_live_count = 0;
     std::size_t live_type_count = 0;
     std::size_t live_object_count = 0;
     std::size_t live_link_count = 0;
+};
+
+// Immutable compiled.bin v1 owner for a finalized Generation. The five
+// string/identity sections remain byte-owned for now; eleven Graph/query
+// sections may directly own vectors transferred from Graph.
+class compiled_generation_storage final {
+public:
+    compiled_generation_storage() noexcept = default;
+
+    compiled_generation_storage(
+        const compiled_generation_storage&) = delete;
+    compiled_generation_storage& operator=(
+        const compiled_generation_storage&) = delete;
+    compiled_generation_storage(
+        compiled_generation_storage&&) noexcept = default;
+    compiled_generation_storage& operator=(
+        compiled_generation_storage&&) noexcept = default;
+
+    void reset() noexcept;
+
+    [[nodiscard]] bool valid() const noexcept {
+        return valid_value;
+    }
+
+    [[nodiscard]] std::size_t size() const noexcept {
+        return logical_size;
+    }
+
+    [[nodiscard]] std::size_t native_graph_bytes() const noexcept {
+        return native_graph_bytes_value;
+    }
+
+    [[nodiscard]] std::size_t fallback_graph_bytes() const noexcept {
+        return fallback_graph_bytes_value;
+    }
+
+    [[nodiscard]] std::uint32_t native_graph_sections() const noexcept {
+        return native_graph_sections_value;
+    }
+
+    [[nodiscard]] std::uint32_t derived_graph_sections() const noexcept {
+        return derived_graph_sections_value;
+    }
+
+    [[nodiscard]] std::size_t derived_graph_bytes() const noexcept {
+        return derived_graph_bytes_value;
+    }
+
+    [[nodiscard]] std::uint32_t fallback_graph_mask() const noexcept {
+        return fallback_graph_mask_value;
+    }
+
+    [[nodiscard]] std::uint32_t native_nonempty_graph_mask() const noexcept {
+        return native_nonempty_graph_mask_value;
+    }
+
+    [[nodiscard]] std::uint32_t expected_nonzero_graph_mask() const noexcept {
+        return expected_nonzero_graph_mask_value;
+    }
+
+    [[nodiscard]] status adopt_full_g0(
+        std::vector<std::byte>& encoded,
+        compiled_graph_generation_storage&& graph) noexcept;
+
+    // Builds the finalized compiled.bin logical image directly from Project
+    // string/identity state plus moved native Graph semantic arrays. Graph query
+    // indexes are persistence-derived accelerators, never canonical Graph data.
+    [[nodiscard]] status build_full_g0(
+        const project_context& project,
+        compiled_graph_generation_storage&& graph,
+        compiled_image_encode_telemetry* telemetry = nullptr) noexcept;
+
+    [[nodiscard]] status bind(
+        compiled_image_view& output) const noexcept;
+
+    [[nodiscard]] project_generation_segment
+    segment() const noexcept;
+
+private:
+    [[nodiscard]] std::span<const std::byte>
+    section_bytes(std::size_t index) const noexcept;
+
+    std::array<std::byte, compiled_image_prefix_size> prefix{};
+    std::array<
+        std::vector<std::byte>,
+        5> semantic_sections;
+    std::array<
+        std::vector<std::byte>,
+        11> fallback_graph_sections;
+
+    // Persisted Graph query indexes are derived from immutable semantic arrays.
+    std::array<std::vector<std::byte>, 3> derived_query_indexes;
+
+    // Empty minimum-capacity query indexes belong to compiled format,
+    // not to semantic Graph ownership.
+    std::array<bool, 11> derived_graph_section_flags{};
+    std::array<std::byte, 16u * 8u> empty_query_index{};
+
+    compiled_graph_generation_storage native_graph;
+
+    std::array<std::uint64_t, compiled_image_directory_count>
+        section_offsets{};
+    std::array<std::uint64_t, compiled_image_directory_count>
+        section_sizes{};
+
+    std::size_t logical_size = 0;
+    std::size_t native_graph_bytes_value = 0;
+    std::size_t derived_graph_bytes_value = 0;
+    std::size_t fallback_graph_bytes_value = 0;
+    std::uint32_t native_graph_sections_value = 0;
+    std::uint32_t derived_graph_sections_value = 0;
+    std::uint32_t fallback_graph_mask_value = 0;
+    std::uint32_t native_nonempty_graph_mask_value = 0;
+    std::uint32_t expected_nonzero_graph_mask_value = 0;
+    bool valid_value = false;
 };
 
 // Deterministic field-wise encoder used by the current in-memory SAVE staging

@@ -45,6 +45,116 @@ void append_bytes(std::string& output, std::string_view value) {
 
 } // namespace
 
+status project_generation_storage::materialize_owned_contiguous() noexcept {
+    try {
+        const auto flatten =
+            [](const project_generation_segment& segment,
+               std::vector<std::byte>& output) -> status {
+
+            if (segment.empty()) {
+                output.clear();
+                return {};
+            }
+
+            std::vector<std::byte> replacement;
+            replacement.reserve(segment.size());
+
+            for (std::size_t index = 0;
+                 index < segment.extent_count();
+                 ++index) {
+
+                const auto extent = segment.extent(index);
+                replacement.insert(
+                    replacement.end(),
+                    extent.begin(),
+                    extent.end());
+            }
+
+            if (replacement.size() != segment.size())
+                return {status_code::initialization_failed};
+
+            output.swap(replacement);
+            return {};
+        };
+
+        auto result = status{};
+
+        if (native_sources.valid() ||
+            sparse_sources.valid()) {
+
+            const auto segment =
+                native_sources.valid()
+                    ? native_sources.segment()
+                    : sparse_sources.segment();
+
+            result = flatten(segment, sources);
+            if (!result.ok())
+                return result;
+
+            native_sources.reset();
+            sparse_sources.reset();
+        }
+
+        if (!native_change.empty()) {
+            const project_generation_segment segment{
+                native_change};
+
+            result = flatten(
+                segment,
+                change_fallback);
+            if (!result.ok())
+                return result;
+
+            native_change = {};
+        }
+
+        // R5E2C-B: preserve the sectioned Build Cache when this
+        // committed Generation pins the immutable native Frontend pages.
+        if (build_sections.valid() &&
+            !frontend_generation_owned()) {
+
+            const auto segment =
+                build_sections.logical_segment(
+                    std::span<const std::byte>{
+                        build.data(),
+                        build.size()});
+
+            result = flatten(segment, build);
+            if (!result.ok())
+                return result;
+
+            build_sections.reset();
+        }
+
+        baseline_reuse_provenance =
+            baseline_commit_provenance{};
+
+        const auto owned = segments();
+        const bool sectioned_build_owned =
+            build_sections.valid() &&
+            frontend_generation_owned();
+
+        if (!owned.persistable() ||
+            (!compiled_sections.valid() &&
+             !owned.compiled_segment().is_contiguous()) ||
+            !owned.sources_segment().is_contiguous() ||
+            !owned.change_segment().is_contiguous() ||
+            (!sectioned_build_owned &&
+             !owned.build_segment().is_contiguous())) {
+            return {status_code::initialization_failed};
+        }
+
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+}
+
+
 status observe_project_configuration(
     const std::filesystem::path& configuration_path,
     file_snapshot_observation& output) noexcept {
@@ -179,7 +289,8 @@ status freeze_project_generation(
     const project_context& project,
     const project_configuration& configuration,
     project_generation_storage& output,
-    project_generation_freeze_telemetry* telemetry) noexcept {
+    project_generation_freeze_telemetry* telemetry,
+    project_generation_freeze_mode mode) noexcept {
 
     output = {};
     if (telemetry != nullptr)
@@ -197,6 +308,16 @@ status freeze_project_generation(
 
     if (!project.construction_backed())
         return {status_code::invalid_state};
+
+    output.frontend_generation_lifetime =
+        project.frontend_cache().
+            native_frontend_block_lifetime();
+
+    if (project.frontend_cache().
+            native_frontend_block_bulk_storage() != nullptr &&
+        !output.frontend_generation_lifetime) {
+        return {status_code::initialization_failed};
+    }
 
     const source_change_capture* change_capture =
         project.generation_provenance().source_change();
@@ -276,51 +397,54 @@ status freeze_project_generation(
             &materialized_change_capture;
     }
 
-    const auto compiled_begin =
-        std::chrono::steady_clock::now();
+    if (mode == project_generation_freeze_mode::complete) {
+        const auto compiled_begin =
+            std::chrono::steady_clock::now();
 
-    compiled_image_encode_telemetry
-        compiled_detail;
+        compiled_image_encode_telemetry
+            compiled_detail;
 
-    result =
-        encode_compiled_image(
-            project,
-            output.compiled,
-            telemetry != nullptr
-                ? &compiled_detail
-                : nullptr);
+        result =
+            encode_compiled_image(
+                project,
+                output.compiled,
+                telemetry != nullptr
+                    ? &compiled_detail
+                    : nullptr);
 
-    if (telemetry != nullptr) {
-        telemetry->compiled_ns =
-            elapsed(compiled_begin);
-        telemetry->compiled_total_ns =
-            compiled_detail.total_ns;
-        telemetry->compiled_sizing_layout_ns =
-            compiled_detail.sizing_layout_ns;
-        telemetry->compiled_allocate_zero_ns =
-            compiled_detail.allocate_zero_ns;
-        telemetry->compiled_strings_ns =
-            compiled_detail.strings_ns;
-        telemetry->compiled_identities_ns =
-            compiled_detail.identities_ns;
-        telemetry->compiled_graph_arrays_ns =
-            compiled_detail.graph_arrays_ns;
-        telemetry->compiled_graph_indexes_ns =
-            compiled_detail.graph_indexes_ns;
-        telemetry->compiled_section_crc_ns =
-            compiled_detail.section_crc_ns;
-        telemetry->compiled_header_bind_ns =
-            compiled_detail.header_bind_ns;
-        telemetry->compiled_baseline_bulk_bytes =
-            compiled_detail.baseline_bulk_bytes;
-        telemetry->compiled_baseline_bulk_sections =
-            compiled_detail.baseline_bulk_sections;
-        telemetry->compiled_output_bytes =
-            compiled_detail.output_bytes;
+        if (telemetry != nullptr) {
+            telemetry->compiled_ns =
+                elapsed(compiled_begin);
+            telemetry->compiled_total_ns =
+                compiled_detail.total_ns;
+            telemetry->compiled_sizing_layout_ns =
+                compiled_detail.sizing_layout_ns;
+            telemetry->compiled_allocate_zero_ns =
+                compiled_detail.allocate_zero_ns;
+            telemetry->compiled_strings_ns =
+                compiled_detail.strings_ns;
+            telemetry->compiled_identities_ns =
+                compiled_detail.identities_ns;
+            telemetry->compiled_graph_arrays_ns =
+                compiled_detail.graph_arrays_ns;
+            telemetry->compiled_graph_indexes_ns =
+                compiled_detail.graph_indexes_ns;
+            telemetry->compiled_section_crc_ns =
+                compiled_detail.section_crc_ns;
+            telemetry->compiled_header_bind_ns =
+                compiled_detail.header_bind_ns;
+            telemetry->compiled_baseline_bulk_bytes =
+                compiled_detail.baseline_bulk_bytes;
+            telemetry->compiled_baseline_bulk_sections =
+                compiled_detail.baseline_bulk_sections;
+            telemetry->compiled_output_bytes =
+                compiled_detail.output_bytes;
+        }
+
+        if (!result.ok())
+            return result;
+
     }
-
-    if (!result.ok())
-        return result;
 
     try {
         const auto roots_begin =
@@ -809,6 +933,7 @@ status freeze_project_generation(
     if (!result.ok())
         return result;
 
+
     compiled_image_view compiled;
     source_manager_image_view sources;
     change_state_image_view change_state;
@@ -820,9 +945,13 @@ status freeze_project_generation(
     const auto bind_begin =
         std::chrono::steady_clock::now();
 
-    result = compiled.bind(output.compiled);
-    if (!result.ok())
-        return result;
+    if (mode ==
+        project_generation_freeze_mode::complete) {
+
+        result = compiled.bind(output.compiled);
+        if (!result.ok())
+            return result;
+    }
 
     if (!output.native_sources.valid() &&
         !output.sparse_sources.valid()) {
@@ -890,24 +1019,30 @@ status freeze_project_generation(
     const auto verify_build_begin =
         std::chrono::steady_clock::now();
 
-    if (output.native_sources.valid()) {
-        result =
-            build_cache.verify_against_encoded_generation(
-                compiled,
-                project.sources(),
-                project.compiled_graph());
-    }
-    else if (output.sparse_sources.valid()) {
-        result =
-            build_cache.verify_against_sparse_generation(
-                compiled,
-                project.sources());
+    if (mode == project_generation_freeze_mode::complete) {
+        if (output.native_sources.valid()) {
+            result =
+                build_cache.verify_against_encoded_generation(
+                    compiled,
+                    project.sources(),
+                    project.compiled_graph());
+        }
+        else if (output.sparse_sources.valid()) {
+            result =
+                build_cache.verify_against_sparse_generation(
+                    compiled,
+                    project.sources());
+        }
+        else {
+            result =
+                build_cache.verify_against(
+                    compiled,
+                    sources);
+        }
+
     }
     else {
-        result =
-            build_cache.verify_against(
-                compiled,
-                sources);
+        result = {};
     }
 
     if (telemetry != nullptr) {
@@ -1087,6 +1222,20 @@ status freeze_project_generation(
     }
 
     return {};
+}
+
+status freeze_project_generation(
+    const project_context& project,
+    const project_configuration& configuration,
+    project_generation_storage& output,
+    project_generation_freeze_telemetry* telemetry) noexcept {
+
+    return freeze_project_generation(
+        project,
+        configuration,
+        output,
+        telemetry,
+        project_generation_freeze_mode::complete);
 }
 
 status freeze_project_generation(

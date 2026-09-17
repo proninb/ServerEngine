@@ -29,7 +29,7 @@ constexpr std::size_t directory_offset = compiled_image_header_size;
 constexpr std::size_t directory_bytes =
     compiled_image_directory_count * compiled_image_directory_entry_size;
 constexpr std::size_t first_section_offset =
-    (directory_offset + directory_bytes + 63u) & ~std::size_t{63u};
+    compiled_image_prefix_size;
 
 constexpr std::size_t header_string_live_offset = 48;
 constexpr std::size_t header_identity_live_offset = 56;
@@ -351,6 +351,7 @@ std::span<const std::byte> compiled_image_view::section_bytes(
 
 void compiled_image_view::reset() noexcept {
     bytes = {};
+    prefix_bytes = {};
     for (auto& value : sections)
         value = {};
     string_live_count = 0;
@@ -530,6 +531,7 @@ status compiled_image_view::bind(
     }
 
     bytes = image;
+    prefix_bytes = image.first(compiled_image_prefix_size);
     std::copy(
         std::begin(candidate),
         std::end(candidate),
@@ -543,6 +545,284 @@ status compiled_image_view::bind(
 
     return {};
 }
+
+status compiled_image_view::bind_sectioned(
+    std::span<const std::byte> prefix,
+    const std::array<
+        std::span<const std::byte>,
+        compiled_image_directory_count>& section_images) noexcept {
+
+    reset();
+
+    if (prefix.size() != compiled_image_prefix_size ||
+        !std::equal(
+            image_magic.begin(),
+            image_magic.end(),
+            prefix.begin())) {
+        return {status_code::artifact_corrupt};
+    }
+
+    if (read_u32(prefix.data() + 8) !=
+        compiled_image_format_version) {
+        return {status_code::rebuild_required};
+    }
+
+    const auto logical_size =
+        read_u64(prefix.data() + 40);
+
+    if (read_u32(prefix.data() + 12) != endian_marker ||
+        read_u32(prefix.data() + 16) != compiled_image_header_size ||
+        read_u32(prefix.data() + 20) != compiled_image_directory_count ||
+        read_u32(prefix.data() + 24) != compiled_image_directory_entry_size ||
+        read_u32(prefix.data() + 28) != 0 ||
+        read_u64(prefix.data() + 32) != directory_offset ||
+        logical_size < compiled_image_prefix_size) {
+        return {status_code::artifact_corrupt};
+    }
+
+    if (!zero_bytes(
+            prefix.data() + header_reserved_begin,
+            header_directory_crc_offset -
+                header_reserved_begin)) {
+        return {status_code::artifact_corrupt};
+    }
+
+    std::array<std::byte, compiled_image_header_size>
+        header{};
+    std::memcpy(
+        header.data(),
+        prefix.data(),
+        header.size());
+
+    const auto stored_header_crc =
+        read_u64(header.data() + header_crc_offset);
+    write_u64(
+        header.data() + header_crc_offset,
+        0);
+
+    if (persistence_crc64(header) !=
+        stored_header_crc) {
+        return {status_code::artifact_corrupt};
+    }
+
+    const auto directory_span =
+        prefix.subspan(
+            directory_offset,
+            directory_bytes);
+
+    if (persistence_crc64(directory_span) !=
+        read_u64(
+            prefix.data() +
+                header_directory_crc_offset)) {
+        return {status_code::artifact_corrupt};
+    }
+
+    section_view candidate[
+        compiled_image_directory_count]{};
+
+    std::uint64_t previous_end =
+        compiled_image_prefix_size;
+
+    for (std::size_t index = 0;
+         index < compiled_image_directory_count;
+         ++index) {
+
+        const auto* entry =
+            prefix.data() +
+            directory_offset +
+            index *
+                compiled_image_directory_entry_size;
+
+        const auto raw_kind = read_u32(entry);
+        const auto kind =
+            static_cast<compiled_image_section>(
+                raw_kind);
+        const auto record_size =
+            read_u32(entry + 4);
+        const auto offset =
+            read_u64(entry + 8);
+        const auto count =
+            read_u64(entry + 16);
+        const auto section_crc =
+            read_u64(entry + 24);
+
+        const auto aligned_offset =
+            align64(previous_end);
+
+        std::uint64_t byte_count = 0;
+        std::uint64_t end = 0;
+
+        if (raw_kind != index + 1 ||
+            record_size !=
+                expected_record_size(kind) ||
+            offset != aligned_offset ||
+            (offset & 63u) != 0 ||
+            !multiply_u64(
+                count,
+                record_size,
+                byte_count) ||
+            !add_u64(
+                offset,
+                byte_count,
+                end) ||
+            end > logical_size ||
+            byte_count !=
+                section_images[index].size()) {
+            return {status_code::artifact_corrupt};
+        }
+
+        candidate[index] = section_view{
+            section_images[index].data(),
+            count,
+            record_size,
+            section_crc,
+        };
+
+        previous_end = end;
+    }
+
+    if (previous_end != logical_size)
+        return {status_code::artifact_corrupt};
+
+    const auto& string_core =
+        candidate[section_index(
+            compiled_image_section::string_core)];
+    const auto& string_index =
+        candidate[section_index(
+            compiled_image_section::string_index)];
+    const auto& identity_core =
+        candidate[section_index(
+            compiled_image_section::identity_core)];
+    const auto& identity_index =
+        candidate[section_index(
+            compiled_image_section::identity_index)];
+    const auto& types =
+        candidate[section_index(
+            compiled_image_section::types)];
+    const auto& type_identities =
+        candidate[section_index(
+            compiled_image_section::type_identities)];
+    const auto& objects =
+        candidate[section_index(
+            compiled_image_section::objects)];
+    const auto& object_identities =
+        candidate[section_index(
+            compiled_image_section::object_identities)];
+    const auto& graph_type_index =
+        candidate[section_index(
+            compiled_image_section::graph_type_index)];
+    const auto& graph_object_index =
+        candidate[section_index(
+            compiled_image_section::graph_object_index)];
+    const auto& graph_link_index =
+        candidate[section_index(
+            compiled_image_section::graph_link_index)];
+
+    const auto string_live =
+        read_u64(
+            prefix.data() +
+                header_string_live_offset);
+    const auto identity_live =
+        read_u64(
+            prefix.data() +
+                header_identity_live_offset);
+    const auto type_live =
+        read_u64(
+            prefix.data() +
+                header_type_live_offset);
+    const auto object_live =
+        read_u64(
+            prefix.data() +
+                header_object_live_offset);
+    const auto link_live =
+        read_u64(
+            prefix.data() +
+                header_link_live_offset);
+
+    if (string_live > string_core.count ||
+        identity_core.count == 0 ||
+        identity_live == 0 ||
+        identity_live > identity_core.count ||
+        type_live > types.count ||
+        object_live > objects.count ||
+        link_live >
+            candidate[section_index(
+                compiled_image_section::links)].count ||
+        type_identities.count != types.count ||
+        object_identities.count != objects.count ||
+        string_core.count >
+            (std::numeric_limits<
+                std::uint32_t>::max)() ||
+        identity_core.count >
+            identity_ref::maximum_slot ||
+        types.count >
+            (std::numeric_limits<
+                std::uint32_t>::max)() ||
+        candidate[section_index(
+            compiled_image_section::members)].count >
+            (std::numeric_limits<
+                std::uint32_t>::max)() ||
+        candidate[section_index(
+            compiled_image_section::enum_values)].count >
+            (std::numeric_limits<
+                std::uint32_t>::max)() ||
+        objects.count >
+            (std::numeric_limits<
+                std::uint32_t>::max)() ||
+        candidate[section_index(
+            compiled_image_section::links)].count >
+            (std::numeric_limits<
+                std::uint32_t>::max)() ||
+        candidate[section_index(
+            compiled_image_section::canonical_types)].count >
+            (std::numeric_limits<
+                std::uint32_t>::max)() ||
+        !valid_index_capacity(string_index.count) ||
+        !valid_index_capacity(identity_index.count) ||
+        !valid_index_capacity(graph_type_index.count) ||
+        !valid_index_capacity(
+            graph_object_index.count) ||
+        !valid_index_capacity(
+            graph_link_index.count) ||
+        string_live >
+            (std::numeric_limits<
+                std::size_t>::max)() ||
+        identity_live >
+            (std::numeric_limits<
+                std::size_t>::max)() ||
+        type_live >
+            (std::numeric_limits<
+                std::size_t>::max)() ||
+        object_live >
+            (std::numeric_limits<
+                std::size_t>::max)() ||
+        link_live >
+            (std::numeric_limits<
+                std::size_t>::max)()) {
+        return {status_code::artifact_corrupt};
+    }
+
+    prefix_bytes = prefix;
+
+    std::copy(
+        std::begin(candidate),
+        std::end(candidate),
+        std::begin(sections));
+
+    string_live_count =
+        static_cast<std::size_t>(string_live);
+    identity_live_count =
+        static_cast<std::size_t>(identity_live);
+    live_type_count =
+        static_cast<std::size_t>(type_live);
+    live_object_count =
+        static_cast<std::size_t>(object_live);
+    live_link_count =
+        static_cast<std::size_t>(link_live);
+
+    return {};
+}
+
 
 std::size_t compiled_image_view::string_slot_count() const noexcept {
     return static_cast<std::size_t>(
@@ -1950,6 +2230,1587 @@ status compiled_image_view::verify_contents() const noexcept {
 
     return {};
 }
+
+
+namespace {
+
+template<class T>
+[[nodiscard]] std::span<const std::byte>
+native_bytes(const std::vector<T>& values) noexcept {
+    return std::as_bytes(
+        std::span<const T>{
+            values.data(),
+            values.size()});
+}
+
+} // namespace
+
+void compiled_generation_storage::reset() noexcept {
+    for (auto& value : semantic_sections)
+        value.clear();
+    for (auto& value : fallback_graph_sections)
+        value.clear();
+    for (auto& value : derived_query_indexes)
+        value.clear();
+
+    native_graph = {};
+    derived_graph_section_flags = {};
+    empty_query_index = {};
+    section_offsets = {};
+    section_sizes = {};
+    logical_size = 0;
+    native_graph_bytes_value = 0;
+    derived_graph_bytes_value = 0;
+    fallback_graph_bytes_value = 0;
+    native_graph_sections_value = 0;
+    derived_graph_sections_value = 0;
+    fallback_graph_mask_value = 0;
+    native_nonempty_graph_mask_value = 0;
+    expected_nonzero_graph_mask_value = 0;
+    valid_value = false;
+    prefix = {};
+}
+
+std::span<const std::byte>
+compiled_generation_storage::section_bytes(
+    std::size_t index) const noexcept {
+
+    if (index < semantic_sections.size()) {
+        const auto& value =
+            semantic_sections[index];
+        return {
+            value.data(),
+            value.size(),
+        };
+    }
+
+    const auto graph_index =
+        index - semantic_sections.size();
+
+    if (graph_index >=
+        fallback_graph_sections.size()) {
+        return {};
+    }
+
+    const auto& fallback =
+        fallback_graph_sections[graph_index];
+
+    if (!fallback.empty()) {
+        return {
+            fallback.data(),
+            fallback.size(),
+        };
+    }
+
+    if (graph_index >= 8) {
+        const auto& derived =
+            derived_query_indexes[graph_index - 8];
+
+        if (!derived.empty()) {
+            return {
+                derived.data(),
+                derived.size(),
+            };
+        }
+    }
+
+        if (derived_graph_section_flags[graph_index]) {
+        return {
+            empty_query_index.data(),
+            empty_query_index.size(),
+        };
+    }
+
+switch (graph_index) {
+    case 0:
+        return native_bytes(native_graph.types);
+    case 1:
+        return native_bytes(
+            native_graph.type_identities);
+    case 2:
+        return native_bytes(native_graph.members);
+    case 3:
+        return native_bytes(
+            native_graph.enum_values);
+    case 4:
+        return native_bytes(native_graph.objects);
+    case 5:
+        return native_bytes(
+            native_graph.object_identities);
+    case 6:
+        return native_bytes(native_graph.links);
+    case 7:
+        return native_bytes(
+            native_graph.canonical_types);
+    case 8:
+        return native_bytes(
+            native_graph.type_index);
+    case 9:
+        return native_bytes(
+            native_graph.object_index);
+    case 10:
+        return native_bytes(
+            native_graph.link_index);
+    default:
+        return {};
+    }
+}
+
+status compiled_generation_storage::build_full_g0(
+    const project_context& project,
+    compiled_graph_generation_storage&& graph,
+    compiled_image_encode_telemetry* telemetry) noexcept {
+
+    reset();
+
+    if (telemetry != nullptr)
+        *telemetry = {};
+
+    if constexpr (
+        std::endian::native !=
+            std::endian::little) {
+        return {status_code::not_available};
+    }
+
+    const auto total_begin =
+        std::chrono::steady_clock::now();
+
+    const auto elapsed = [](
+        std::chrono::steady_clock::time_point begin) noexcept {
+        return static_cast<std::uint64_t>(
+            std::chrono::duration_cast<
+                std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() -
+                    begin).count());
+    };
+
+    const auto sizing_begin =
+        std::chrono::steady_clock::now();
+
+    if (graph.types.size() !=
+            graph.type_identities.size() ||
+        graph.objects.size() !=
+            graph.object_identities.size()) {
+        return {status_code::initialization_failed};
+    }
+
+    const auto string_slots =
+        project.string_slot_count();
+
+    std::uint64_t string_bytes_count = 0;
+    std::size_t observed_string_count = 0;
+
+    for (std::size_t index = 0;
+         index < string_slots;
+         ++index) {
+
+        const auto id =
+            project.string_at_slot(index);
+
+        if (!id)
+            continue;
+
+        const auto value =
+            project.string(id);
+
+        if (value.empty() ||
+            value.size() >
+                (std::numeric_limits<
+                    std::uint32_t>::max)() ||
+            !add_u64(
+                string_bytes_count,
+                value.size(),
+                string_bytes_count)) {
+            return {
+                status_code::
+                    initialization_failed};
+        }
+
+        ++observed_string_count;
+    }
+
+    if (observed_string_count !=
+        project.string_count()) {
+        return {status_code::initialization_failed};
+    }
+
+    const auto identity_slots =
+        project.identity_slot_count();
+    const auto expected_identity_count =
+        project.identity_count();
+    const auto identity_metadata =
+        project.identity_metadata();
+
+    const auto string_index_count =
+        index_capacity(observed_string_count);
+    const auto identity_index_count =
+        index_capacity(
+            expected_identity_count > 0
+                ? expected_identity_count - 1
+                : 0);
+
+    const auto graph_type_index_count =
+        index_capacity(graph.live_types);
+    const auto graph_object_index_count =
+        index_capacity(graph.live_objects);
+    const auto graph_link_index_count =
+        index_capacity(graph.live_links);
+
+    if (string_index_count == 0 ||
+        identity_index_count == 0 ||
+        graph_type_index_count == 0 ||
+        graph_object_index_count == 0 ||
+        graph_link_index_count == 0) {
+        return {status_code::not_available};
+    }
+
+    std::array<
+        layout_section,
+        compiled_image_directory_count> layout{{
+        {
+            compiled_image_section::string_core,
+            string_core_size,
+            string_slots,
+        },
+        {
+            compiled_image_section::string_index,
+            index_record_size,
+            string_index_count,
+        },
+        {
+            compiled_image_section::string_bytes,
+            1,
+            string_bytes_count,
+        },
+        {
+            compiled_image_section::identity_core,
+            identity_core_size,
+            identity_slots,
+        },
+        {
+            compiled_image_section::identity_index,
+            index_record_size,
+            identity_index_count,
+        },
+        {
+            compiled_image_section::types,
+            type_record_size,
+            graph.types.size(),
+        },
+        {
+            compiled_image_section::type_identities,
+            4,
+            graph.type_identities.size(),
+        },
+        {
+            compiled_image_section::members,
+            member_record_size,
+            graph.members.size(),
+        },
+        {
+            compiled_image_section::enum_values,
+            enum_value_record_size,
+            graph.enum_values.size(),
+        },
+        {
+            compiled_image_section::objects,
+            object_record_size,
+            graph.objects.size(),
+        },
+        {
+            compiled_image_section::object_identities,
+            4,
+            graph.object_identities.size(),
+        },
+        {
+            compiled_image_section::links,
+            link_record_size,
+            graph.links.size(),
+        },
+        {
+            compiled_image_section::canonical_types,
+            canonical_type_record_size,
+            graph.canonical_types.size(),
+        },
+        {
+            compiled_image_section::graph_type_index,
+            index_record_size,
+            graph_type_index_count,
+        },
+        {
+            compiled_image_section::graph_object_index,
+            index_record_size,
+            graph_object_index_count,
+        },
+        {
+            compiled_image_section::graph_link_index,
+            index_record_size,
+            graph_link_index_count,
+        },
+    }};
+
+    std::uint64_t cursor =
+        compiled_image_prefix_size;
+
+    for (auto& value : layout) {
+        cursor = align64(cursor);
+        value.offset = cursor;
+
+        std::uint64_t bytes = 0;
+        if (!multiply_u64(
+                value.count,
+                value.record_size,
+                bytes) ||
+            !add_u64(
+                cursor,
+                bytes,
+                cursor)) {
+            return {status_code::not_available};
+        }
+    }
+
+    if (cursor >
+        (std::numeric_limits<
+            std::size_t>::max)()) {
+        return {status_code::not_available};
+    }
+
+    logical_size =
+        static_cast<std::size_t>(cursor);
+
+    if (telemetry != nullptr)
+        telemetry->sizing_layout_ns =
+            elapsed(sizing_begin);
+
+    const auto allocate_begin =
+        std::chrono::steady_clock::now();
+
+    try {
+        semantic_sections[0].assign(
+            string_slots * string_core_size,
+            std::byte{0});
+        semantic_sections[1].assign(
+            string_index_count *
+                index_record_size,
+            std::byte{0});
+        semantic_sections[2].assign(
+            static_cast<std::size_t>(
+                string_bytes_count),
+            std::byte{0});
+        semantic_sections[3].assign(
+            identity_slots *
+                identity_core_size,
+            std::byte{0});
+        semantic_sections[4].assign(
+            identity_index_count *
+                index_record_size,
+            std::byte{0});
+
+        derived_query_indexes[0].assign(
+            graph_type_index_count *
+                index_record_size,
+            std::byte{0});
+        derived_query_indexes[1].assign(
+            graph_object_index_count *
+                index_record_size,
+            std::byte{0});
+        derived_query_indexes[2].assign(
+            graph_link_index_count *
+                index_record_size,
+            std::byte{0});
+    }
+    catch (const std::bad_alloc&) {
+        reset();
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        reset();
+        return {status_code::not_available};
+    }
+
+    if (telemetry != nullptr) {
+        telemetry->allocate_zero_ns =
+            elapsed(allocate_begin);
+        telemetry->output_bytes =
+            logical_size;
+    }
+
+    native_graph = std::move(graph);
+
+    std::size_t observed_identity_count = 0;
+
+    const auto encode_strings =
+        [&]() noexcept -> status {
+
+        const auto begin =
+            std::chrono::steady_clock::now();
+
+        auto* string_core =
+            semantic_sections[0].data();
+        auto* string_index =
+            semantic_sections[1].data();
+        auto* string_bytes =
+            semantic_sections[2].data();
+
+        const auto mask =
+            string_index_count - 1;
+
+        std::uint64_t offset = 0;
+
+        for (std::size_t index = 0;
+             index < string_slots;
+             ++index) {
+
+            const auto id =
+                project.string_at_slot(index);
+
+            if (!id)
+                continue;
+
+            const auto value =
+                project.string(id);
+
+            if (value.empty() ||
+                offset >
+                    string_bytes_count ||
+                value.size() >
+                    string_bytes_count -
+                        offset) {
+                return {
+                    status_code::
+                        initialization_failed};
+            }
+
+            const auto hash =
+                string_hash(value);
+            const auto fingerprint =
+                fold32(hash);
+
+            auto* core =
+                string_core +
+                index * string_core_size;
+
+            write_u64(core, offset);
+            write_u32(
+                core + 8,
+                static_cast<std::uint32_t>(
+                    value.size()));
+            write_u32(core + 12, 0);
+
+            std::memcpy(
+                string_bytes +
+                    static_cast<std::size_t>(
+                        offset),
+                value.data(),
+                value.size());
+
+            auto position =
+                static_cast<std::size_t>(
+                    hash) & mask;
+
+            for (;;) {
+                auto* slot =
+                    string_index +
+                    position *
+                        index_record_size;
+
+                if (read_u32(
+                        slot + 4) == 0) {
+                    write_u32(
+                        slot,
+                        fingerprint);
+                    write_u32(
+                        slot + 4,
+                        id.value());
+                    break;
+                }
+
+                position =
+                    (position + 1) & mask;
+            }
+
+            offset += value.size();
+        }
+
+        if (telemetry != nullptr)
+            telemetry->strings_ns =
+                elapsed(begin);
+
+        return offset ==
+                string_bytes_count
+            ? status{}
+            : status{
+                status_code::
+                    initialization_failed};
+    };
+
+    const auto encode_identities =
+        [&]() noexcept -> status {
+
+        const auto begin =
+            std::chrono::steady_clock::now();
+
+        auto* identity_core =
+            semantic_sections[3].data();
+        auto* identity_index =
+            semantic_sections[4].data();
+
+        const auto mask =
+            identity_index_count - 1;
+
+        std::size_t observed = 0;
+
+        for (std::size_t index = 0;
+             index < identity_slots;
+             ++index) {
+
+            const auto identity =
+                project.identity_at_slot(index);
+
+            if (!identity)
+                continue;
+
+            identity_ref parent;
+            string_id name;
+
+            if (index == 0) {
+                if (identity.kind() !=
+                        identity_kind::root ||
+                    identity.slot() != 1 ||
+                    identity_metadata.parent(
+                        identity) ||
+                    identity_metadata.name(
+                        identity)) {
+                    return {
+                        status_code::
+                            initialization_failed};
+                }
+            }
+            else {
+                parent =
+                    identity_metadata.parent(
+                        identity);
+                name =
+                    identity_metadata.name(
+                        identity);
+
+                if (identity.slot() !=
+                        index + 1 ||
+                    identity.kind() ==
+                        identity_kind::root ||
+                    !parent ||
+                    !identity_metadata.valid(
+                        parent) ||
+                    !name ||
+                    project.string(name).empty()) {
+                    return {
+                        status_code::
+                            initialization_failed};
+                }
+            }
+
+            ++observed;
+
+            auto* core =
+                identity_core +
+                index *
+                    identity_core_size;
+
+            write_u32(
+                core,
+                identity.value());
+
+            if (index == 0) {
+                write_u32(core + 4, 0);
+                write_u32(core + 8, 0);
+                continue;
+            }
+
+            write_u32(
+                core + 4,
+                parent.value());
+            write_u32(
+                core + 8,
+                name.value());
+
+            const auto hash =
+                semantic_identity_hash(
+                    parent.value(),
+                    name.value());
+            const auto fingerprint =
+                fold32(hash);
+
+            auto position =
+                static_cast<std::size_t>(
+                    hash) & mask;
+
+            for (;;) {
+                auto* slot =
+                    identity_index +
+                    position *
+                        index_record_size;
+
+                if (read_u32(
+                        slot + 4) == 0) {
+                    write_u32(
+                        slot,
+                        fingerprint);
+                    write_u32(
+                        slot + 4,
+                        identity.value());
+                    break;
+                }
+
+                position =
+                    (position + 1) & mask;
+            }
+        }
+
+        observed_identity_count =
+            observed;
+
+        if (telemetry != nullptr)
+            telemetry->identities_ns =
+                elapsed(begin);
+
+        return observed ==
+                expected_identity_count
+            ? status{}
+            : status{
+                status_code::
+                    initialization_failed};
+    };
+
+    status string_result;
+    status identity_result;
+
+    std::jthread string_worker;
+    std::jthread identity_worker;
+
+    const bool parallel =
+        std::thread::hardware_concurrency() > 1 &&
+        (string_slots >= 4096 ||
+         identity_slots >= 4096 ||
+         string_slots + identity_slots >=
+            4096);
+
+    if (parallel) {
+        try {
+            string_worker =
+                std::jthread(
+                    [&]() noexcept {
+                        string_result =
+                            encode_strings();
+                    });
+
+            identity_worker =
+                std::jthread(
+                    [&]() noexcept {
+                        identity_result =
+                            encode_identities();
+                    });
+        }
+        catch (const std::bad_alloc&) {
+            if (string_worker.joinable())
+                string_worker.join();
+            if (identity_worker.joinable())
+                identity_worker.join();
+
+            string_result =
+                encode_strings();
+            identity_result =
+                string_result.ok()
+                    ? encode_identities()
+                    : status{
+                        status_code::
+                            initialization_failed};
+        }
+        catch (const std::system_error&) {
+            if (string_worker.joinable())
+                string_worker.join();
+            if (identity_worker.joinable())
+                identity_worker.join();
+
+            string_result =
+                encode_strings();
+            identity_result =
+                string_result.ok()
+                    ? encode_identities()
+                    : status{
+                        status_code::
+                            initialization_failed};
+        }
+    }
+    else {
+        string_result =
+            encode_strings();
+
+        if (string_result.ok())
+            identity_result =
+                encode_identities();
+    }
+
+    const auto indexes_begin =
+        std::chrono::steady_clock::now();
+
+    auto insert_identity =
+        [&](std::vector<std::byte>& target,
+            identity_ref identity,
+            std::uint32_t handle) noexcept
+        -> bool {
+
+        if (!identity ||
+            target.empty() ||
+            (target.size() %
+                index_record_size) != 0) {
+            return false;
+        }
+
+        const auto slots =
+            target.size() /
+            index_record_size;
+        const auto mask =
+            slots - 1;
+
+        const auto hash =
+            graph_identity_hash(
+                identity.value());
+        const auto fingerprint =
+            fold32(hash);
+
+        auto position =
+            static_cast<std::size_t>(
+                hash) & mask;
+
+        for (std::size_t probe = 0;
+             probe < slots;
+             ++probe) {
+
+            auto* slot =
+                target.data() +
+                position *
+                    index_record_size;
+
+            if (read_u32(
+                    slot + 4) == 0) {
+                write_u32(
+                    slot,
+                    fingerprint);
+                write_u32(
+                    slot + 4,
+                    handle);
+                return true;
+            }
+
+            position =
+                (position + 1) & mask;
+        }
+
+        return false;
+    };
+
+    auto insert_link =
+        [&](std::vector<std::byte>& target,
+            object_endpoint endpoint,
+            std::uint32_t handle) noexcept
+        -> bool {
+
+        if (!endpoint.object ||
+            !endpoint.member ||
+            target.empty() ||
+            (target.size() %
+                index_record_size) != 0) {
+            return false;
+        }
+
+        const auto slots =
+            target.size() /
+            index_record_size;
+        const auto mask =
+            slots - 1;
+
+        const auto hash =
+            endpoint_hash(
+                endpoint.object.value(),
+                endpoint.member.value());
+        const auto fingerprint =
+            fold32(hash);
+
+        auto position =
+            static_cast<std::size_t>(
+                hash) & mask;
+
+        for (std::size_t probe = 0;
+             probe < slots;
+             ++probe) {
+
+            auto* slot =
+                target.data() +
+                position *
+                    index_record_size;
+
+            if (read_u32(
+                    slot + 4) == 0) {
+                write_u32(
+                    slot,
+                    fingerprint);
+                write_u32(
+                    slot + 4,
+                    handle);
+                return true;
+            }
+
+            position =
+                (position + 1) & mask;
+        }
+
+        return false;
+    };
+
+    std::size_t inserted_types = 0;
+    std::size_t inserted_objects = 0;
+    std::size_t inserted_links = 0;
+
+    for (std::size_t index = 0;
+         index < native_graph.types.size();
+         ++index) {
+
+        if (!native_graph.types[index].live())
+            continue;
+
+        if (index >=
+                native_graph.
+                    type_identities.size() ||
+            !insert_identity(
+                derived_query_indexes[0],
+                native_graph.
+                    type_identities[index],
+                static_cast<std::uint32_t>(
+                    index + 1))) {
+            reset();
+            return {
+                status_code::
+                    initialization_failed};
+        }
+
+        ++inserted_types;
+    }
+
+    for (std::size_t index = 0;
+         index <
+            native_graph.objects.size();
+         ++index) {
+
+        if (!native_graph.
+                objects[index].live()) {
+            continue;
+        }
+
+        if (index >=
+                native_graph.
+                    object_identities.size() ||
+            !insert_identity(
+                derived_query_indexes[1],
+                native_graph.
+                    object_identities[index],
+                static_cast<std::uint32_t>(
+                    index + 1))) {
+            reset();
+            return {
+                status_code::
+                    initialization_failed};
+        }
+
+        ++inserted_objects;
+    }
+
+    for (std::size_t index = 0;
+         index < native_graph.links.size();
+         ++index) {
+
+        const auto& value =
+            native_graph.links[index];
+
+        if (!value.live())
+            continue;
+
+        if (!insert_link(
+                derived_query_indexes[2],
+                value.target,
+                static_cast<std::uint32_t>(
+                    index + 1))) {
+            reset();
+            return {
+                status_code::
+                    initialization_failed};
+        }
+
+        ++inserted_links;
+    }
+
+    if (telemetry != nullptr) {
+        telemetry->graph_arrays_ns = 0;
+        telemetry->graph_indexes_ns =
+            elapsed(indexes_begin);
+    }
+
+    if (string_worker.joinable())
+        string_worker.join();
+    if (identity_worker.joinable())
+        identity_worker.join();
+
+    if (!string_result.ok()) {
+        reset();
+        return string_result;
+    }
+
+    if (!identity_result.ok()) {
+        reset();
+        return identity_result;
+    }
+
+    if (observed_identity_count !=
+            expected_identity_count ||
+        inserted_types !=
+            native_graph.live_types ||
+        inserted_objects !=
+            native_graph.live_objects ||
+        inserted_links !=
+            native_graph.live_links) {
+        reset();
+        return {
+            status_code::
+                initialization_failed};
+    }
+
+    // Builder/runtime indexes are accelerators. READY queries use the three
+    // persistence-derived indexes above, so duplicate Graph copies end here.
+    std::vector<
+        graph_identity_index_slot>{}.swap(
+            native_graph.type_index);
+    std::vector<
+        graph_object_identity_index_slot>{}.swap(
+            native_graph.object_index);
+    std::vector<
+        graph_link_index_slot>{}.swap(
+            native_graph.link_index);
+
+    prefix = {};
+    section_offsets = {};
+    section_sizes = {};
+    fallback_graph_sections = {};
+    derived_graph_section_flags = {};
+    empty_query_index = {};
+
+    native_graph_sections_value = 8;
+    derived_graph_sections_value = 3;
+    fallback_graph_bytes_value = 0;
+    fallback_graph_mask_value = 0;
+    native_nonempty_graph_mask_value = 0;
+    expected_nonzero_graph_mask_value = 0;
+
+    native_graph_bytes_value = 0;
+    for (std::size_t index = 0;
+         index < 8;
+         ++index) {
+
+        const auto bytes =
+            section_bytes(index + 5);
+
+        native_graph_bytes_value +=
+            bytes.size();
+
+        if (!bytes.empty()) {
+            native_nonempty_graph_mask_value |=
+                std::uint32_t{1} << index;
+        }
+    }
+
+    derived_graph_bytes_value = 0;
+    for (const auto& value :
+         derived_query_indexes) {
+        derived_graph_bytes_value +=
+            value.size();
+    }
+
+    for (std::size_t index = 0;
+         index < 11;
+         ++index) {
+
+        const auto bytes =
+            section_bytes(index + 5);
+
+        if (std::any_of(
+                bytes.begin(),
+                bytes.end(),
+                [](std::byte value) noexcept {
+                    return value !=
+                        std::byte{0};
+                })) {
+            expected_nonzero_graph_mask_value |=
+                std::uint32_t{1} << index;
+        }
+    }
+
+    const auto crc_begin =
+        std::chrono::steady_clock::now();
+
+    for (std::size_t index = 0;
+         index < layout.size();
+         ++index) {
+
+        section_offsets[index] =
+            layout[index].offset;
+
+        std::uint64_t bytes = 0;
+        if (!multiply_u64(
+                layout[index].count,
+                layout[index].record_size,
+                bytes) ||
+            bytes >
+                (std::numeric_limits<
+                    std::size_t>::max)()) {
+            reset();
+            return {status_code::not_available};
+        }
+
+        section_sizes[index] = bytes;
+
+        const auto current =
+            section_bytes(index);
+
+        if (current.size() !=
+            static_cast<std::size_t>(
+                bytes)) {
+            reset();
+            return {
+                status_code::
+                    initialization_failed};
+        }
+
+        layout[index].crc64 =
+            persistence_crc64(current);
+    }
+
+    if (telemetry != nullptr)
+        telemetry->section_crc_ns =
+            elapsed(crc_begin);
+
+    const auto header_begin =
+        std::chrono::steady_clock::now();
+
+    auto* base = prefix.data();
+
+    std::copy(
+        image_magic.begin(),
+        image_magic.end(),
+        base);
+
+    write_u32(
+        base + 8,
+        compiled_image_format_version);
+    write_u32(
+        base + 12,
+        endian_marker);
+    write_u32(
+        base + 16,
+        compiled_image_header_size);
+    write_u32(
+        base + 20,
+        compiled_image_directory_count);
+    write_u32(
+        base + 24,
+        compiled_image_directory_entry_size);
+    write_u32(base + 28, 0);
+    write_u64(
+        base + 32,
+        directory_offset);
+    write_u64(
+        base + 40,
+        logical_size);
+    write_u64(
+        base + header_string_live_offset,
+        observed_string_count);
+    write_u64(
+        base + header_identity_live_offset,
+        observed_identity_count);
+    write_u64(
+        base + header_type_live_offset,
+        native_graph.live_types);
+    write_u64(
+        base + header_object_live_offset,
+        native_graph.live_objects);
+    write_u64(
+        base + header_link_live_offset,
+        native_graph.live_links);
+
+    for (std::size_t index = 0;
+         index < layout.size();
+         ++index) {
+
+        const auto& value =
+            layout[index];
+
+        auto* entry =
+            base +
+            directory_offset +
+            index *
+                compiled_image_directory_entry_size;
+
+        write_u32(
+            entry,
+            static_cast<std::uint32_t>(
+                value.kind));
+        write_u32(
+            entry + 4,
+            value.record_size);
+        write_u64(
+            entry + 8,
+            value.offset);
+        write_u64(
+            entry + 16,
+            value.count);
+        write_u64(
+            entry + 24,
+            value.crc64);
+    }
+
+    write_u64(
+        base +
+            header_directory_crc_offset,
+        persistence_crc64(
+            std::span<const std::byte>{
+                base + directory_offset,
+                directory_bytes}));
+
+    std::array<
+        std::byte,
+        compiled_image_header_size> header{};
+
+    std::memcpy(
+        header.data(),
+        base,
+        header.size());
+
+    write_u64(
+        header.data() +
+            header_crc_offset,
+        0);
+
+    write_u64(
+        base + header_crc_offset,
+        persistence_crc64(header));
+
+    std::array<
+        std::span<const std::byte>,
+        compiled_image_directory_count>
+        sections{};
+
+    for (std::size_t index = 0;
+         index < sections.size();
+         ++index) {
+        sections[index] =
+            section_bytes(index);
+    }
+
+    compiled_image_view validation;
+    const auto bind_result =
+        validation.bind_sectioned(
+            std::span<const std::byte>{
+                prefix.data(),
+                prefix.size()},
+            sections);
+
+    if (!bind_result.ok()) {
+        reset();
+        return bind_result;
+    }
+
+    valid_value = true;
+
+    if (telemetry != nullptr) {
+        telemetry->header_bind_ns =
+            elapsed(header_begin);
+        telemetry->total_ns =
+            elapsed(total_begin);
+    }
+
+    return {};
+}
+
+
+status compiled_generation_storage::adopt_full_g0(
+    std::vector<std::byte>& encoded,
+    compiled_graph_generation_storage&& graph) noexcept {
+
+    reset();
+
+    if constexpr (
+        std::endian::native !=
+            std::endian::little) {
+        return {status_code::not_found};
+    }
+
+    compiled_image_view image;
+    auto result = image.bind(encoded);
+    if (!result.ok())
+        return result;
+
+    if (encoded.size() <
+        compiled_image_prefix_size) {
+        return {status_code::artifact_corrupt};
+    }
+
+    try {
+        std::memcpy(
+            prefix.data(),
+            encoded.data(),
+            prefix.size());
+
+        logical_size = encoded.size();
+
+        for (std::size_t index = 0;
+             index <
+                compiled_image_directory_count;
+             ++index) {
+
+            const auto* entry =
+                prefix.data() +
+                directory_offset +
+                index *
+                    compiled_image_directory_entry_size;
+
+            section_offsets[index] =
+                read_u64(entry + 8);
+
+            const auto count =
+                read_u64(entry + 16);
+            const auto record_size =
+                read_u32(entry + 4);
+
+            std::uint64_t byte_count = 0;
+            if (!multiply_u64(
+                    count,
+                    record_size,
+                    byte_count)) {
+                reset();
+                return {
+                    status_code::
+                        artifact_corrupt};
+            }
+
+            section_sizes[index] =
+                byte_count;
+        }
+
+        for (std::size_t index = 0;
+             index <
+                semantic_sections.size();
+             ++index) {
+
+            const auto section =
+                static_cast<
+                    compiled_image_section>(
+                        index + 1);
+
+            const auto bytes =
+                image.section_bytes(section);
+
+            semantic_sections[index].assign(
+                bytes.begin(),
+                bytes.end());
+        }
+
+        native_graph = std::move(graph);
+
+        for (std::size_t graph_index = 0;
+             graph_index <
+                fallback_graph_sections.size();
+             ++graph_index) {
+
+            const auto section_index_value =
+                semantic_sections.size() +
+                graph_index;
+
+            const auto section =
+                static_cast<
+                    compiled_image_section>(
+                        section_index_value + 1);
+
+            const auto expected =
+                image.section_bytes(section);
+
+            const auto native =
+                section_bytes(
+                    section_index_value);
+
+                        if (!native.empty()) {
+                native_nonempty_graph_mask_value |=
+                    std::uint32_t{1} << graph_index;
+            }
+            if (std::any_of(
+                    expected.begin(),
+                    expected.end(),
+                    [](std::byte value) noexcept {
+                        return value != std::byte{0};
+                    })) {
+                expected_nonzero_graph_mask_value |=
+                    std::uint32_t{1} << graph_index;
+            }
+
+const bool exact =
+                native.size() ==
+                    expected.size() &&
+                (native.empty() ||
+                 std::memcmp(
+                     native.data(),
+                     expected.data(),
+                     native.size()) == 0);
+
+            if (exact) {
+                ++native_graph_sections_value;
+                native_graph_bytes_value +=
+                    native.size();
+                continue;
+            }
+
+            const bool native_zero_query_index =
+                std::all_of(
+                    native.begin(),
+                    native.end(),
+                    [](std::byte value) noexcept {
+                        return value == std::byte{0};
+                    });
+
+            const bool persisted_zero_query_index =
+                std::all_of(
+                    expected.begin(),
+                    expected.end(),
+                    [](std::byte value) noexcept {
+                        return value == std::byte{0};
+                    });
+
+            const bool empty_query_index_section =
+                graph_index >= 8 &&
+                native.size() <= expected.size() &&
+                expected.size() == empty_query_index.size() &&
+                native_zero_query_index &&
+                persisted_zero_query_index;
+
+            if (empty_query_index_section) {
+                derived_graph_section_flags[
+                    graph_index] = true;
+                ++derived_graph_sections_value;
+                derived_graph_bytes_value +=
+                    expected.size();
+                                switch (graph_index) {
+                case 8:
+                    std::vector<graph_identity_index_slot>{}.swap(
+                        native_graph.type_index);
+                    break;
+                case 9:
+                    std::vector<graph_object_identity_index_slot>{}.swap(
+                        native_graph.object_index);
+                    break;
+                case 10:
+                    std::vector<graph_link_index_slot>{}.swap(
+                        native_graph.link_index);
+                    break;
+                default:
+                    break;
+                }
+
+continue;
+            }
+
+                        fallback_graph_mask_value |=
+                std::uint32_t{1} << graph_index;
+
+fallback_graph_sections[
+                graph_index].assign(
+                    expected.begin(),
+                    expected.end());
+
+            // A non-native section must not retain an unused second owner.
+            switch (graph_index) {
+            case 0:
+                native_graph.types.clear();
+                break;
+            case 1:
+                native_graph.type_identities.clear();
+                break;
+            case 2:
+                native_graph.members.clear();
+                break;
+            case 3:
+                native_graph.enum_values.clear();
+                break;
+            case 4:
+                native_graph.objects.clear();
+                break;
+            case 5:
+                native_graph.object_identities.clear();
+                break;
+            case 6:
+                native_graph.links.clear();
+                break;
+            case 7:
+                native_graph.canonical_types.clear();
+                break;
+            case 8:
+                native_graph.type_index.clear();
+                break;
+            case 9:
+                native_graph.object_index.clear();
+                break;
+            case 10:
+                native_graph.link_index.clear();
+                break;
+            default:
+                break;
+            }
+
+            fallback_graph_bytes_value +=
+                expected.size();
+        }
+
+        std::vector<std::byte>{}.swap(encoded);
+
+        std::array<
+            std::span<const std::byte>,
+            compiled_image_directory_count>
+            sections{};
+
+        for (std::size_t index = 0;
+             index < sections.size();
+             ++index) {
+            sections[index] =
+                section_bytes(index);
+
+            if (sections[index].size() !=
+                section_sizes[index]) {
+                reset();
+                return {
+                    status_code::
+                        initialization_failed};
+            }
+        }
+
+        compiled_image_view rebound;
+        result = rebound.bind_sectioned(
+            std::span<const std::byte>{
+                prefix.data(),
+                prefix.size()},
+            sections);
+
+        if (!result.ok()) {
+            reset();
+            return result;
+        }
+
+        valid_value = true;
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        reset();
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        reset();
+        return {status_code::not_available};
+    }
+}
+
+status compiled_generation_storage::bind(
+    compiled_image_view& output) const noexcept {
+
+    output.reset();
+
+    if (!valid())
+        return {status_code::invalid_state};
+
+    std::array<
+        std::span<const std::byte>,
+        compiled_image_directory_count>
+        sections{};
+
+    for (std::size_t index = 0;
+         index < sections.size();
+         ++index) {
+        sections[index] =
+            section_bytes(index);
+    }
+
+    return output.bind_sectioned(
+        std::span<const std::byte>{
+            prefix.data(),
+            prefix.size()},
+        sections);
+}
+
+project_generation_segment
+compiled_generation_storage::segment() const noexcept {
+
+    project_generation_segment output;
+
+    if (!valid())
+        return output;
+
+    static constexpr std::array<
+        std::byte, 64> zeros{};
+
+    if (!output.append(
+            std::span<const std::byte>{
+                prefix.data(),
+                prefix.size()})) {
+        return {};
+    }
+
+    std::uint64_t cursor =
+        prefix.size();
+
+    for (std::size_t index = 0;
+         index <
+            compiled_image_directory_count;
+         ++index) {
+
+        const auto offset =
+            section_offsets[index];
+
+        if (offset < cursor)
+            return {};
+
+        const auto gap =
+            offset - cursor;
+
+        if (gap > zeros.size())
+            return {};
+
+        if (gap != 0 &&
+            !output.append(
+                std::span<const std::byte>{
+                    zeros.data(),
+                    static_cast<std::size_t>(
+                        gap)})) {
+            return {};
+        }
+
+        const auto bytes =
+            section_bytes(index);
+
+        if (!output.append(bytes))
+            return {};
+
+        cursor =
+            offset +
+            bytes.size();
+    }
+
+    return cursor == logical_size
+        ? output
+        : project_generation_segment{};
+}
+
 
 status encode_compiled_image(
     const project_context& project,

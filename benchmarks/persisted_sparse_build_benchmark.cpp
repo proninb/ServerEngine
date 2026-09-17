@@ -5098,6 +5098,563 @@ struct d4l3b_extent_case final {
 #endif
 }
 
+
+[[nodiscard]] std::string_view r5c_persistence_origin_name(
+    std::uint32_t raw) noexcept {
+
+    switch (static_cast<project_generation_persistence_origin>(raw)) {
+    case project_generation_persistence_origin::none:
+        return "none";
+    case project_generation_persistence_origin::reconstructed:
+        return "reconstructed";
+    case project_generation_persistence_origin::generation_owned:
+        return "generation_owned";
+    case project_generation_persistence_origin::baseline_borrowed:
+        return "baseline_borrowed";
+    case project_generation_persistence_origin::mixed_generation:
+        return "mixed_generation";
+    case project_generation_persistence_origin::mixed_baseline:
+        return "mixed_baseline";
+    }
+
+    return "unknown";
+}
+
+[[nodiscard]] bool r5c_canonical_origin(
+    std::uint32_t raw) noexcept {
+
+    switch (static_cast<project_generation_persistence_origin>(raw)) {
+    case project_generation_persistence_origin::generation_owned:
+    case project_generation_persistence_origin::baseline_borrowed:
+    case project_generation_persistence_origin::mixed_generation:
+    case project_generation_persistence_origin::mixed_baseline:
+        return true;
+
+    case project_generation_persistence_origin::none:
+    case project_generation_persistence_origin::reconstructed:
+        return false;
+    }
+
+    return false;
+}
+
+[[nodiscard]] int run_r5c_canonical_generation_storage_audit(
+    std::size_t source_count,
+    std::size_t worker_limit) {
+
+    if (source_count == 0)
+        return 2;
+
+    temporary_tree tree;
+    std::filesystem::path configuration_path;
+    std::vector<std::filesystem::path> unused_source_paths;
+
+    const auto progress_interval =
+        source_count >= 1'000'000
+            ? std::size_t{100'000}
+            : source_count >= 100'000
+                ? std::size_t{10'000}
+                : std::size_t{0};
+
+    std::cerr
+        << "R5C_CANONICAL_AUDIT_SETUP_BEGIN,sources="
+        << source_count
+        << ",workers=" << worker_limit
+        << '\n';
+
+    if (!prepare_project(
+            source_count,
+            tree,
+            configuration_path,
+            unused_source_paths,
+            false,
+            progress_interval,
+            true)) {
+        return 1;
+    }
+
+    project_manager manager;
+    diagnostic_buffer diagnostics;
+    project_build_result rebuild;
+
+    auto result = manager.rebuild(
+        configuration_path,
+        operation_id{5000},
+        diagnostics,
+        rebuild,
+        worker_limit);
+
+    if (!result.ok() ||
+        diagnostics.has_errors() ||
+        !manager.ready() ||
+        !rebuild.changed ||
+        !rebuild.rebuilt) {
+
+        std::cout
+            << "R5C_CANONICAL_GENERATION_STORAGE_GATE,FAIL"
+            << ",stage=rebuild"
+            << ",status_code="
+            << static_cast<unsigned>(result.code)
+            << '\n';
+        return 1;
+    }
+
+    baseline_commit_result save;
+    result = manager.save(save);
+
+    if (!result.ok() ||
+        save.transaction.empty() ||
+        save.bytes_written == 0) {
+
+        std::cout
+            << "R5C_CANONICAL_GENERATION_STORAGE_GATE,FAIL"
+            << ",stage=save"
+            << ",status_code="
+            << static_cast<unsigned>(result.code)
+            << '\n';
+
+        if (manager.ready())
+            (void)manager.unload();
+
+        return 1;
+    }
+
+    const auto& telemetry = save.telemetry;
+    const auto generation_owned =
+        static_cast<std::uint32_t>(
+            project_generation_persistence_origin::
+                generation_owned);
+
+    struct payload_audit final {
+        std::string_view name;
+        std::uint32_t origin = 0;
+        std::uint64_t bytes = 0;
+        std::uint64_t save_materialize_ns = 0;
+    };
+
+    const bool finalized =
+        rebuild.telemetry.generation_finalized;
+
+    const std::array<payload_audit, 4> payloads{{
+        {
+            "compiled",
+            finalized
+                ? generation_owned
+                : telemetry.
+                    generation_freeze_audit_compiled_origin,
+            finalized
+                ? rebuild.telemetry.
+                    generation_finalize_compiled_bytes
+                : telemetry.
+                    generation_freeze_audit_compiled_bytes,
+            telemetry.generation_freeze_compiled_ns,
+        },
+        {
+            "source_manager",
+            finalized
+                ? generation_owned
+                : telemetry.
+                    generation_freeze_audit_source_manager_origin,
+            finalized
+                ? rebuild.telemetry.
+                    generation_finalize_source_manager_bytes
+                : telemetry.
+                    generation_freeze_audit_source_manager_bytes,
+            telemetry.generation_freeze_source_manager_ns,
+        },
+        {
+            "change_state",
+            finalized
+                ? generation_owned
+                : telemetry.
+                    generation_freeze_audit_change_state_origin,
+            finalized
+                ? rebuild.telemetry.
+                    generation_finalize_change_state_bytes
+                : telemetry.
+                    generation_freeze_audit_change_state_bytes,
+            telemetry.generation_freeze_change_state_ns,
+        },
+        {
+            "build_cache",
+            finalized
+                ? generation_owned
+                : telemetry.
+                    generation_freeze_audit_build_cache_origin,
+            finalized
+                ? rebuild.telemetry.
+                    generation_finalize_build_cache_bytes
+                : telemetry.
+                    generation_freeze_audit_build_cache_bytes,
+            telemetry.generation_freeze_build_cache_ns,
+        },
+    }};
+
+    std::uint64_t reconstructed_bytes = 0;
+    std::uint64_t reconstructed_ns = 0;
+    std::size_t reconstructed_payloads = 0;
+    bool canonical = true;
+
+    for (const auto& payload : payloads) {
+        const auto reconstructed =
+            payload.origin ==
+                static_cast<std::uint32_t>(
+                    project_generation_persistence_origin::
+                        reconstructed);
+
+        const auto payload_canonical =
+            payload.bytes == 0 ||
+            r5c_canonical_origin(payload.origin);
+
+        if (!payload_canonical)
+            canonical = false;
+
+        if (reconstructed) {
+            ++reconstructed_payloads;
+            reconstructed_bytes += payload.bytes;
+            reconstructed_ns +=
+                payload.save_materialize_ns;
+        }
+
+        std::cout
+            << "R5C_CANONICAL_PAYLOAD"
+            << ",payload=" << payload.name
+            << ",origin="
+            << r5c_persistence_origin_name(
+                payload.origin)
+            << ",bytes=" << payload.bytes
+            << ",save_materialize_ms="
+            << static_cast<double>(
+                payload.save_materialize_ns) /
+                1'000'000.0
+            << ",canonical="
+            << (payload_canonical ? 1 : 0)
+            << '\n';
+    }
+
+    const bool save_is_durability_only =
+        !finalized ||
+        telemetry.generation_freeze_ns == 0;
+
+    const auto native_compiled_graph =
+        !finalized ||
+        (rebuild.telemetry.
+             generation_finalize_compiled_native_graph_sections +
+         rebuild.telemetry.
+             generation_finalize_compiled_derived_graph_sections == 11 &&
+         rebuild.telemetry.
+             generation_finalize_compiled_fallback_graph_bytes == 0);
+
+    const auto pass =
+        canonical &&
+        reconstructed_payloads == 0 &&
+        reconstructed_bytes == 0 &&
+        save_is_durability_only &&
+        native_compiled_graph;
+
+    std::cout
+        << "R5C_CANONICAL_GENERATION_STORAGE_GATE,"
+        << (pass ? "PASS" : "FAIL")
+        << ",sources=" << source_count
+        << ",workers=" << worker_limit
+        << ",generation_finalized="
+        << (finalized ? 1 : 0)
+        << ",reconstructed_payloads="
+        << reconstructed_payloads
+        << ",reconstructed_bytes="
+        << reconstructed_bytes
+        << ",post_commit_materialization_ms="
+        << static_cast<double>(
+            reconstructed_ns) /
+            1'000'000.0
+        << ",generation_finalize_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_ns) /
+            1'000'000.0
+        << ",generation_finalize_freeze_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_ns) /
+            1'000'000.0
+        << ",generation_finalize_own_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_materialize_owned_ns) /
+            1'000'000.0
+                << ",release_graph_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_release_graph_ns) /
+            1'000'000.0
+        << ",segment_snapshot_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_segment_snapshot_ns) /
+            1'000'000.0
+        << ",activate_ready_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_activate_ready_ns) /
+            1'000'000.0
+        << ",activate_owner_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_activate_owner_ns) /
+            1'000'000.0
+        << ",activate_segments_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_activate_segments_ns) /
+            1'000'000.0
+        << ",activate_bind_compiled_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_activate_bind_compiled_ns) /
+            1'000'000.0
+        << ",activate_bind_sources_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_activate_bind_sources_ns) /
+            1'000'000.0
+        << ",activate_bind_build_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_activate_bind_build_ns) /
+            1'000'000.0
+        << ",activate_verify_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_activate_verify_ns) /
+            1'000'000.0
+        << ",activate_publish_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_activate_publish_ns) /
+            1'000'000.0
+        << ",activate_compiled_destroy_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_activate_compiled_destroy_ns) /
+            1'000'000.0
+        << ",teardown_graph_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_activate_teardown_graph_ns) /
+            1'000'000.0
+        << ",teardown_contributions_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_activate_teardown_contributions_ns) /
+            1'000'000.0
+        << ",teardown_frontend_cache_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_activate_teardown_frontend_cache_ns) /
+            1'000'000.0
+        << ",teardown_source_manager_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_activate_teardown_source_manager_ns) /
+            1'000'000.0
+        << ",teardown_identities_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_activate_teardown_identities_ns) /
+            1'000'000.0
+        << ",teardown_other_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                    generation_finalize_activate_compiled_destroy_ns >
+                rebuild.telemetry.
+                        generation_finalize_activate_teardown_graph_ns +
+                    rebuild.telemetry.
+                        generation_finalize_activate_teardown_contributions_ns +
+                    rebuild.telemetry.
+                        generation_finalize_activate_teardown_frontend_cache_ns +
+                    rebuild.telemetry.
+                        generation_finalize_activate_teardown_source_manager_ns +
+                    rebuild.telemetry.
+                        generation_finalize_activate_teardown_identities_ns
+                ? rebuild.telemetry.
+                        generation_finalize_activate_compiled_destroy_ns -
+                    (rebuild.telemetry.
+                         generation_finalize_activate_teardown_graph_ns +
+                     rebuild.telemetry.
+                         generation_finalize_activate_teardown_contributions_ns +
+                     rebuild.telemetry.
+                         generation_finalize_activate_teardown_frontend_cache_ns +
+                     rebuild.telemetry.
+                         generation_finalize_activate_teardown_source_manager_ns +
+                     rebuild.telemetry.
+                         generation_finalize_activate_teardown_identities_ns)
+                : 0) /
+            1'000'000.0
+        << ",activate_baseline_destroy_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_activate_baseline_destroy_ns) /
+            1'000'000.0
+        << ",activate_cleanup_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_activate_cleanup_ns) /
+            1'000'000.0
+        << ",activate_residual_ms="
+        << static_cast<double>(
+            rebuild.telemetry.generation_finalize_activate_ready_ns >
+                    rebuild.telemetry.
+                        generation_finalize_activate_owner_ns +
+                    rebuild.telemetry.
+                        generation_finalize_activate_segments_ns +
+                    rebuild.telemetry.
+                        generation_finalize_activate_bind_compiled_ns +
+                    rebuild.telemetry.
+                        generation_finalize_activate_bind_sources_ns +
+                    rebuild.telemetry.
+                        generation_finalize_activate_bind_build_ns +
+                    rebuild.telemetry.
+                        generation_finalize_activate_verify_ns +
+                    rebuild.telemetry.
+                        generation_finalize_activate_publish_ns +
+                    rebuild.telemetry.
+                        generation_finalize_activate_compiled_destroy_ns +
+                    rebuild.telemetry.
+                        generation_finalize_activate_baseline_destroy_ns +
+                    rebuild.telemetry.
+                        generation_finalize_activate_cleanup_ns
+                ? rebuild.telemetry.generation_finalize_activate_ready_ns -
+                    (rebuild.telemetry.
+                         generation_finalize_activate_owner_ns +
+                     rebuild.telemetry.
+                         generation_finalize_activate_segments_ns +
+                     rebuild.telemetry.
+                         generation_finalize_activate_bind_compiled_ns +
+                     rebuild.telemetry.
+                         generation_finalize_activate_bind_sources_ns +
+                     rebuild.telemetry.
+                         generation_finalize_activate_bind_build_ns +
+                     rebuild.telemetry.
+                         generation_finalize_activate_verify_ns +
+                     rebuild.telemetry.
+                         generation_finalize_activate_publish_ns +
+                     rebuild.telemetry.
+                         generation_finalize_activate_compiled_destroy_ns +
+                     rebuild.telemetry.
+                         generation_finalize_activate_baseline_destroy_ns +
+                     rebuild.telemetry.
+                         generation_finalize_activate_cleanup_ns)
+                : 0) /
+            1'000'000.0
+        << ",finalize_residual_ms="
+        << static_cast<double>(
+            rebuild.telemetry.generation_finalize_ns >
+                    rebuild.telemetry.generation_finalize_freeze_ns +
+                    rebuild.telemetry.
+                        generation_finalize_materialize_owned_ns +
+                    rebuild.telemetry.
+                        generation_finalize_compiled_build_ns +
+                    rebuild.telemetry.
+                        generation_finalize_release_graph_ns +
+                    rebuild.telemetry.
+                        generation_finalize_segment_snapshot_ns +
+                    rebuild.telemetry.
+                        generation_finalize_activate_ready_ns
+                ? rebuild.telemetry.generation_finalize_ns -
+                    (rebuild.telemetry.
+                         generation_finalize_freeze_ns +
+                     rebuild.telemetry.
+                         generation_finalize_materialize_owned_ns +
+                     rebuild.telemetry.
+                         generation_finalize_compiled_build_ns +
+                     rebuild.telemetry.
+                         generation_finalize_release_graph_ns +
+                     rebuild.telemetry.
+                         generation_finalize_segment_snapshot_ns +
+                     rebuild.telemetry.
+                         generation_finalize_activate_ready_ns)
+                : 0) /
+            1'000'000.0
+        << ",compiled_build_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_compiled_build_ns) /
+            1'000'000.0
+        << ",compiled_strings_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_compiled_strings_ns) /
+            1'000'000.0
+        << ",compiled_identities_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_compiled_identities_ns) /
+            1'000'000.0
+        << ",compiled_graph_arrays_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_compiled_graph_arrays_ns) /
+            1'000'000.0
+        << ",compiled_graph_indexes_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_compiled_graph_indexes_ns) /
+            1'000'000.0
+        << ",compiled_crc_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_compiled_crc_ns) /
+            1'000'000.0
+        << ",compiled_header_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_compiled_header_ns) /
+            1'000'000.0
+<< ",native_graph_sections="
+        << rebuild.telemetry.
+            generation_finalize_compiled_native_graph_sections
+        << ",native_graph_bytes="
+        << rebuild.telemetry.
+            generation_finalize_compiled_native_graph_bytes
+        << ",derived_graph_sections="
+        << rebuild.telemetry.
+            generation_finalize_compiled_derived_graph_sections
+        << ",derived_graph_bytes="
+        << rebuild.telemetry.
+            generation_finalize_compiled_derived_graph_bytes
+        << ",fallback_graph_bytes="
+        << rebuild.telemetry.
+            generation_finalize_compiled_fallback_graph_bytes
+        << ",fallback_graph_mask="
+        << rebuild.telemetry.
+            generation_finalize_compiled_fallback_graph_mask
+        << ",native_nonempty_graph_mask="
+        << rebuild.telemetry.
+            generation_finalize_compiled_native_nonempty_graph_mask
+        << ",expected_nonzero_graph_mask="
+        << rebuild.telemetry.
+            generation_finalize_compiled_expected_nonzero_graph_mask
+        << ",save_freeze_ms="
+        << static_cast<double>(
+            telemetry.generation_freeze_ns) /
+            1'000'000.0
+        << ",save_total_ms="
+        << static_cast<double>(
+            telemetry.save_total_ns) /
+            1'000'000.0
+        << ",bytes_written="
+        << save.bytes_written
+        << '\n';
+
+    if (manager.ready() &&
+        !manager.unload().ok()) {
+        return 1;
+    }
+
+    return pass ? 0 : 1;
+}
+
+
 [[nodiscard]] bool run_matrix() {
     constexpr std::size_t matrix[]{
         1'000,
@@ -5379,6 +5936,34 @@ int main(int argc, char** argv) {
                     std::stoull(argv[2]));
             return run_d4a_sparse_save_materialization_profile(
                 count);
+        }
+        catch (...) {
+            return 2;
+        }
+    }
+
+
+    if ((argc == 2 ||
+         argc == 3 ||
+         argc == 4) &&
+        std::string_view{argv[1]} ==
+            "--r5c-canonical-audit") {
+        try {
+            const auto count =
+                argc >= 3
+                    ? static_cast<std::size_t>(
+                          std::stoull(argv[2]))
+                    : std::size_t{100'000};
+
+            const auto workers =
+                argc == 4
+                    ? static_cast<std::size_t>(
+                          std::stoull(argv[3]))
+                    : std::size_t{0};
+
+            return run_r5c_canonical_generation_storage_audit(
+                count,
+                workers);
         }
         catch (...) {
             return 2;

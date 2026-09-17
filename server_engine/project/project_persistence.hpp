@@ -1,5 +1,6 @@
 #pragma once
 
+#include "frontend/source_frontend_block_store.hpp"
 #include "persistence/baseline_store.hpp"
 #include "persistence/compiled_image.hpp"
 #include "persistence/source_manager_image.hpp"
@@ -28,6 +29,11 @@ enum class project_generation_persistence_origin : std::uint32_t {
     baseline_borrowed = 3,
     mixed_generation = 4,
     mixed_baseline = 5,
+};
+
+enum class project_generation_freeze_mode : std::uint8_t {
+    complete,
+    defer_compiled,
 };
 
 struct project_generation_freeze_telemetry final {
@@ -278,10 +284,89 @@ public:
             build_cache[index].valid_for(current);
     }
 
+    [[nodiscard]] bool
+    frontend_generation_owned() const noexcept {
+        return static_cast<bool>(
+            frontend_generation_lifetime);
+    }
+
     [[nodiscard]] const build_cache_generation_segments&
     build_cache_sections() const noexcept {
         return build_sections;
     }
+
+    [[nodiscard]] status adopt_compiled_native_graph(
+        compiled_graph_generation_storage&& graph) noexcept {
+        return compiled_sections.adopt_full_g0(
+            compiled,
+            std::move(graph));
+    }
+
+    [[nodiscard]] status build_compiled_full_g0(
+        const project_context& project,
+        compiled_graph_generation_storage&& graph,
+        compiled_image_encode_telemetry* telemetry = nullptr) noexcept {
+
+        compiled.clear();
+        return compiled_sections.build_full_g0(
+            project,
+            std::move(graph),
+            telemetry);
+    }
+
+    [[nodiscard]] status bind_compiled(
+        compiled_image_view& output) const noexcept {
+        return compiled_sections.valid()
+            ? compiled_sections.bind(output)
+            : output.bind(std::span<const std::byte>{
+                compiled.data(),
+                compiled.size()});
+    }
+
+    [[nodiscard]] std::size_t
+    compiled_native_graph_bytes() const noexcept {
+        return compiled_sections.native_graph_bytes();
+    }
+
+    [[nodiscard]] std::size_t
+    compiled_derived_graph_bytes() const noexcept {
+        return compiled_sections.derived_graph_bytes();
+    }
+
+    [[nodiscard]] std::size_t
+    compiled_fallback_graph_bytes() const noexcept {
+        return compiled_sections.fallback_graph_bytes();
+    }
+
+    [[nodiscard]] std::uint32_t
+    compiled_native_graph_sections() const noexcept {
+        return compiled_sections.native_graph_sections();
+    }
+
+    [[nodiscard]] std::uint32_t
+    compiled_derived_graph_sections() const noexcept {
+        return compiled_sections.derived_graph_sections();
+    }
+
+    [[nodiscard]] std::uint32_t
+    compiled_fallback_graph_mask() const noexcept {
+        return compiled_sections.fallback_graph_mask();
+    }
+
+    [[nodiscard]] std::uint32_t
+    compiled_native_nonempty_graph_mask() const noexcept {
+        return compiled_sections.native_nonempty_graph_mask();
+    }
+
+    [[nodiscard]] std::uint32_t
+    compiled_expected_nonzero_graph_mask() const noexcept {
+        return compiled_sections.expected_nonzero_graph_mask();
+    }
+
+    // Converts every borrowed/scatter-gather artifact into storage owned by
+    // this Generation. Used only at the full-construction READY boundary so
+    // mutable construction storage can be destroyed without invalidating bytes.
+    [[nodiscard]] status materialize_owned_contiguous() noexcept;
 
     [[nodiscard]] project_generation_segments
     segments() const noexcept {
@@ -315,11 +400,16 @@ public:
                     build.data(),
                     build.size()}};
 
+        const auto compiled_segment =
+            compiled_sections.valid()
+                ? compiled_sections.segment()
+                : project_generation_segment{
+                    std::span<const std::byte>{
+                        compiled.data(),
+                        compiled.size()}};
+
         return {
-            project_generation_segment{
-                std::span<const std::byte>{
-                    compiled.data(),
-                    compiled.size()}},
+            compiled_segment,
             source_segment,
             change_segment,
             build_segment,
@@ -328,12 +418,14 @@ public:
 
     void reset() noexcept {
         compiled.clear();
+        compiled_sections.reset();
         sources.clear();
         native_sources.reset();
         sparse_sources.reset();
         baseline_reuse_provenance = {};
         change_fallback.clear();
         native_change = {};
+        frontend_generation_lifetime = {};
         build_sections.reset();
         build.clear();
     }
@@ -393,6 +485,7 @@ private:
     }
 
     std::vector<std::byte> compiled;
+    compiled_generation_storage compiled_sections;
     std::vector<std::byte> sources;
     source_manager_native_image_storage native_sources;
     source_manager_sparse_image_storage sparse_sources;
@@ -401,6 +494,7 @@ private:
     std::span<const std::byte> native_change;
     std::vector<std::byte> build;
     build_cache_generation_segments build_sections;
+    source_frontend_block_store_lifetime frontend_generation_lifetime;
 
     friend status freeze_project_generation(
         const project_context&,
@@ -412,6 +506,13 @@ private:
         const project_configuration&,
         project_generation_storage&,
         project_generation_freeze_telemetry*) noexcept;
+
+    friend status freeze_project_generation(
+        const project_context&,
+        const project_configuration&,
+        project_generation_storage&,
+        project_generation_freeze_telemetry*,
+        project_generation_freeze_mode) noexcept;
 
     friend status freeze_project_generation(
         const project_context&,
@@ -428,6 +529,13 @@ private:
     const project_configuration& configuration,
     project_generation_storage& output,
     project_generation_freeze_telemetry* telemetry) noexcept;
+
+[[nodiscard]] status freeze_project_generation(
+    const project_context& project,
+    const project_configuration& configuration,
+    project_generation_storage& output,
+    project_generation_freeze_telemetry* telemetry,
+    project_generation_freeze_mode mode) noexcept;
 
 [[nodiscard]] status freeze_project_generation(
     const project_context& project,

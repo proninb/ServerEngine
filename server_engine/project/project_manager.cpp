@@ -1200,7 +1200,7 @@ status project_manager::construct_reserved(
             worker_limit,
             acquisition_worker_limit};
 
-        const auto result =
+        auto result =
             builder.construct(
                 operation,
                 diagnostics,
@@ -1210,6 +1210,255 @@ status project_manager::construct_reserved(
             abandon_construction();
             return result;
         }
+
+        const auto finalize_begin =
+            std::chrono::steady_clock::now();
+
+        project_generation_storage finalized;
+        project_generation_freeze_telemetry
+            finalize_detail;
+
+        const auto finalize_freeze_begin =
+            std::chrono::steady_clock::now();
+
+        result = freeze_project_generation(
+            *candidate,
+            candidate->configuration(),
+            finalized,
+            &finalize_detail,
+            project_generation_freeze_mode::
+                defer_compiled);
+
+        output.telemetry.generation_finalize_freeze_ns =
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<
+                    std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() -
+                        finalize_freeze_begin).count());
+
+        if (!result.ok()) {
+            abandon_construction();
+            return result;
+        }
+
+        compiled_graph_generation_storage
+            native_compiled_graph;
+
+        const auto release_graph_begin =
+            std::chrono::steady_clock::now();
+
+        result =
+            candidate->
+                release_compiled_graph_generation_storage(
+                    native_compiled_graph);
+
+        output.telemetry.
+            generation_finalize_release_graph_ns =
+                static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<
+                        std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() -
+                            release_graph_begin).count());
+
+        if (!result.ok()) {
+            abandon_construction();
+            return result;
+        }
+
+        compiled_image_encode_telemetry
+            compiled_finalize_detail;
+
+        const auto compiled_build_begin =
+            std::chrono::steady_clock::now();
+
+        result =
+            finalized.build_compiled_full_g0(
+                *candidate,
+                std::move(native_compiled_graph),
+                &compiled_finalize_detail);
+
+        output.telemetry.
+            generation_finalize_compiled_build_ns =
+                static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<
+                        std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() -
+                            compiled_build_begin).count());
+
+        output.telemetry.
+            generation_finalize_compiled_strings_ns =
+                compiled_finalize_detail.strings_ns;
+        output.telemetry.
+            generation_finalize_compiled_identities_ns =
+                compiled_finalize_detail.identities_ns;
+        output.telemetry.
+            generation_finalize_compiled_graph_arrays_ns =
+                compiled_finalize_detail.graph_arrays_ns;
+        output.telemetry.
+            generation_finalize_compiled_graph_indexes_ns =
+                compiled_finalize_detail.graph_indexes_ns;
+        output.telemetry.
+            generation_finalize_compiled_crc_ns =
+                compiled_finalize_detail.section_crc_ns;
+        output.telemetry.
+            generation_finalize_compiled_header_ns =
+                compiled_finalize_detail.header_bind_ns;
+
+        if (!result.ok()) {
+            abandon_construction();
+            return result;
+        }
+
+        output.telemetry.
+            generation_finalize_compiled_native_graph_bytes =
+                finalized.
+                    compiled_native_graph_bytes();
+        output.telemetry.
+            generation_finalize_compiled_derived_graph_bytes =
+                finalized.
+                    compiled_derived_graph_bytes();
+        output.telemetry.
+            generation_finalize_compiled_fallback_graph_bytes =
+                finalized.
+                    compiled_fallback_graph_bytes();
+        output.telemetry.
+            generation_finalize_compiled_native_graph_sections =
+                finalized.
+                    compiled_native_graph_sections();
+        output.telemetry.
+            generation_finalize_compiled_derived_graph_sections =
+                finalized.
+                    compiled_derived_graph_sections();
+        output.telemetry.
+            generation_finalize_compiled_fallback_graph_mask =
+                finalized.compiled_fallback_graph_mask();
+        output.telemetry.
+            generation_finalize_compiled_native_nonempty_graph_mask =
+                finalized.compiled_native_nonempty_graph_mask();
+        output.telemetry.
+            generation_finalize_compiled_expected_nonzero_graph_mask =
+                finalized.compiled_expected_nonzero_graph_mask();
+
+        const auto materialize_begin =
+            std::chrono::steady_clock::now();
+
+        result =
+            finalized.materialize_owned_contiguous();
+
+        output.telemetry.
+            generation_finalize_materialize_owned_ns =
+                static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<
+                        std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() -
+                            materialize_begin).count());
+
+        if (!result.ok()) {
+            abandon_construction();
+            return result;
+        }
+
+        const auto segment_snapshot_begin =
+            std::chrono::steady_clock::now();
+
+        const auto finalized_segments =
+            finalized.segments();
+
+        output.telemetry.
+            generation_finalize_segment_snapshot_ns =
+                static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<
+                        std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() -
+                            segment_snapshot_begin).count());
+
+        output.telemetry.generation_finalize_compiled_bytes =
+            finalized_segments.compiled_segment().size();
+        output.telemetry.generation_finalize_source_manager_bytes =
+            finalized_segments.sources_segment().size();
+        output.telemetry.generation_finalize_change_state_bytes =
+            finalized_segments.change_segment().size();
+        output.telemetry.generation_finalize_build_cache_bytes =
+            finalized_segments.build_segment().size();
+
+        project_ready_generation_activation_telemetry
+            activation_detail;
+
+        const auto activate_ready_begin =
+            std::chrono::steady_clock::now();
+
+        result = candidate->activate_ready_generation(
+            std::move(finalized),
+            &activation_detail);
+
+        output.telemetry.
+            generation_finalize_activate_ready_ns =
+                static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<
+                        std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() -
+                            activate_ready_begin).count());
+
+        output.telemetry.
+            generation_finalize_activate_owner_ns =
+                activation_detail.owner_ns;
+        output.telemetry.
+            generation_finalize_activate_segments_ns =
+                activation_detail.segments_ns;
+        output.telemetry.
+            generation_finalize_activate_bind_compiled_ns =
+                activation_detail.bind_compiled_ns;
+        output.telemetry.
+            generation_finalize_activate_bind_sources_ns =
+                activation_detail.bind_sources_ns;
+        output.telemetry.
+            generation_finalize_activate_bind_build_ns =
+                activation_detail.bind_build_ns;
+        output.telemetry.
+            generation_finalize_activate_verify_ns =
+                activation_detail.verify_ns;
+        output.telemetry.
+            generation_finalize_activate_publish_ns =
+                activation_detail.publish_ns;
+        output.telemetry.
+            generation_finalize_activate_compiled_destroy_ns =
+                activation_detail.compiled_destroy_ns;
+        output.telemetry.
+            generation_finalize_activate_teardown_graph_ns =
+                activation_detail.compiled_teardown_graph_ns;
+        output.telemetry.
+            generation_finalize_activate_teardown_contributions_ns =
+                activation_detail.compiled_teardown_contributions_ns;
+        output.telemetry.
+            generation_finalize_activate_teardown_frontend_cache_ns =
+                activation_detail.compiled_teardown_frontend_cache_ns;
+        output.telemetry.
+            generation_finalize_activate_teardown_source_manager_ns =
+                activation_detail.compiled_teardown_source_manager_ns;
+        output.telemetry.
+            generation_finalize_activate_teardown_identities_ns =
+                activation_detail.compiled_teardown_identities_ns;
+        output.telemetry.
+            generation_finalize_activate_baseline_destroy_ns =
+                activation_detail.baseline_destroy_ns;
+        output.telemetry.
+            generation_finalize_activate_cleanup_ns =
+                activation_detail.cleanup_ns;
+
+        if (!result.ok()) {
+            abandon_construction();
+            return result;
+        }
+
+        output.telemetry.generation_finalize_ns =
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<
+                    std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() -
+                        finalize_begin).count());
+        output.telemetry.generation_finalized = true;
+        output.telemetry.storage_after =
+            candidate->storage_pressure();
 
         project = std::move(candidate);
         output.rebuilt = mark_rebuild;
@@ -1875,6 +2124,28 @@ status project_manager::save(
         output.bytes_written = 0;
         publish_save_telemetry();
         return {};
+    }
+
+    if (const auto* finalized =
+            project->finalized_generation_storage();
+        finalized != nullptr) {
+
+        result = store.commit(
+            fingerprint,
+            configuration_state,
+            finalized->segments(),
+            finalized->commit_provenance(),
+            output,
+            io_worker_budget);
+
+        publish_save_telemetry();
+
+        if (result.ok()) {
+            project->remember_persisted_transaction(
+                output.transaction);
+        }
+
+        return result;
     }
 
     if (project->construction_backed()) {

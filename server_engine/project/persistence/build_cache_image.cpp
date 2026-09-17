@@ -353,6 +353,98 @@ template <typename T>
     return {};
 }
 
+template <typename T>
+[[nodiscard]] status native_frontend_span(
+    const project_generation_segment& segment,
+    build_cache_range range,
+    std::uint32_t record_size,
+    std::span<const T>& output) noexcept {
+
+    output = {};
+
+    if constexpr (std::endian::native != std::endian::little)
+        return {status_code::not_available};
+
+    if (record_size != sizeof(T) ||
+        !std::is_trivially_copyable_v<T> ||
+        !std::is_standard_layout_v<T> ||
+        !std::has_unique_object_representations_v<T>) {
+        return {status_code::not_available};
+    }
+
+    const auto stride =
+        static_cast<std::size_t>(record_size);
+    const auto begin =
+        static_cast<std::size_t>(range.begin);
+    const auto count =
+        static_cast<std::size_t>(range.count);
+    const auto maximum =
+        (std::numeric_limits<std::size_t>::max)();
+
+    if (stride == 0 ||
+        begin > maximum / stride ||
+        count > maximum / stride) {
+        return {status_code::artifact_corrupt};
+    }
+
+    const auto byte_begin = begin * stride;
+    const auto byte_count = count * stride;
+
+    if (byte_begin > segment.size() ||
+        byte_count > segment.size() - byte_begin) {
+        return {status_code::artifact_corrupt};
+    }
+
+    if (count == 0)
+        return {};
+
+    std::size_t cursor = 0;
+
+    for (std::size_t extent_index = 0;
+         extent_index < segment.extent_count();
+         ++extent_index) {
+
+        const auto extent =
+            segment.extent(extent_index);
+
+        if (byte_begin >= cursor) {
+            const auto local_offset =
+                byte_begin - cursor;
+
+            if (local_offset <= extent.size() &&
+                byte_count <=
+                    extent.size() - local_offset) {
+
+                const auto* address =
+                    extent.data() + local_offset;
+
+                if (reinterpret_cast<std::uintptr_t>(
+                        address) %
+                        alignof(T) != 0) {
+                    return {status_code::not_available};
+                }
+
+                output = std::span<const T>{
+                    reinterpret_cast<const T*>(
+                        address),
+                    count,
+                };
+                return {};
+            }
+        }
+
+        if (extent.size() > maximum - cursor)
+            return {status_code::artifact_corrupt};
+
+        cursor += extent.size();
+    }
+
+    // source_frontend_block_store keeps one Source block inside one page.
+    // A cross-extent range cannot become one native std::span without copying.
+    return {status_code::not_available};
+}
+
+
 
 // GEN-02C15: persisted integers are little-endian. Native little-endian hosts
 // can load/store the complete scalar with memcpy; big/mixed-endian hosts retain
@@ -937,19 +1029,9 @@ status build_cache_generation_segments::bind_view(
     if (!valid())
         return {status_code::invalid_state};
 
-    std::array<
-        std::span<const std::byte>,
-        build_cache_image_directory_count> sections{};
-
-    for (std::size_t index = 0; index < sections.size(); ++index) {
-        if (!sections_value[index].is_contiguous())
-            return {status_code::not_available};
-
-        sections[index] =
-            sections_value[index].contiguous();
-    }
-
-    return output.bind_sectioned(prefix_value, sections);
+    return output.bind_sectioned(
+        prefix_value,
+        sections_value);
 }
 
 status build_cache_generation_segments::bind_validated_sections(
@@ -993,75 +1075,98 @@ project_generation_segment
 build_cache_generation_segments::logical_segment(
     std::span<const std::byte> layout_backing) const noexcept {
 
+    // R5E2D-A: logical bytes are reconstructed from the canonical prefix,
+    // section carriers and deterministic zero alignment gaps. The large
+    // monolithic encoder buffer is no longer a lifetime requirement.
+    (void)layout_backing;
+
     project_generation_segment output;
 
     if (!valid() ||
-        layout_backing.size() != logical_size_value ||
-        layout_backing.size() < build_cache_image_prefix_size ||
-        layout_backing.data() != prefix_value.data()) {
-        return output;
-    }
-
-    bool canonical = true;
-
-    for (std::size_t index = 0; index < sections_value.size(); ++index) {
-        const auto& value = sections_value[index];
-        if (value.empty())
-            continue;
-
-        const auto offset =
-            static_cast<std::size_t>(section_offsets[index]);
-
-        if (!value.is_contiguous() ||
-            offset > layout_backing.size() ||
-            value.size() > layout_backing.size() - offset ||
-            value.contiguous().data() != layout_backing.data() + offset) {
-            canonical = false;
-            break;
-        }
-    }
-
-    if (canonical) {
-        (void)output.append(layout_backing);
+        prefix_value.size() != build_cache_image_prefix_size ||
+        logical_size_value < prefix_value.size()) {
         return output;
     }
 
     if (!output.append(prefix_value))
         return {};
 
-    std::size_t previous_end = build_cache_image_prefix_size;
+    static constexpr std::array<std::byte, 64>
+        zero_padding{};
 
-    for (std::size_t index = 0; index < sections_value.size(); ++index) {
-        const auto offset =
-            static_cast<std::size_t>(section_offsets[index]);
-        const auto& value = sections_value[index];
+    const auto append_padding =
+        [&](std::size_t count) noexcept {
 
-        if (offset < previous_end ||
-            offset > layout_backing.size() ||
-            value.size() > layout_backing.size() - offset) {
+            while (count != 0) {
+                const auto chunk =
+                    (std::min)(
+                        count,
+                        zero_padding.size());
+
+                if (!output.append(
+                        std::span<const std::byte>{
+                            zero_padding.data(),
+                            chunk})) {
+                    return false;
+                }
+
+                count -= chunk;
+            }
+
+            return true;
+        };
+
+    std::size_t previous_end =
+        build_cache_image_prefix_size;
+
+    for (std::size_t index = 0;
+         index < sections_value.size();
+         ++index) {
+
+        const auto raw_offset =
+            section_offsets[index];
+
+        if (raw_offset >
+            (std::numeric_limits<std::size_t>::max)()) {
             return {};
         }
 
-        if (offset > previous_end &&
-            !output.append(
-                layout_backing.subspan(
-                    previous_end,
-                    offset - previous_end))) {
+        const auto offset =
+            static_cast<std::size_t>(
+                raw_offset);
+
+        const auto& value =
+            sections_value[index];
+
+        if (offset < previous_end ||
+            offset > logical_size_value ||
+            value.size() >
+                logical_size_value - offset) {
+            return {};
+        }
+
+        if (!append_padding(
+                offset - previous_end)) {
             return {};
         }
 
         for (std::size_t extent = 0;
              extent < value.extent_count();
              ++extent) {
-            if (!output.append(value.extent(extent)))
+
+            if (!output.append(
+                    value.extent(extent))) {
                 return {};
+            }
         }
 
-        previous_end = offset + value.size();
+        previous_end =
+            offset + value.size();
     }
 
-    if (previous_end < layout_backing.size() &&
-        !output.append(layout_backing.subspan(previous_end))) {
+    if (previous_end > logical_size_value ||
+        !append_padding(
+            logical_size_value - previous_end)) {
         return {};
     }
 
@@ -1905,6 +2010,484 @@ status build_cache_image_view::bind_sectioned(
     return {};
 }
 
+status build_cache_image_view::bind_sectioned(
+    std::span<const std::byte> prefix,
+    const std::array<
+        project_generation_segment,
+        build_cache_image_directory_count>& section_images) noexcept {
+
+    reset();
+
+    if (prefix.size() != first_section_offset)
+        return {status_code::artifact_corrupt};
+
+    if (!std::equal(
+            image_magic.begin(),
+            image_magic.end(),
+            prefix.begin())) {
+        return {status_code::artifact_corrupt};
+    }
+
+    if (read_u32(prefix.data() + 8) !=
+        build_cache_image_format_version) {
+        return {status_code::rebuild_required};
+    }
+
+    const auto flags =
+        read_u32(prefix.data() + header_flags_offset);
+
+    const auto logical_size =
+        read_u64(prefix.data() + 40);
+
+    if (read_u32(prefix.data() + 12) != endian_marker ||
+        read_u32(prefix.data() + 16) !=
+            build_cache_image_header_size ||
+        read_u32(prefix.data() + 20) !=
+            build_cache_image_directory_count ||
+        read_u32(prefix.data() + 24) !=
+            build_cache_image_directory_entry_size ||
+        (flags & ~known_flags) != 0 ||
+        read_u64(prefix.data() + 32) != directory_offset ||
+        logical_size < first_section_offset) {
+        return {status_code::artifact_corrupt};
+    }
+
+    if ((flags & known_flags) != known_flags)
+        return {status_code::artifact_corrupt};
+
+    const auto raw_change_backend =
+        read_u32(
+            prefix.data() +
+            header_change_backend_offset);
+
+    if (read_u32(
+            prefix.data() +
+            header_change_backend_offset + 4) != 0 ||
+        raw_change_backend >
+            static_cast<std::uint32_t>(
+                source_change_backend::windows_usn)) {
+        return {status_code::artifact_corrupt};
+    }
+
+    source_change_checkpoint change_checkpoint;
+    change_checkpoint.backend =
+        static_cast<source_change_backend>(
+            raw_change_backend);
+    change_checkpoint.volume_serial =
+        read_u64(
+            prefix.data() +
+            header_change_volume_offset);
+    change_checkpoint.journal_id =
+        read_u64(
+            prefix.data() +
+            header_change_journal_offset);
+    change_checkpoint.next_usn =
+        static_cast<std::int64_t>(
+            read_u64(
+                prefix.data() +
+                header_change_usn_offset));
+
+    if (!change_checkpoint &&
+        (change_checkpoint.volume_serial != 0 ||
+         change_checkpoint.journal_id != 0 ||
+         change_checkpoint.next_usn != 0)) {
+        return {status_code::artifact_corrupt};
+    }
+
+    if (change_checkpoint &&
+        (change_checkpoint.volume_serial == 0 ||
+         change_checkpoint.journal_id == 0 ||
+         change_checkpoint.next_usn < 0)) {
+        return {status_code::artifact_corrupt};
+    }
+
+    if (!zero_bytes(
+            prefix.data() +
+                header_reserved_begin,
+            header_directory_crc_offset -
+                header_reserved_begin)) {
+        return {status_code::artifact_corrupt};
+    }
+
+    std::array<
+        std::byte,
+        build_cache_image_header_size>
+        header{};
+
+    std::memcpy(
+        header.data(),
+        prefix.data(),
+        header.size());
+
+    const auto stored_header_crc =
+        read_u64(
+            header.data() +
+            header_crc_offset);
+
+    write_u64(
+        header.data() +
+            header_crc_offset,
+        0);
+
+    if (persistence_crc64(header) !=
+        stored_header_crc) {
+        return {status_code::artifact_corrupt};
+    }
+
+    const auto directory_span =
+        prefix.subspan(
+            directory_offset,
+            directory_bytes);
+
+    if (persistence_crc64(directory_span) !=
+        read_u64(
+            prefix.data() +
+            header_directory_crc_offset)) {
+        return {status_code::artifact_corrupt};
+    }
+
+    if (directory_offset + directory_bytes <
+            first_section_offset &&
+        !zero_bytes(
+            prefix.data() +
+                directory_offset +
+                directory_bytes,
+            first_section_offset -
+                directory_offset -
+                directory_bytes)) {
+        return {status_code::artifact_corrupt};
+    }
+
+    section_view
+        candidate[
+            build_cache_image_directory_count]{};
+
+    std::uint64_t previous_end =
+        first_section_offset;
+
+    for (std::size_t index = 0;
+         index <
+            build_cache_image_directory_count;
+         ++index) {
+
+        const auto* entry =
+            prefix.data() +
+            directory_offset +
+            index *
+                build_cache_image_directory_entry_size;
+
+        const auto raw_kind =
+            read_u32(entry);
+
+        const auto kind =
+            static_cast<
+                build_cache_image_section>(
+                    raw_kind);
+
+        const auto record_size =
+            read_u32(entry + 4);
+        const auto offset =
+            read_u64(entry + 8);
+        const auto count =
+            read_u64(entry + 16);
+        const auto section_crc =
+            read_u64(entry + 24);
+
+        const auto aligned_offset =
+            align64(previous_end);
+
+        if (raw_kind != index + 1 ||
+            record_size !=
+                expected_record_size(kind) ||
+            offset != aligned_offset ||
+            (offset & 63u) != 0 ||
+            offset > logical_size) {
+            return {
+                status_code::artifact_corrupt};
+        }
+
+        std::uint64_t byte_count = 0;
+        std::uint64_t end = 0;
+
+        if (!multiply_u64(
+                count,
+                record_size,
+                byte_count) ||
+            !add_u64(
+                offset,
+                byte_count,
+                end) ||
+            end > logical_size ||
+            byte_count >
+                (std::numeric_limits<
+                    std::size_t>::max)()) {
+            return {
+                status_code::artifact_corrupt};
+        }
+
+        if (section_images[index].size() !=
+            static_cast<std::size_t>(
+                byte_count)) {
+            return {
+                status_code::artifact_corrupt};
+        }
+
+        const auto contiguous =
+            section_images[index].contiguous();
+
+        candidate[index] = {
+            contiguous.data(),
+            count,
+            record_size,
+            section_crc,
+            section_images[index],
+        };
+
+        previous_end = end;
+    }
+
+    if (previous_end != logical_size)
+        return {status_code::artifact_corrupt};
+
+    const auto source_count =
+        read_u64(
+            prefix.data() +
+            header_source_count_offset);
+
+    const auto frontend_count =
+        read_u64(
+            prefix.data() +
+            header_frontend_count_offset);
+
+    const auto source_bytes =
+        read_u64(
+            prefix.data() +
+            header_source_bytes_offset);
+
+    const auto derived_entries =
+        read_u64(
+            prefix.data() +
+            header_derived_entries_offset);
+
+    const auto& source_directory =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    source_directory)];
+
+    const auto& source_bytes_section =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    source_bytes)];
+
+    const auto& contribution_states =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    contribution_states)];
+
+    const auto& intrinsic_refs =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    graph_intrinsic_refs)];
+
+    const auto& named_refs =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    graph_named_refs)];
+
+    const auto& derived_index =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    graph_derived_index)];
+
+    const auto& dependency_versions =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    graph_dependency_versions)];
+
+    const auto& reverse_heads =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    graph_reverse_dependency_heads)];
+
+    const auto& type_identity_index =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    graph_type_identity_index)];
+
+    const auto& object_identity_index =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    graph_object_identity_index)];
+
+    const auto& link_target_index =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    graph_link_target_index)];
+
+    const auto& source_file_identity_index =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    source_file_identity_index)];
+
+    const auto&
+        tracked_directory_identity_index =
+        candidate[
+            section_index(
+                build_cache_image_section::
+                    tracked_directory_identity_index)];
+
+    const auto valid_historical_index =
+        [](std::uint64_t count) noexcept {
+            return count != 0 &&
+                (count & (count - 1)) == 0;
+        };
+
+    const auto valid_optional_index =
+        [](std::uint64_t count) noexcept {
+            return count == 0 ||
+                (count & (count - 1)) == 0;
+        };
+
+    if (source_count >
+            (std::numeric_limits<
+                std::uint32_t>::max)() ||
+        frontend_count > source_count ||
+        source_directory.count != source_count ||
+        source_bytes_section.count !=
+            source_bytes ||
+        contribution_states.count !=
+            source_count + 1 ||
+        intrinsic_refs.count !=
+            graph_intrinsic_type_count ||
+        named_refs.count !=
+            dependency_versions.count + 1 ||
+        reverse_heads.count !=
+            dependency_versions.count ||
+        !valid_historical_index(
+            type_identity_index.count) ||
+        !valid_historical_index(
+            object_identity_index.count) ||
+        !valid_historical_index(
+            link_target_index.count) ||
+        !valid_optional_index(
+            source_file_identity_index.count) ||
+        !valid_optional_index(
+            tracked_directory_identity_index.count) ||
+        (!change_checkpoint &&
+         (source_file_identity_index.count != 0 ||
+          tracked_directory_identity_index.count != 0)) ||
+        (change_checkpoint &&
+         source_count != 0 &&
+         source_file_identity_index.count == 0) ||
+        derived_entries >
+            derived_index.count ||
+        source_count >
+            (std::numeric_limits<
+                std::size_t>::max)() ||
+        frontend_count >
+            (std::numeric_limits<
+                std::size_t>::max)() ||
+        derived_entries >
+            (std::numeric_limits<
+                std::size_t>::max)()) {
+        return {status_code::artifact_corrupt};
+    }
+
+    const std::array<std::uint64_t, 7>
+        raw_statistics{
+            read_u64(
+                prefix.data() +
+                header_statistics_offset),
+            read_u64(
+                prefix.data() +
+                header_statistics_offset + 8),
+            read_u64(
+                prefix.data() +
+                header_statistics_offset + 16),
+            read_u64(
+                prefix.data() +
+                header_statistics_offset + 24),
+            read_u64(
+                prefix.data() +
+                header_statistics_offset + 32),
+            read_u64(
+                prefix.data() +
+                header_statistics_offset + 40),
+            read_u64(
+                prefix.data() +
+                header_statistics_offset + 48),
+        };
+
+    for (const auto value : raw_statistics) {
+        if (value >
+            (std::numeric_limits<
+                std::size_t>::max)()) {
+            return {
+                status_code::artifact_corrupt};
+        }
+    }
+
+    source_contribution_statistics statistics;
+    statistics.sources =
+        static_cast<std::size_t>(
+            raw_statistics[0]);
+    statistics.type_declarations =
+        static_cast<std::size_t>(
+            raw_statistics[1]);
+    statistics.members =
+        static_cast<std::size_t>(
+            raw_statistics[2]);
+    statistics.modifiers =
+        static_cast<std::size_t>(
+            raw_statistics[3]);
+    statistics.enum_values =
+        static_cast<std::size_t>(
+            raw_statistics[4]);
+    statistics.objects =
+        static_cast<std::size_t>(
+            raw_statistics[5]);
+    statistics.links =
+        static_cast<std::size_t>(
+            raw_statistics[6]);
+
+    bytes = prefix;
+
+    std::copy(
+        std::begin(candidate),
+        std::end(candidate),
+        std::begin(sections));
+
+    contribution_statistics_value =
+        statistics;
+    source_count_value =
+        static_cast<std::size_t>(
+            source_count);
+    frontend_count_value =
+        static_cast<std::size_t>(
+            frontend_count);
+    derived_index_entries_value =
+        static_cast<std::size_t>(
+            derived_entries);
+    change_checkpoint_value =
+        change_checkpoint;
+    frontend_complete_value = true;
+    contributions_complete_value = true;
+
+    return {};
+}
+
 string_id build_cache_image_view::string_from_raw(
     std::uint32_t value) const noexcept {
 
@@ -2180,15 +2763,38 @@ status build_cache_image_view::frontend_block_view(
     if (!record.frontend_present)
         return {status_code::not_found};
 
+    const auto native_section_span =
+        [&](build_cache_image_section kind,
+            build_cache_range range,
+            std::uint32_t record_size,
+            auto& target) noexcept {
+
+            const auto& values =
+                section(kind);
+
+            if (!values.segment.empty()) {
+                return native_frontend_span(
+                    values.segment,
+                    range,
+                    record_size,
+                    target);
+            }
+
+            return native_frontend_span(
+                section_bytes(kind),
+                range,
+                record_size,
+                target);
+        };
+
     std::span<const identity_ref> local_types;
     std::span<const source_interface_type_slot> type_slots;
     std::span<const source_interface_object_slot> object_slots;
     std::span<const source_interface_member_slot> member_slots;
 
     result =
-        native_frontend_span(
-            section_bytes(
-                build_cache_image_section::frontend_local_types),
+        native_section_span(
+            build_cache_image_section::frontend_local_types,
             record.local_types,
             frontend_local_type_record_size,
             local_types);
@@ -2196,9 +2802,8 @@ status build_cache_image_view::frontend_block_view(
         return result;
 
     result =
-        native_frontend_span(
-            section_bytes(
-                build_cache_image_section::frontend_type_slots),
+        native_section_span(
+            build_cache_image_section::frontend_type_slots,
             record.type_slots,
             frontend_type_slot_record_size,
             type_slots);
@@ -2206,9 +2811,8 @@ status build_cache_image_view::frontend_block_view(
         return result;
 
     result =
-        native_frontend_span(
-            section_bytes(
-                build_cache_image_section::frontend_object_slots),
+        native_section_span(
+            build_cache_image_section::frontend_object_slots,
             record.object_slots,
             frontend_object_slot_record_size,
             object_slots);
@@ -2216,9 +2820,8 @@ status build_cache_image_view::frontend_block_view(
         return result;
 
     result =
-        native_frontend_span(
-            section_bytes(
-                build_cache_image_section::frontend_member_slots),
+        native_section_span(
+            build_cache_image_section::frontend_member_slots,
             record.member_slots,
             frontend_member_slot_record_size,
             member_slots);
@@ -4747,6 +5350,56 @@ status encode_build_cache_image(
         native_block_storage->object_slot_count() == object_slot_count &&
         native_block_storage->member_slot_count() == member_slot_count;
 
+    // R5E2B_DIRECT_FRONTEND_SECTIONS
+    // Fresh G0 Frontend payload is already persistence-native inside immutable
+    // Generation chunks. Prefer those chunks as the exact Build Cache section
+    // carriers. The staging buffer remains only a layout/prefix + fallback
+    // owner for sections that have not migrated yet.
+    const auto build_native_frontend_segment =
+        [&](std::size_t page_count,
+            const auto& page_at,
+            std::size_t expected_count,
+            std::size_t record_size,
+            project_generation_segment& output_segment) noexcept {
+
+            output_segment = {};
+
+            if (record_size == 0 ||
+                expected_count >
+                    (std::numeric_limits<std::size_t>::max)() /
+                        record_size) {
+                return false;
+            }
+
+            const auto expected_bytes =
+                expected_count * record_size;
+            std::size_t observed_count = 0;
+
+            for (std::size_t page_index = 0;
+                 page_index < page_count;
+                 ++page_index) {
+
+                const auto page = page_at(page_index);
+
+                if (observed_count > expected_count ||
+                    page.size() >
+                        expected_count - observed_count) {
+                    return false;
+                }
+
+                if (!page.empty() &&
+                    !output_segment.append(
+                        std::as_bytes(page))) {
+                    return false;
+                }
+
+                observed_count += page.size();
+            }
+
+            return observed_count == expected_count &&
+                output_segment.size() == expected_bytes;
+        };
+
     const auto copy_native_pages =
         [&](std::size_t page_count,
             const auto& page_at,
@@ -4780,7 +5433,179 @@ status encode_build_cache_image(
             return cursor == expected_count;
         };
 
-    if (use_native_block_storage) {
+    bool direct_native_frontend = false;
+
+    if (use_native_block_storage &&
+        sparse != nullptr) {
+
+        project_generation_segment direct_local_types;
+        project_generation_segment direct_type_slots;
+        project_generation_segment direct_object_slots;
+        project_generation_segment direct_member_slots;
+
+        const bool direct_geometry_valid =
+            build_native_frontend_segment(
+                native_block_storage->local_type_page_count(),
+                [&](std::size_t index) noexcept {
+                    return native_block_storage->local_type_page(index);
+                },
+                local_type_count,
+                frontend_local_type_record_size,
+                direct_local_types) &&
+            build_native_frontend_segment(
+                native_block_storage->type_slot_page_count(),
+                [&](std::size_t index) noexcept {
+                    return native_block_storage->type_slot_page(index);
+                },
+                type_slot_count,
+                frontend_type_slot_record_size,
+                direct_type_slots) &&
+            build_native_frontend_segment(
+                native_block_storage->object_slot_page_count(),
+                [&](std::size_t index) noexcept {
+                    return native_block_storage->object_slot_page(index);
+                },
+                object_slot_count,
+                frontend_object_slot_record_size,
+                direct_object_slots) &&
+            build_native_frontend_segment(
+                native_block_storage->member_slot_page_count(),
+                [&](std::size_t index) noexcept {
+                    return native_block_storage->member_slot_page(index);
+                },
+                member_slot_count,
+                frontend_member_slot_record_size,
+                direct_member_slots);
+
+        std::size_t direct_extent_count = 0;
+        const auto add_extent_count =
+            [&](const project_generation_segment& segment) noexcept {
+
+                if (segment.extent_count() >
+                    (std::numeric_limits<std::size_t>::max)() -
+                        direct_extent_count) {
+                    return false;
+                }
+
+                direct_extent_count +=
+                    segment.extent_count();
+                return true;
+            };
+
+        const bool extent_count_valid =
+            direct_geometry_valid &&
+            add_extent_count(direct_local_types) &&
+            add_extent_count(direct_type_slots) &&
+            add_extent_count(direct_object_slots) &&
+            add_extent_count(direct_member_slots);
+
+        // One prefix extent plus every non-direct logical section must still
+        // fit the final fixed-capacity Generation carrier.
+        constexpr std::size_t direct_carrier_reserve =
+            build_cache_image_directory_count - 4 + 1;
+
+        static_assert(
+            project_generation_segment_max_extents >
+                direct_carrier_reserve);
+
+        if (extent_count_valid &&
+            direct_extent_count <=
+                project_generation_segment_max_extents -
+                    direct_carrier_reserve) {
+
+            const auto bind_direct =
+                [&](build_cache_image_section kind,
+                    const project_generation_segment& segment) noexcept {
+
+                    const auto index = section_index(kind);
+                    if (index >= sparse->sections.size())
+                        return false;
+
+                    const auto& value = layout[index];
+
+                    std::uint64_t expected_bytes = 0;
+                    if (!multiply_u64(
+                            value.count,
+                            value.record_size,
+                            expected_bytes) ||
+                        expected_bytes !=
+                            segment.size()) {
+                        return false;
+                    }
+
+                    // Empty logical sections need no physical carrier.
+                    if (!segment.empty())
+                        sparse->sections[index] = segment;
+
+                    return true;
+                };
+
+            direct_native_frontend =
+                bind_direct(
+                    build_cache_image_section::
+                        frontend_local_types,
+                    direct_local_types) &&
+                bind_direct(
+                    build_cache_image_section::
+                        frontend_type_slots,
+                    direct_type_slots) &&
+                bind_direct(
+                    build_cache_image_section::
+                        frontend_object_slots,
+                    direct_object_slots) &&
+                bind_direct(
+                    build_cache_image_section::
+                        frontend_member_slots,
+                    direct_member_slots);
+
+            if (!direct_native_frontend) {
+                sparse->sections[
+                    section_index(
+                        build_cache_image_section::
+                            frontend_local_types)] = {};
+                sparse->sections[
+                    section_index(
+                        build_cache_image_section::
+                            frontend_type_slots)] = {};
+                sparse->sections[
+                    section_index(
+                        build_cache_image_section::
+                            frontend_object_slots)] = {};
+                sparse->sections[
+                    section_index(
+                        build_cache_image_section::
+                            frontend_member_slots)] = {};
+            }
+            else if (telemetry != nullptr) {
+                telemetry->native_frontend_direct_bytes =
+                    direct_local_types.size() +
+                    direct_type_slots.size() +
+                    direct_object_slots.size() +
+                    direct_member_slots.size();
+                telemetry->native_frontend_direct_extents =
+                    static_cast<std::uint32_t>(
+                        direct_extent_count);
+                telemetry->native_frontend_direct_sections =
+                    static_cast<std::uint32_t>(
+                        (!direct_local_types.empty() ? 1 : 0) +
+                        (!direct_type_slots.empty() ? 1 : 0) +
+                        (!direct_object_slots.empty() ? 1 : 0) +
+                        (!direct_member_slots.empty() ? 1 : 0));
+            }
+        }
+        else if (telemetry != nullptr) {
+            telemetry->native_frontend_direct_fallback = 1;
+        }
+    }
+
+    if (use_native_block_storage &&
+        !direct_native_frontend) {
+
+        if (telemetry != nullptr &&
+            sparse != nullptr) {
+            telemetry->native_frontend_direct_fallback = 1;
+        }
+
         if (!copy_native_pages(
                 native_block_storage->local_type_page_count(),
                 [&](std::size_t index) noexcept {

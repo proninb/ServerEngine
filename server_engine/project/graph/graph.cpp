@@ -319,6 +319,61 @@ graph::graph(
         intrinsic_refs[index] = build_cache.intrinsic_ref(static_cast<intrinsic_type>(index));
 }
 
+status graph::release_compiled_generation_storage(
+    compiled_graph_generation_storage& output) noexcept {
+
+    output = {};
+
+    if (baseline_compiled != nullptr ||
+        baseline_build_cache != nullptr ||
+        types.baseline_backed() ||
+        identities.baseline_backed() ||
+        member_records.baseline_backed() ||
+        enum_value_records.baseline_backed() ||
+        object_entries.baseline_backed() ||
+        object_identities.baseline_backed() ||
+        link_records.baseline_backed() ||
+        canonical_types.baseline_backed() ||
+        identity_index.baseline_backed() ||
+        object_identity_index.baseline_backed() ||
+        link_index.baseline_backed()) {
+        return {status_code::invalid_state};
+    }
+
+    output.live_types = live_type_count;
+    output.live_objects = live_object_count;
+    output.live_links = live_link_count;
+
+    output.types = types.release_local_values();
+    output.type_identities =
+        identities.release_local_values();
+    output.members =
+        member_records.release_local_values();
+    output.enum_values =
+        enum_value_records.release_local_values();
+    output.objects =
+        object_entries.release_local_values();
+    output.object_identities =
+        object_identities.release_local_values();
+    output.links =
+        link_records.release_local_values();
+    output.canonical_types =
+        canonical_types.release_local_values();
+    output.type_index =
+        identity_index.release_local_values();
+    output.object_index =
+        object_identity_index.release_local_values();
+    output.link_index =
+        link_index.release_local_values();
+
+    live_type_count = 0;
+    live_object_count = 0;
+    live_link_count = 0;
+
+    return {};
+}
+
+
 type_handle graph::type_at(std::size_t index) const noexcept {
     if (index >= types.size() || index >= 0xffffffffu)
         return {};

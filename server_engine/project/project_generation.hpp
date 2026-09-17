@@ -99,6 +99,11 @@ public:
         root_roles_value = std::move(roles);
     }
 
+    void clear_roots() noexcept {
+        roots_value.clear();
+        root_roles_value.clear();
+    }
+
     [[nodiscard]] const project_generation_configuration_proof*
     configuration() const noexcept {
         return configuration_available

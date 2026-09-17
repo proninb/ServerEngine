@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -29,6 +30,25 @@ struct project_storage_pressure final {
     std::size_t stale_bytes = 0;
     std::size_t reserve_bytes = 0;
     bool rebuild_recommended = false;
+};
+
+// Performance-only phase accounting for the construction-to-READY ownership handoff.
+struct project_ready_generation_activation_telemetry final {
+    std::uint64_t owner_ns = 0;
+    std::uint64_t segments_ns = 0;
+    std::uint64_t bind_compiled_ns = 0;
+    std::uint64_t bind_sources_ns = 0;
+    std::uint64_t bind_build_ns = 0;
+    std::uint64_t verify_ns = 0;
+    std::uint64_t publish_ns = 0;
+    std::uint64_t compiled_destroy_ns = 0;
+    std::uint64_t compiled_teardown_graph_ns = 0;
+    std::uint64_t compiled_teardown_contributions_ns = 0;
+    std::uint64_t compiled_teardown_frontend_cache_ns = 0;
+    std::uint64_t compiled_teardown_source_manager_ns = 0;
+    std::uint64_t compiled_teardown_identities_ns = 0;
+    std::uint64_t baseline_destroy_ns = 0;
+    std::uint64_t cleanup_ns = 0;
 };
 
 // Narrow mutable semantic service used by Parser construction only. It can intern
@@ -82,6 +102,7 @@ private:
     compiled_project_state* state = nullptr;
 
     friend class project_context;
+class project_generation_storage;
 };
 
 // Internal owner of one Project configuration. LOAD uses a pure mmap READY view;
@@ -92,6 +113,7 @@ public:
     explicit project_context(
         project_configuration configuration,
         std::filesystem::path configuration_path = {});
+    ~project_context() noexcept;
 
     project_context(const project_context&) = delete;
     project_context& operator=(const project_context&) = delete;
@@ -521,6 +543,18 @@ private:
         return std::move(compiled);
     }
 
+    [[nodiscard]] status
+    release_compiled_graph_generation_storage(
+        compiled_graph_generation_storage& output) noexcept {
+
+        if (compiled == nullptr)
+            return {status_code::invalid_state};
+
+        return compiled->graph_value.
+            release_compiled_generation_storage(
+                output);
+    }
+
     void replace_compiled(std::unique_ptr<compiled_project_state> replacement) noexcept {
         compiled.swap(replacement);
     }
@@ -592,12 +626,25 @@ private:
     [[nodiscard]] status activate_build_baseline(
         baseline_snapshot&& snapshot) noexcept;
 
+    // Full G0 READY publication consumes a completely owned immutable
+    // Generation. After this call construction storage is destroyed and all
+    // READY queries read the same bytes that SAVE will persist.
+    [[nodiscard]] status activate_ready_generation(
+        project_generation_storage&& storage,
+        project_ready_generation_activation_telemetry* telemetry = nullptr) noexcept;
+
+    [[nodiscard]] const project_generation_storage*
+    finalized_generation_storage() const noexcept {
+        return finalized_generation.get();
+    }
+
     [[nodiscard]] status ensure_sources_mapped() const noexcept;
 
     project_configuration project_configuration_value;
     std::filesystem::path project_configuration_path;
     std::unique_ptr<compiled_project_state> compiled;
     std::unique_ptr<baseline_snapshot> baseline;
+    std::unique_ptr<project_generation_storage> finalized_generation;
     compiled_image_view mapped_compiled;
     mutable source_manager_image_view mapped_sources;
     mutable std::atomic<bool> source_mapping_ready{false};

@@ -152,6 +152,14 @@ struct build_cache_encode_telemetry final {
     std::uint32_t mapped_baseline_sparse_directory_borrowed_extents = 0;
     std::uint32_t mapped_baseline_sparse_frontend_borrowed_extents = 0;
     std::uint32_t mapped_baseline_sparse_frontend_owned_extents = 0;
+
+    // Fresh-G0 canonical Frontend sections that borrow immutable Generation
+    // chunks directly instead of copying them into the Build Cache staging
+    // buffer. These are current-Generation bytes, not baseline borrows.
+    std::uint64_t native_frontend_direct_bytes = 0;
+    std::uint32_t native_frontend_direct_extents = 0;
+    std::uint32_t native_frontend_direct_sections = 0;
+    std::uint32_t native_frontend_direct_fallback = 0;
 };
 
 struct build_cache_encode_borrowed_sections final {
@@ -203,6 +211,14 @@ public:
         std::span<const std::byte> prefix,
         const std::array<
             std::span<const std::byte>,
+            build_cache_image_directory_count>& section_images) noexcept;
+
+    // Storage-neutral bind for one immutable Build Cache Generation. A logical
+    // section may contain several extents and remains scatter/gather in memory.
+    [[nodiscard]] status bind_sectioned(
+        std::span<const std::byte> prefix,
+        const std::array<
+            project_generation_segment,
             build_cache_image_directory_count>& section_images) noexcept;
 
     [[nodiscard]] status bind_encoded_mixed(

@@ -58,6 +58,50 @@ struct project_build_telemetry final {
     std::uint64_t interface_publish_ns = 0;
     std::uint64_t total_ns = 0;
 
+    // Full-construction Generation finalization. These bytes become the sole
+    // READY owner before project_manager publishes the Project.
+    std::uint64_t generation_finalize_ns = 0;
+    std::uint64_t generation_finalize_freeze_ns = 0;
+    std::uint64_t generation_finalize_materialize_owned_ns = 0;
+    std::uint64_t generation_finalize_compiled_bytes = 0;
+    std::uint64_t generation_finalize_compiled_build_ns = 0;
+    std::uint64_t generation_finalize_compiled_strings_ns = 0;
+    std::uint64_t generation_finalize_compiled_identities_ns = 0;
+    std::uint64_t generation_finalize_compiled_graph_arrays_ns = 0;
+    std::uint64_t generation_finalize_compiled_graph_indexes_ns = 0;
+    std::uint64_t generation_finalize_compiled_crc_ns = 0;
+    std::uint64_t generation_finalize_compiled_header_ns = 0;
+    std::uint64_t generation_finalize_release_graph_ns = 0;
+    std::uint64_t generation_finalize_segment_snapshot_ns = 0;
+    std::uint64_t generation_finalize_activate_ready_ns = 0;
+    std::uint64_t generation_finalize_activate_owner_ns = 0;
+    std::uint64_t generation_finalize_activate_segments_ns = 0;
+    std::uint64_t generation_finalize_activate_bind_compiled_ns = 0;
+    std::uint64_t generation_finalize_activate_bind_sources_ns = 0;
+    std::uint64_t generation_finalize_activate_bind_build_ns = 0;
+    std::uint64_t generation_finalize_activate_verify_ns = 0;
+    std::uint64_t generation_finalize_activate_publish_ns = 0;
+    std::uint64_t generation_finalize_activate_compiled_destroy_ns = 0;
+    std::uint64_t generation_finalize_activate_teardown_graph_ns = 0;
+    std::uint64_t generation_finalize_activate_teardown_contributions_ns = 0;
+    std::uint64_t generation_finalize_activate_teardown_frontend_cache_ns = 0;
+    std::uint64_t generation_finalize_activate_teardown_source_manager_ns = 0;
+    std::uint64_t generation_finalize_activate_teardown_identities_ns = 0;
+    std::uint64_t generation_finalize_activate_baseline_destroy_ns = 0;
+    std::uint64_t generation_finalize_activate_cleanup_ns = 0;
+    std::uint64_t generation_finalize_compiled_native_graph_bytes = 0;
+    std::uint64_t generation_finalize_compiled_derived_graph_bytes = 0;
+    std::uint64_t generation_finalize_compiled_fallback_graph_bytes = 0;
+    std::uint32_t generation_finalize_compiled_native_graph_sections = 0;
+    std::uint32_t generation_finalize_compiled_derived_graph_sections = 0;
+    std::uint32_t generation_finalize_compiled_fallback_graph_mask = 0;
+    std::uint32_t generation_finalize_compiled_native_nonempty_graph_mask = 0;
+    std::uint32_t generation_finalize_compiled_expected_nonzero_graph_mask = 0;
+    std::uint64_t generation_finalize_source_manager_bytes = 0;
+    std::uint64_t generation_finalize_change_state_bytes = 0;
+    std::uint64_t generation_finalize_build_cache_bytes = 0;
+    bool generation_finalized = false;
+
     source_frontend_summary frontend{};
     source_manager_update_telemetry sources{};
     generation_build_telemetry builder{};

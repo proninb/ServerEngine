@@ -1,5 +1,7 @@
 #include "project_context.hpp"
+#include "project_persistence.hpp"
 
+#include <chrono>
 #include <memory>
 #include <new>
 #include <utility>
@@ -19,6 +21,196 @@ project_context::project_context(
     baseline_storage_tag) noexcept
     : project_configuration_value(std::move(configuration)),
       project_configuration_path(std::move(configuration_path)) {}
+
+project_context::~project_context() noexcept = default;
+
+status project_context::activate_ready_generation(
+    project_generation_storage&& storage,
+    project_ready_generation_activation_telemetry* telemetry) noexcept {
+
+    if (telemetry != nullptr)
+        *telemetry = {};
+
+    const auto elapsed_ns =
+        [](std::chrono::steady_clock::time_point begin) noexcept {
+            return static_cast<std::uint64_t>(
+                std::chrono::duration_cast<
+                    std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() -
+                        begin).count());
+        };
+
+    try {
+        const auto owner_begin =
+            std::chrono::steady_clock::now();
+
+        auto owner =
+            std::make_unique<project_generation_storage>(
+                std::move(storage));
+
+        if (telemetry != nullptr)
+            telemetry->owner_ns = elapsed_ns(owner_begin);
+
+        const auto segments_begin =
+            std::chrono::steady_clock::now();
+
+        const auto segments = owner->segments();
+        const auto source_bytes =
+            segments.sources();
+        const auto build_bytes =
+            segments.build();
+
+        if (telemetry != nullptr)
+            telemetry->segments_ns = elapsed_ns(segments_begin);
+
+        if (segments.compiled_segment().empty() ||
+            source_bytes.empty() ||
+            segments.build_segment().empty()) {
+            return {status_code::initialization_failed};
+        }
+
+        compiled_image_view compiled_view;
+
+        const auto bind_compiled_begin =
+            std::chrono::steady_clock::now();
+
+        auto result =
+            owner->bind_compiled(compiled_view);
+
+        if (telemetry != nullptr) {
+            telemetry->bind_compiled_ns =
+                elapsed_ns(bind_compiled_begin);
+        }
+
+        if (!result.ok())
+            return result;
+
+        source_manager_image_view source_view;
+
+        const auto bind_sources_begin =
+            std::chrono::steady_clock::now();
+
+        result = source_view.bind(source_bytes);
+
+        if (telemetry != nullptr) {
+            telemetry->bind_sources_ns =
+                elapsed_ns(bind_sources_begin);
+        }
+
+        if (!result.ok())
+            return result;
+
+        build_cache_image_view build_view;
+
+        const auto bind_build_begin =
+            std::chrono::steady_clock::now();
+
+        if (owner->build_cache_sections().valid()) {
+            result =
+                owner->build_cache_sections().
+                    bind_view(build_view);
+        }
+        else {
+            result = build_view.bind(build_bytes);
+        }
+
+        if (telemetry != nullptr) {
+            telemetry->bind_build_ns =
+                elapsed_ns(bind_build_begin);
+        }
+
+        if (!result.ok())
+            return result;
+
+        const auto verify_begin =
+            std::chrono::steady_clock::now();
+
+        result =
+            build_view.verify_against(
+                compiled_view,
+                source_view);
+
+        if (telemetry != nullptr)
+            telemetry->verify_ns = elapsed_ns(verify_begin);
+
+        if (!result.ok())
+            return result;
+
+        const auto publish_begin =
+            std::chrono::steady_clock::now();
+
+        mapped_compiled = compiled_view;
+        mapped_sources = source_view;
+        mapped_build_cache = build_view;
+        finalized_generation = std::move(owner);
+
+        if (telemetry != nullptr)
+            telemetry->publish_ns = elapsed_ns(publish_begin);
+
+        compiled_project_state_teardown_telemetry
+            compiled_teardown_detail;
+
+        if (compiled != nullptr) {
+            compiled->begin_teardown_audit(
+                compiled_teardown_detail);
+        }
+
+        const auto compiled_destroy_begin =
+            std::chrono::steady_clock::now();
+
+        compiled.reset();
+
+        if (telemetry != nullptr) {
+            telemetry->compiled_destroy_ns =
+                elapsed_ns(compiled_destroy_begin);
+            telemetry->compiled_teardown_graph_ns =
+                compiled_teardown_detail.graph_ns;
+            telemetry->compiled_teardown_contributions_ns =
+                compiled_teardown_detail.contributions_ns;
+            telemetry->compiled_teardown_frontend_cache_ns =
+                compiled_teardown_detail.frontend_cache_ns;
+            telemetry->compiled_teardown_source_manager_ns =
+                compiled_teardown_detail.source_manager_ns;
+            telemetry->compiled_teardown_identities_ns =
+                compiled_teardown_detail.identities_ns;
+        }
+
+        const auto baseline_destroy_begin =
+            std::chrono::steady_clock::now();
+
+        baseline.reset();
+
+        if (telemetry != nullptr) {
+            telemetry->baseline_destroy_ns =
+                elapsed_ns(baseline_destroy_begin);
+        }
+
+        const auto cleanup_begin =
+            std::chrono::steady_clock::now();
+
+        generation_provenance_value.clear_source_change();
+        generation_provenance_value.clear_roots();
+        clear_generation_change_segment();
+
+        source_mapping_status = {};
+        source_mapping_attempted = true;
+        source_mapping_ready.store(
+            true,
+            std::memory_order_release);
+
+        if (telemetry != nullptr)
+            telemetry->cleanup_ns = elapsed_ns(cleanup_begin);
+
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+}
+
 
 status project_context::activate_ready_baseline(
     baseline_snapshot&& snapshot) noexcept {
@@ -189,8 +381,22 @@ status project_context::ensure_sources_mapped() const noexcept {
 }
 
 project_storage_pressure project_context::storage_pressure() const noexcept {
-    if (compiled == nullptr)
-        return {};
+    if (compiled == nullptr) {
+        project_storage_pressure output;
+
+        if (finalized_generation != nullptr) {
+            const auto segments =
+                finalized_generation->segments();
+
+            output.retained_bytes =
+                segments.compiled_segment().size() +
+                segments.sources_segment().size() +
+                segments.change_segment().size() +
+                segments.build_segment().size();
+        }
+
+        return output;
+    }
 
     project_storage_pressure output;
     const auto& statistics = compiled->contributions.statistics();

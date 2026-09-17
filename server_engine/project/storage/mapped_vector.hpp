@@ -332,6 +332,25 @@ public:
         return local;
     }
 
+    // Full-construction commit boundary. A baseline-backed container cannot
+    // transfer ownership because part of its logical sequence is still mmap.
+    [[nodiscard]] std::vector<T> release_local_values() noexcept {
+        if (baseline_backed())
+            return {};
+
+        context = nullptr;
+        baseline_count = 0;
+        reader = nullptr;
+        read_failure = {};
+        element_cache.clear();
+        element_index.clear();
+        range_cache.clear();
+
+        std::vector<T> output;
+        output.swap(local);
+        return output;
+    }
+
     template<class Function>
     void for_each_materialized(Function&& function) const noexcept {
         for (const auto& value : element_cache)

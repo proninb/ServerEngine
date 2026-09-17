@@ -4809,7 +4809,7 @@ bool test_frozen_build_cache_capability_rejects_rebound_span() {
     const auto original_generation =
         storage.segments();
     if (!original_generation.persistable() ||
-        original_generation.build().empty()) {
+        original_generation.build_segment().empty()) {
         cleanup();
         return false;
     }
@@ -4887,26 +4887,60 @@ bool test_frozen_build_cache_capability_rejects_rebound_span() {
 
     std::vector<std::byte> rebound_build;
     try {
-        const auto original_build =
-            original_generation.build();
-        rebound_build.assign(
-            original_build.begin(),
-            original_build.end());
+        const auto& original_build =
+            original_generation.build_segment();
+
+        rebound_build.reserve(
+            original_build.size());
+
+        for (std::size_t extent_index = 0;
+             extent_index <
+                original_build.extent_count();
+             ++extent_index) {
+
+            const auto extent =
+                original_build.extent(
+                    extent_index);
+
+            rebound_build.insert(
+                rebound_build.end(),
+                extent.begin(),
+                extent.end());
+        }
     }
     catch (...) {
         cleanup();
         return false;
     }
 
-    const auto original_build =
-        original_generation.build();
+    const auto& original_build =
+        original_generation.build_segment();
+
     if (rebound_build.empty() ||
-        rebound_build.data() ==
-            original_build.data() ||
         rebound_build.size() !=
             original_build.size()) {
         cleanup();
         return false;
+    }
+
+    // The rebound image must own different physical storage while preserving
+    // the exact logical Build Cache byte stream. A frozen section capability
+    // is address-bound to the original Generation and must not transfer.
+    for (std::size_t extent_index = 0;
+         extent_index <
+            original_build.extent_count();
+         ++extent_index) {
+
+        const auto extent =
+            original_build.extent(
+                extent_index);
+
+        if (!extent.empty() &&
+            rebound_build.data() ==
+                extent.data()) {
+            cleanup();
+            return false;
+        }
     }
 
     const project_generation_segments rebound_generation{

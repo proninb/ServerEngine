@@ -23,20 +23,31 @@ public:
         std::size_t page_count = 0;
         std::size_t last_size = 0;
         std::size_t logical_size = 0;
+        std::size_t next_page_capacity = 1;
     };
 
     explicit typed_page_store(
         std::size_t page_bytes_value) noexcept
-        : page_capacity(
+        : initial_page_capacity(
               (std::max)(
                   std::size_t{1},
-                  page_bytes_value / sizeof(T))) {}
+                  page_bytes_value / sizeof(T))),
+          maximum_page_capacity(
+              (std::max)(
+                  initial_page_capacity,
+                  (std::max)(
+                      std::size_t{1},
+                      source_frontend_block_maximum_chunk_bytes /
+                          sizeof(T)))),
+          next_page_capacity_value(
+              initial_page_capacity) {}
 
     [[nodiscard]] checkpoint mark() const noexcept {
         return {
             pages.size(),
             pages.empty() ? 0 : pages.back().size(),
             logical_size_value,
+            next_page_capacity_value,
         };
     }
 
@@ -56,6 +67,8 @@ public:
         }
 
         logical_size_value = state.logical_size;
+        next_page_capacity_value =
+            state.next_page_capacity;
     }
 
     [[nodiscard]] status append(
@@ -92,10 +105,14 @@ public:
 
             if (needs_page) {
                 const auto capacity =
-                    (std::max)(page_capacity, values.size());
+                    (std::max)(
+                        next_page_capacity_value,
+                        values.size());
 
                 pages.emplace_back();
                 pages.back().reserve(capacity);
+
+                advance_page_capacity(capacity);
             }
 
             auto& page = pages.back();
@@ -189,10 +206,38 @@ public:
     void clear() noexcept {
         pages.clear();
         logical_size_value = 0;
+        next_page_capacity_value =
+            initial_page_capacity;
     }
 
 private:
-    std::size_t page_capacity = 1;
+    void advance_page_capacity(
+        std::size_t reserved_capacity) noexcept {
+
+        const auto growth_base =
+            (std::min)(
+                maximum_page_capacity,
+                (std::max)(
+                    next_page_capacity_value,
+                    reserved_capacity));
+
+        if (growth_base >=
+            maximum_page_capacity) {
+            next_page_capacity_value =
+                maximum_page_capacity;
+            return;
+        }
+
+        next_page_capacity_value =
+            growth_base >
+                maximum_page_capacity / 2
+            ? maximum_page_capacity
+            : growth_base * 2;
+    }
+
+    std::size_t initial_page_capacity = 1;
+    std::size_t maximum_page_capacity = 1;
+    std::size_t next_page_capacity_value = 1;
     std::size_t logical_size_value = 0;
     std::vector<std::vector<T>> pages;
 };
@@ -402,7 +447,7 @@ public:
         return {};
     }
 
-    [[nodiscard]] std::array<std::size_t, 13>
+    [[nodiscard]] std::array<std::size_t, 17>
     mark() const noexcept {
         const auto local = local_types.mark();
         const auto types = type_slots.mark();
@@ -414,20 +459,24 @@ public:
             local.page_count,
             local.last_size,
             local.logical_size,
+            local.next_page_capacity,
             types.page_count,
             types.last_size,
             types.logical_size,
+            types.next_page_capacity,
             objects.page_count,
             objects.last_size,
             objects.logical_size,
+            objects.next_page_capacity,
             members.page_count,
             members.last_size,
             members.logical_size,
+            members.next_page_capacity,
         };
     }
 
     void restore(
-        const std::array<std::size_t, 13>& state) noexcept {
+        const std::array<std::size_t, 17>& state) noexcept {
 
         if (records.size() > state[0])
             records.resize(state[0]);
@@ -436,21 +485,25 @@ public:
             state[1],
             state[2],
             state[3],
+            state[4],
         });
         type_slots.restore({
-            state[4],
             state[5],
             state[6],
-        });
-        object_slots.restore({
             state[7],
             state[8],
-            state[9],
         });
-        member_slots.restore({
+        object_slots.restore({
+            state[9],
             state[10],
             state[11],
             state[12],
+        });
+        member_slots.restore({
+            state[13],
+            state[14],
+            state[15],
+            state[16],
         });
     }
 
@@ -474,7 +527,7 @@ source_frontend_block_store::source_frontend_block_store(
 
     try {
         value =
-            std::make_unique<implementation>(
+            std::make_shared<implementation>(
                 (std::max)(std::size_t{1}, page_bytes));
     }
     catch (const std::bad_alloc&) {
@@ -613,6 +666,14 @@ std::size_t source_frontend_block_store::block_count() const noexcept {
     return value
         ? value->records.size()
         : 0;
+}
+
+source_frontend_block_store_lifetime
+source_frontend_block_store::pin_lifetime() const noexcept {
+
+    source_frontend_block_store_lifetime output;
+    output.owner = value;
+    return output;
 }
 
 source_frontend_block_store::checkpoint

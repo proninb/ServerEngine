@@ -61,6 +61,7 @@ struct member_record final {
     string_id name{};
     TypeRef type{};
     source_member_access access = source_member_access::public_access;
+    std::uint8_t reserved[3]{};
 };
 
 static_assert(sizeof(member_record) == 12);
@@ -69,6 +70,7 @@ struct enum_value_record final {
     std::uint64_t bits = 0;
     string_id name{};
     intrinsic_type intrinsic = intrinsic_type::signed_int;
+    std::uint8_t reserved[3]{};
 };
 
 static_assert(sizeof(enum_value_record) == 16);
@@ -164,6 +166,48 @@ struct graph_canonical_type_record final {
 };
 
 static_assert(sizeof(graph_canonical_type_record) == 16);
+
+// Move-only native payload transferred from a complete G0 Graph into the
+// immutable Generation. Every field maps one-to-one to compiled.bin sections;
+// Builder-only dependency/canonicalization accelerators are intentionally absent.
+struct compiled_graph_generation_storage final {
+    std::vector<type_entry> types;
+    std::vector<identity_ref> type_identities;
+    std::vector<member_record> members;
+    std::vector<enum_value_record> enum_values;
+    std::vector<object_entry> objects;
+    std::vector<identity_ref> object_identities;
+    std::vector<link_record> links;
+    std::vector<graph_canonical_type_record> canonical_types;
+    std::vector<graph_identity_index_slot> type_index;
+    std::vector<graph_object_identity_index_slot> object_index;
+    std::vector<graph_link_index_slot> link_index;
+
+    std::size_t live_types = 0;
+    std::size_t live_objects = 0;
+    std::size_t live_links = 0;
+
+    [[nodiscard]] std::size_t bytes() const noexcept {
+        return
+            types.size() * sizeof(type_entry) +
+            type_identities.size() * sizeof(identity_ref) +
+            members.size() * sizeof(member_record) +
+            enum_values.size() * sizeof(enum_value_record) +
+            objects.size() * sizeof(object_entry) +
+            object_identities.size() * sizeof(identity_ref) +
+            links.size() * sizeof(link_record) +
+            canonical_types.size() *
+                sizeof(graph_canonical_type_record) +
+            type_index.size() *
+                sizeof(graph_identity_index_slot) +
+            object_index.size() *
+                sizeof(graph_object_identity_index_slot) +
+            link_index.size() *
+                sizeof(graph_link_index_slot);
+    }
+};
+
+
 
 // Read-only physical semantic arrays of the current Graph. Builder-only
 // acceleration indexes and dependency caches are intentionally excluded.
@@ -413,6 +457,11 @@ public:
         return baseline_compiled;
     }
 
+    // Full G0 commit-only ownership transfer. Sparse baseline-backed Graphs
+    // cannot use this path because their unchanged storage remains mmap-owned.
+    [[nodiscard]] status release_compiled_generation_storage(
+        compiled_graph_generation_storage& output) noexcept;
+
 private:
     [[nodiscard]] status prepare_sparse_publication(
         prepared_graph_update& prepared) noexcept;
@@ -459,5 +508,43 @@ private:
 };
 
 static_assert(std::is_trivially_copyable_v<definition_range>);
+static_assert(std::is_trivially_copyable_v<type_entry>);
+static_assert(std::is_standard_layout_v<type_entry>);
+static_assert(std::is_trivially_copyable_v<member_record>);
+static_assert(std::is_standard_layout_v<member_record>);
+static_assert(std::is_trivially_copyable_v<enum_value_record>);
+static_assert(std::is_standard_layout_v<enum_value_record>);
+static_assert(std::is_trivially_copyable_v<object_entry>);
+static_assert(std::is_standard_layout_v<object_entry>);
+static_assert(std::is_trivially_copyable_v<link_record>);
+static_assert(std::is_standard_layout_v<link_record>);
+static_assert(std::is_trivially_copyable_v<graph_canonical_type_record>);
+static_assert(std::is_standard_layout_v<graph_canonical_type_record>);
+
+static_assert(offsetof(type_entry, definition) == 0);
+static_assert(offsetof(type_entry, kind) == 8);
+static_assert(offsetof(type_entry, record_kind) == 9);
+static_assert(offsetof(type_entry, enum_underlying) == 10);
+static_assert(offsetof(type_entry, flags) == 11);
+
+static_assert(offsetof(member_record, name) == 0);
+static_assert(offsetof(member_record, type) == 4);
+static_assert(offsetof(member_record, access) == 8);
+static_assert(offsetof(member_record, reserved) == 9);
+
+static_assert(offsetof(enum_value_record, bits) == 0);
+static_assert(offsetof(enum_value_record, name) == 8);
+static_assert(offsetof(enum_value_record, intrinsic) == 12);
+static_assert(offsetof(enum_value_record, reserved) == 13);
+
+static_assert(offsetof(object_entry, type) == 0);
+static_assert(offsetof(object_entry, flags) == 4);
+static_assert(offsetof(link_record, source) == 0);
+static_assert(offsetof(link_record, target) == 8);
+static_assert(offsetof(graph_canonical_type_record, payload) == 0);
+static_assert(offsetof(graph_canonical_type_record, child_or_handle) == 8);
+static_assert(offsetof(graph_canonical_type_record, kind) == 12);
+static_assert(offsetof(graph_canonical_type_record, detail) == 13);
+static_assert(offsetof(graph_canonical_type_record, reserved) == 14);
 
 } // namespace cw::server
