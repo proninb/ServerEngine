@@ -5864,9 +5864,20 @@ bool test_project_build_changed_baseline_sparse_save_load() {
         << (sparse_commit.transaction == baseline_commit.transaction)
         << '\n';
 
+    const auto& sparse_save_telemetry =
+        sparse_commit.telemetry;
+
     if (!sparse_save_result.ok() ||
         sparse_commit.transaction.empty() ||
-        sparse_commit.transaction == baseline_commit.transaction) {
+        sparse_commit.transaction == baseline_commit.transaction ||
+        sparse_save_telemetry.
+            generation_freeze_build_cache_mapped_baseline_frontend_element_reads != 0 ||
+        sparse_save_telemetry.
+            generation_freeze_build_cache_mapped_baseline_frontend_elements_encoded != 0 ||
+        sparse_save_telemetry.
+            generation_freeze_build_cache_mapped_baseline_sparse_frontend_owned_bytes == 0 ||
+        sparse_save_telemetry.
+            generation_freeze_build_cache_mapped_baseline_sparse_frontend_owned_extents == 0) {
 
 
         if (manager.ready())
@@ -6991,6 +7002,40 @@ bool test_source_frontend_cache_baseline_native_block_borrow() {
     source_frontend_block_descriptor
         root_after;
     source_interface_data_view owned_data;
+    source_interface_data_view borrowed_data;
+    source_interface_data_view borrowed_again;
+    build_cache_source_record root_record;
+    source_interface_object_slot expected_root_object{};
+
+    const auto aliases_section =
+        [](const auto values,
+           std::span<const std::byte> bytes) noexcept {
+
+            if (values.empty())
+                return true;
+
+            if (bytes.empty())
+                return false;
+
+            const auto value_address =
+                reinterpret_cast<std::uintptr_t>(
+                    values.data());
+            const auto section_address =
+                reinterpret_cast<std::uintptr_t>(
+                    bytes.data());
+
+            if (value_address < section_address)
+                return false;
+
+            const auto offset =
+                static_cast<std::size_t>(
+                    value_address - section_address);
+
+            return
+                offset <= bytes.size() &&
+                values.size_bytes() <=
+                    bytes.size() - offset;
+        };
 
     const bool pass =
         frontend.native_frontend_block_descriptor(
@@ -7009,10 +7054,65 @@ bool test_source_frontend_cache_baseline_native_block_borrow() {
             fixture.dependency_source,
             owned_data).ok() &&
         !owned_data.local_types.empty() &&
+        cache.source(
+            fixture.root_source,
+            root_record).ok() &&
+        root_record.frontend_present &&
+        root_record.object_slots.count != 0 &&
+        cache.frontend_object_slot(
+            fixture.root_source,
+            0,
+            expected_root_object).ok() &&
         frontend.native_frontend_block_view(
             fixture.root_source,
-            owned_data).code ==
-            status_code::not_available;
+            borrowed_data).ok() &&
+        borrowed_data.local_types.size() ==
+            root_record.local_types.count &&
+        borrowed_data.type_slots.size() ==
+            root_record.type_slots.count &&
+        borrowed_data.object_slots.size() ==
+            root_record.object_slots.count &&
+        borrowed_data.member_slots.size() ==
+            root_record.member_slots.count &&
+        borrowed_data.object_slots[0].parent ==
+            expected_root_object.parent &&
+        borrowed_data.object_slots[0].name ==
+            expected_root_object.name &&
+        borrowed_data.object_slots[0].identity ==
+            expected_root_object.identity &&
+        borrowed_data.object_slots[0].named_type ==
+            expected_root_object.named_type &&
+        aliases_section(
+            borrowed_data.local_types,
+            cache.section_bytes(
+                build_cache_image_section::
+                    frontend_local_types)) &&
+        aliases_section(
+            borrowed_data.type_slots,
+            cache.section_bytes(
+                build_cache_image_section::
+                    frontend_type_slots)) &&
+        aliases_section(
+            borrowed_data.object_slots,
+            cache.section_bytes(
+                build_cache_image_section::
+                    frontend_object_slots)) &&
+        aliases_section(
+            borrowed_data.member_slots,
+            cache.section_bytes(
+                build_cache_image_section::
+                    frontend_member_slots)) &&
+        frontend.native_frontend_block_view(
+            fixture.root_source,
+            borrowed_again).ok() &&
+        borrowed_again.local_types.data() ==
+            borrowed_data.local_types.data() &&
+        borrowed_again.type_slots.data() ==
+            borrowed_data.type_slots.data() &&
+        borrowed_again.object_slots.data() ==
+            borrowed_data.object_slots.data() &&
+        borrowed_again.member_slots.data() ==
+            borrowed_data.member_slots.data();
 
     cleanup();
     return pass;

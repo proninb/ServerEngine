@@ -140,12 +140,18 @@ struct build_cache_encode_telemetry final {
     std::uint64_t mapped_baseline_borrowed_bytes = 0;
     std::uint64_t mapped_baseline_sparse_borrowed_bytes = 0;
     std::uint64_t mapped_baseline_sparse_directory_borrowed_bytes = 0;
+    std::uint64_t mapped_baseline_sparse_frontend_borrowed_bytes = 0;
+    std::uint64_t mapped_baseline_sparse_frontend_owned_bytes = 0;
+    std::uint64_t mapped_baseline_frontend_element_reads = 0;
+    std::uint64_t mapped_baseline_frontend_elements_encoded = 0;
     std::uint64_t mapped_baseline_patch_records = 0;
     std::uint64_t mapped_baseline_append_records = 0;
     std::uint32_t mapped_baseline_bulk_sections = 0;
     std::uint32_t mapped_baseline_borrowed_sections = 0;
     std::uint32_t mapped_baseline_sparse_borrowed_extents = 0;
     std::uint32_t mapped_baseline_sparse_directory_borrowed_extents = 0;
+    std::uint32_t mapped_baseline_sparse_frontend_borrowed_extents = 0;
+    std::uint32_t mapped_baseline_sparse_frontend_owned_extents = 0;
 };
 
 struct build_cache_encode_borrowed_sections final {
@@ -309,6 +315,14 @@ public:
         std::size_t index,
         source_interface_member_slot& output) const noexcept;
 
+    // Zero-copy native persistence view over one Source frontend block.
+    // Returned spans borrow the bound image and remain valid only while this
+    // view and its backing mapping stay bound and alive. Unsupported native
+    // layout/alignment returns not_available without materializing a copy.
+    [[nodiscard]] status frontend_block_view(
+        source_id source,
+        source_interface_data_view& output) const noexcept;
+
     [[nodiscard]] status contribution_state(
         source_id source,
         source_contribution_state& output) const noexcept;
@@ -456,6 +470,12 @@ private:
 
     [[nodiscard]] const section_view& section(
         build_cache_image_section kind) const noexcept;
+
+    // Resolves one fixed-size logical record from either contiguous storage or
+    // a validated scatter/gather section. A record may not cross an extent.
+    [[nodiscard]] const std::byte* section_record_data(
+        build_cache_image_section kind,
+        std::uint64_t index) const noexcept;
 
     [[nodiscard]] bool valid_source(source_id source) const noexcept {
         return source &&

@@ -780,6 +780,14 @@ status freeze_project_generation(
             build_cache_detail.mapped_baseline_sparse_borrowed_bytes;
         telemetry->build_cache_mapped_baseline_sparse_directory_borrowed_bytes =
             build_cache_detail.mapped_baseline_sparse_directory_borrowed_bytes;
+        telemetry->build_cache_mapped_baseline_sparse_frontend_borrowed_bytes =
+            build_cache_detail.mapped_baseline_sparse_frontend_borrowed_bytes;
+        telemetry->build_cache_mapped_baseline_sparse_frontend_owned_bytes =
+            build_cache_detail.mapped_baseline_sparse_frontend_owned_bytes;
+        telemetry->build_cache_mapped_baseline_frontend_element_reads =
+            build_cache_detail.mapped_baseline_frontend_element_reads;
+        telemetry->build_cache_mapped_baseline_frontend_elements_encoded =
+            build_cache_detail.mapped_baseline_frontend_elements_encoded;
         telemetry->build_cache_mapped_baseline_patch_records =
             build_cache_detail.mapped_baseline_patch_records;
         telemetry->build_cache_mapped_baseline_append_records =
@@ -792,6 +800,10 @@ status freeze_project_generation(
             build_cache_detail.mapped_baseline_sparse_borrowed_extents;
         telemetry->build_cache_mapped_baseline_sparse_directory_borrowed_extents =
             build_cache_detail.mapped_baseline_sparse_directory_borrowed_extents;
+        telemetry->build_cache_mapped_baseline_sparse_frontend_borrowed_extents =
+            build_cache_detail.mapped_baseline_sparse_frontend_borrowed_extents;
+        telemetry->build_cache_mapped_baseline_sparse_frontend_owned_extents =
+            build_cache_detail.mapped_baseline_sparse_frontend_owned_extents;
     }
 
     if (!result.ok())

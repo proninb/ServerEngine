@@ -1484,6 +1484,14 @@ status project_manager::save(
             generation_freeze_detail.build_cache_mapped_baseline_sparse_borrowed_bytes;
         output.telemetry.generation_freeze_build_cache_mapped_baseline_sparse_directory_borrowed_bytes =
             generation_freeze_detail.build_cache_mapped_baseline_sparse_directory_borrowed_bytes;
+        output.telemetry.generation_freeze_build_cache_mapped_baseline_sparse_frontend_borrowed_bytes =
+            generation_freeze_detail.build_cache_mapped_baseline_sparse_frontend_borrowed_bytes;
+        output.telemetry.generation_freeze_build_cache_mapped_baseline_sparse_frontend_owned_bytes =
+            generation_freeze_detail.build_cache_mapped_baseline_sparse_frontend_owned_bytes;
+        output.telemetry.generation_freeze_build_cache_mapped_baseline_frontend_element_reads =
+            generation_freeze_detail.build_cache_mapped_baseline_frontend_element_reads;
+        output.telemetry.generation_freeze_build_cache_mapped_baseline_frontend_elements_encoded =
+            generation_freeze_detail.build_cache_mapped_baseline_frontend_elements_encoded;
         output.telemetry.generation_freeze_build_cache_mapped_baseline_patch_records =
             generation_freeze_detail.build_cache_mapped_baseline_patch_records;
         output.telemetry.generation_freeze_build_cache_mapped_baseline_append_records =
@@ -1496,6 +1504,10 @@ status project_manager::save(
             generation_freeze_detail.build_cache_mapped_baseline_sparse_borrowed_extents;
         output.telemetry.generation_freeze_build_cache_mapped_baseline_sparse_directory_borrowed_extents =
             generation_freeze_detail.build_cache_mapped_baseline_sparse_directory_borrowed_extents;
+        output.telemetry.generation_freeze_build_cache_mapped_baseline_sparse_frontend_borrowed_extents =
+            generation_freeze_detail.build_cache_mapped_baseline_sparse_frontend_borrowed_extents;
+        output.telemetry.generation_freeze_build_cache_mapped_baseline_sparse_frontend_owned_extents =
+            generation_freeze_detail.build_cache_mapped_baseline_sparse_frontend_owned_extents;
         output.telemetry.generation_freeze_build_cache_provenance_bytes =
             generation_freeze_detail.build_cache_provenance_bytes;
         output.telemetry.generation_freeze_build_cache_provenance_sections =

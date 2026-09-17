@@ -91,7 +91,8 @@ struct sparse_case_result final {
     std::filesystem::path& configuration_path,
     std::vector<std::filesystem::path>& sources,
     bool retain_source_paths = true,
-    std::size_t progress_interval = 0) {
+    std::size_t progress_interval = 0,
+    bool frontend_payload = false) {
 
     if (source_count == 0 ||
         source_count >=
@@ -121,7 +122,10 @@ struct sparse_case_result final {
         for (std::size_t index = 0; index < source_count; ++index) {
             auto path = tree.path / source_name(index);
             const auto text =
-                "struct " + type_name(index) + ";\n";
+                frontend_payload
+                ? "struct " + type_name(index) +
+                    " { int value; };\n"
+                : "struct " + type_name(index) + ";\n";
             if (!write_text(path, text))
                 return false;
 
@@ -3013,7 +3017,8 @@ struct idempotent_save_timing final {
 
 [[nodiscard]] int run_d4a_sparse_save_materialization_profile(
     std::size_t source_count,
-    std::size_t io_worker_budget = 0) {
+    std::size_t io_worker_budget = 0,
+    bool frontend_payload = false) {
 
     if (source_count == 0)
         return 2;
@@ -3040,7 +3045,8 @@ struct idempotent_save_timing final {
             configuration_path,
             unused_source_paths,
             false,
-            progress_interval)) {
+            progress_interval,
+            frontend_payload)) {
         return 1;
     }
 
@@ -3061,8 +3067,11 @@ struct idempotent_save_timing final {
     const auto target_path =
         tree.path / source_name(target);
     const auto changed_text =
-        "struct " + type_name(target) +
-        " { int value; };\n";
+        frontend_payload
+        ? "struct " + type_name(target) +
+            " { int value; int changed; };\n"
+        : "struct " + type_name(target) +
+            " { int value; };\n";
 
     if (!write_text(
             target_path,
@@ -3243,10 +3252,34 @@ struct idempotent_save_timing final {
         telemetry.transaction_build_cache_fallback_reason == 0 &&
         telemetry.transaction_build_cache_hard_link_fallback_sections == 0;
 
+    const bool d4q3r4b_frontend_borrow_observed =
+        telemetry.
+            generation_freeze_build_cache_mapped_baseline_sparse_frontend_borrowed_bytes != 0 &&
+        telemetry.
+            generation_freeze_build_cache_mapped_baseline_sparse_frontend_owned_bytes != 0 &&
+        telemetry.
+            generation_freeze_build_cache_mapped_baseline_sparse_frontend_borrowed_extents != 0 &&
+        telemetry.
+            generation_freeze_build_cache_mapped_baseline_sparse_frontend_owned_extents != 0 &&
+        telemetry.
+            generation_freeze_build_cache_mapped_baseline_frontend_element_reads == 0 &&
+        telemetry.
+            generation_freeze_build_cache_mapped_baseline_frontend_elements_encoded == 0 &&
+        telemetry.
+            generation_freeze_build_cache_mapped_baseline_sparse_frontend_borrowed_extents +
+            telemetry.
+                generation_freeze_build_cache_mapped_baseline_sparse_frontend_owned_extents <=
+            12;
+
+    const bool d4q3r4b_frontend_borrow_pass =
+        !frontend_payload ||
+        d4q3r4b_frontend_borrow_observed;
+
     const bool save_pass =
         save_status.ok() &&
         !save.transaction.empty() &&
         save.bytes_written != 0 &&
+        d4q3r4b_frontend_borrow_pass &&
         telemetry.generation_freeze_materialize_change_ns != 0 &&
         telemetry.generation_freeze_materialize_change_source_count ==
             source_count &&
@@ -3602,6 +3635,20 @@ struct idempotent_save_timing final {
         << telemetry.generation_freeze_build_cache_mapped_baseline_sparse_directory_borrowed_bytes
         << ",build_cache_mapped_sparse_directory_borrowed_extents="
         << telemetry.generation_freeze_build_cache_mapped_baseline_sparse_directory_borrowed_extents
+        << ",build_cache_mapped_sparse_frontend_borrowed_bytes="
+        << telemetry.generation_freeze_build_cache_mapped_baseline_sparse_frontend_borrowed_bytes
+        << ",build_cache_mapped_sparse_frontend_owned_bytes="
+        << telemetry.generation_freeze_build_cache_mapped_baseline_sparse_frontend_owned_bytes
+        << ",build_cache_mapped_sparse_frontend_borrowed_extents="
+        << telemetry.generation_freeze_build_cache_mapped_baseline_sparse_frontend_borrowed_extents
+        << ",build_cache_mapped_sparse_frontend_owned_extents="
+        << telemetry.generation_freeze_build_cache_mapped_baseline_sparse_frontend_owned_extents
+        << ",build_cache_mapped_frontend_element_reads="
+        << telemetry.generation_freeze_build_cache_mapped_baseline_frontend_element_reads
+        << ",build_cache_mapped_frontend_elements_encoded="
+        << telemetry.generation_freeze_build_cache_mapped_baseline_frontend_elements_encoded
+        << ",d4q3r4b_frontend_borrow="
+        << (d4q3r4b_frontend_borrow_observed ? 1 : 0)
         << ",build_cache_mapped_patch_records="
         << telemetry.generation_freeze_build_cache_mapped_baseline_patch_records
         << ",build_cache_mapped_append_records="
@@ -3772,6 +3819,26 @@ struct idempotent_save_timing final {
         << ",current_replace_ms="
         << ns_ms(telemetry.current_replace_ns)
         << '\n';
+
+    if (frontend_payload) {
+        std::cout
+            << "D4Q3R4B_FRONTEND_BORROW_GATE,"
+            << (d4q3r4b_frontend_borrow_pass ? "PASS" : "FAIL")
+            << ",sources=" << source_count
+            << ",borrowed_bytes="
+            << telemetry.generation_freeze_build_cache_mapped_baseline_sparse_frontend_borrowed_bytes
+            << ",owned_bytes="
+            << telemetry.generation_freeze_build_cache_mapped_baseline_sparse_frontend_owned_bytes
+            << ",borrowed_extents="
+            << telemetry.generation_freeze_build_cache_mapped_baseline_sparse_frontend_borrowed_extents
+            << ",owned_extents="
+            << telemetry.generation_freeze_build_cache_mapped_baseline_sparse_frontend_owned_extents
+            << ",element_reads="
+            << telemetry.generation_freeze_build_cache_mapped_baseline_frontend_element_reads
+            << ",elements_encoded="
+            << telemetry.generation_freeze_build_cache_mapped_baseline_frontend_elements_encoded
+            << '\n';
+    }
 
     if (!save_pass) {
         if (manager.ready())
@@ -5284,6 +5351,23 @@ int main(int argc, char** argv) {
 
         return run_d4a_sparse_save_materialization_profile(
             1'000'000);
+    }
+
+    if (argc == 3 &&
+        std::string_view{argv[1]} ==
+            "--d4q3r4b-frontend-borrow") {
+        try {
+            const auto count =
+                static_cast<std::size_t>(
+                    std::stoull(argv[2]));
+            return run_d4a_sparse_save_materialization_profile(
+                count,
+                0,
+                true);
+        }
+        catch (...) {
+            return 2;
+        }
     }
 
     if (argc == 3 &&
