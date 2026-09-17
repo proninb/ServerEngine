@@ -5401,6 +5401,11 @@ struct d4l3b_extent_case final {
         rebuild.telemetry.frontend.
             context_runtime_externalized;
 
+    const bool r5e3c1_source_snapshot_pages =
+        !finalized ||
+        (rebuild.telemetry.sources.snapshot_page_backed &&
+         rebuild.telemetry.sources.snapshot_pages != 0);
+
     const auto pass =
         canonical &&
         reconstructed_payloads == 0 &&
@@ -5410,7 +5415,8 @@ struct d4l3b_extent_case final {
         r5e2d_build_cache_storage &&
         r5e3a_frontend_handoff &&
         r5e3b1_frontend_context &&
-        r5e3b2_frontend_runtime;
+        r5e3b2_frontend_runtime &&
+        r5e3c1_source_snapshot_pages;
 
     std::cout
         << "R5C_CANONICAL_GENERATION_STORAGE_GATE,"
@@ -5544,6 +5550,14 @@ struct d4l3b_extent_case final {
             rebuild.telemetry.
                 generation_finalize_activate_teardown_source_manager_ns) /
             1'000'000.0
+        << ",source_snapshot_page_backed="
+        << (rebuild.telemetry.sources.snapshot_page_backed
+            ? 1
+            : 0)
+        << ",source_snapshot_pages="
+        << rebuild.telemetry.sources.snapshot_pages
+        << ",source_snapshot_reserved_bytes="
+        << rebuild.telemetry.sources.snapshot_reserved_bytes
         << ",teardown_identities_ms="
         << static_cast<double>(
             rebuild.telemetry.

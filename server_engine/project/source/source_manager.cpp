@@ -289,6 +289,194 @@ void emit_source_failure(
 
 } // namespace
 
+std::size_t
+source_manager::snapshot_page_store::next_page_capacity(
+    const std::vector<page>& pages,
+    std::size_t required) noexcept {
+
+    constexpr std::size_t minimum_page = 4u * 1024u;
+    constexpr std::size_t maximum_page = 1024u * 1024u;
+
+    if (required == 0)
+        return 0;
+
+    std::size_t capacity = minimum_page;
+
+    if (!pages.empty()) {
+        const auto previous = pages.back().capacity;
+        capacity = previous >= maximum_page
+            ? maximum_page
+            : (std::min)(previous * 2, maximum_page);
+    }
+
+    return (std::max)(capacity, required);
+}
+
+status source_manager::snapshot_page_store::append_bytes(
+    std::vector<page>& pages,
+    std::string_view value,
+    std::string_view& output) noexcept {
+
+    output = {};
+    if (value.empty())
+        return {};
+
+    try {
+        if (pages.empty() ||
+            pages.back().capacity - pages.back().used <
+                value.size()) {
+
+            const auto capacity =
+                next_page_capacity(pages, value.size());
+
+            if (capacity < value.size())
+                return {status_code::not_available};
+
+            page next;
+            next.bytes = std::make_unique<char[]>(capacity);
+            next.capacity = capacity;
+            pages.push_back(std::move(next));
+        }
+
+        auto& current = pages.back();
+        auto* destination =
+            current.bytes.get() + current.used;
+
+        std::memcpy(
+            destination,
+            value.data(),
+            value.size());
+
+        current.used += value.size();
+        output = {
+            destination,
+            value.size(),
+        };
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+}
+
+status source_manager::snapshot_page_store::append(
+    std::string_view path,
+    std::string_view text,
+    std::string_view& path_view,
+    std::string_view& text_view) noexcept {
+
+    path_view = {};
+    text_view = {};
+
+    if (path.empty())
+        return {status_code::invalid_argument};
+
+    auto result =
+        append_bytes(
+            path_pages,
+            path,
+            path_view);
+
+    if (!result.ok())
+        return result;
+
+    result =
+        append_bytes(
+            text_pages,
+            text,
+            text_view);
+
+    if (!result.ok()) {
+        path_view = {};
+        return result;
+    }
+
+    return {};
+}
+
+status source_manager::snapshot_page_store::prepare_absorb(
+    const snapshot_page_store& other) noexcept {
+
+    if (other.path_pages.empty() &&
+        other.text_pages.empty()) {
+        return {};
+    }
+
+    if (path_pages.size() >
+            (std::numeric_limits<std::size_t>::max)() -
+                other.path_pages.size() ||
+        text_pages.size() >
+            (std::numeric_limits<std::size_t>::max)() -
+                other.text_pages.size()) {
+        return {status_code::not_available};
+    }
+
+    try {
+        path_pages.reserve(
+            path_pages.size() +
+            other.path_pages.size());
+
+        text_pages.reserve(
+            text_pages.size() +
+            other.text_pages.size());
+
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        return {status_code::not_available};
+    }
+}
+
+void source_manager::snapshot_page_store::absorb_prepared(
+    snapshot_page_store&& other) noexcept {
+
+    for (auto& item : other.path_pages)
+        path_pages.push_back(std::move(item));
+
+    for (auto& item : other.text_pages)
+        text_pages.push_back(std::move(item));
+
+    other.path_pages.clear();
+    other.text_pages.clear();
+}
+
+std::size_t
+source_manager::snapshot_page_store::reserved_bytes() const noexcept {
+
+    std::size_t total = 0;
+
+    const auto accumulate =
+        [&](const std::vector<page>& pages) noexcept {
+            for (const auto& item : pages) {
+                if (total >
+                    (std::numeric_limits<std::size_t>::max)() -
+                        item.capacity) {
+                    total =
+                        (std::numeric_limits<std::size_t>::max)();
+                    return;
+                }
+
+                total += item.capacity;
+            }
+        };
+
+    accumulate(path_pages);
+
+    if (total !=
+        (std::numeric_limits<std::size_t>::max)()) {
+        accumulate(text_pages);
+    }
+
+    return total;
+}
+
+
 source_manager::source_manager(
     const source_manager_image_view& baseline_sources_value,
     const build_cache_image_view& baseline_cache_value) noexcept
@@ -793,25 +981,27 @@ status source_manager::publish_memory(
     try {
         auto update = begin_update();
         source_id source;
-        auto result = update.resolve(std::filesystem::path{normalized_path}, source);
+        auto result = update.resolve(
+            std::filesystem::path{normalized_path},
+            source);
+
         if (!result.ok())
             return result;
 
-        auto storage = std::make_shared<source_snapshot::storage>();
-        storage->source = source;
-        storage->normalized_path.assign(update.path(source));
-        storage->text.assign(text);
-        storage->observation.size = text.size();
-        storage->hash = hash_source_content(text);
-
         source_acquire_result acquired;
         acquired.source = source;
-        acquired.kind = source_acquire_result_kind::present;
-        acquired.snapshot.observation = storage->observation;
-        acquired.snapshot.hash = storage->hash;
-        acquired.snapshot.bytes = storage->text;
+        acquired.kind =
+            source_acquire_result_kind::present;
+        acquired.snapshot.observation.size =
+            text.size();
+        acquired.snapshot.hash =
+            hash_source_content(text);
+        acquired.snapshot.bytes.assign(
+            text.data(),
+            text.size());
 
-        result = update.apply_acquire(std::move(acquired));
+        result = update.apply_acquire(
+            std::move(acquired));
         if (!result.ok())
             return result;
         result = update.commit();
@@ -1274,17 +1464,40 @@ status source_manager_update::apply_acquire(source_acquire_result&& result) noex
     }
 
     try {
-        auto storage = std::make_shared<source_snapshot::storage>();
-        storage->source = result.source;
-        storage->normalized_path.assign(path(result.source));
-        storage->text = std::move(result.snapshot.bytes);
-        storage->observation = result.snapshot.observation;
-        storage->hash = result.snapshot.hash;
-        storage->identity =
-            result.snapshot.identity;
-const bool semantic_change = !previous || previous.hash() != storage->hash;
-        item->snapshot = source_snapshot{std::move(storage)};
+        const auto normalized =
+            path(result.source);
+
+        if (normalized.empty())
+            return {status_code::invalid_argument};
+
+        std::string_view snapshot_path;
+        std::string_view snapshot_text;
+
+        auto storage_result =
+            candidate_snapshots.append(
+                normalized,
+                result.snapshot.bytes,
+                snapshot_path,
+                snapshot_text);
+
+        if (!storage_result.ok())
+            return storage_result;
+
+        const bool semantic_change =
+            !previous ||
+            previous.hash() !=
+                result.snapshot.hash;
+
+        item->snapshot = source_snapshot{
+            result.source,
+            snapshot_path,
+            snapshot_text,
+            result.snapshot.observation,
+            result.snapshot.hash,
+            result.snapshot.identity};
+
         item->has_snapshot = true;
+
         if (semantic_change)
             semantic_changes.push_back(result.source);
         if (first_physical_change)
@@ -1825,6 +2038,13 @@ status source_manager_update::prepare_publish() noexcept {
         }
     }
 
+    result =
+        owner->snapshot_storage.prepare_absorb(
+            candidate_snapshots);
+
+    if (!result.ok())
+        return result;
+
     prepared = true;
     return {};
 }
@@ -1832,6 +2052,9 @@ status source_manager_update::prepare_publish() noexcept {
 void source_manager_update::publish_prepared() noexcept {
     if (!prepared || committed || owner == nullptr)
         return;
+
+    owner->snapshot_storage.absorb_prepared(
+        std::move(candidate_snapshots));
 
     for (const auto& item : new_sources) {
         const auto offset = static_cast<std::uint32_t>(owner->path_storage.size());
@@ -1876,6 +2099,12 @@ void source_manager_update::publish_prepared() noexcept {
 
     owner->persistence_text_bytes_value =
         prepared_text_bytes;
+
+    telemetry_value.snapshot_page_backed = true;
+    telemetry_value.snapshot_pages =
+        owner->snapshot_storage.page_count();
+    telemetry_value.snapshot_reserved_bytes =
+        owner->snapshot_storage.reserved_bytes();
 
     committed = true;
 }

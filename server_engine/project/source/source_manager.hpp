@@ -70,6 +70,12 @@ struct source_manager_update_telemetry final {
     std::uint64_t source_graph_full_scans = 0;
     std::uint64_t source_graph_visited = 0;
     std::uint64_t reverse_edge_patches = 0;
+
+    // R5E3-C1: acquired Source path/text bytes are page-owned by the Source
+    // Manager. Per-Source snapshots retain only borrowed immutable views.
+    std::uint64_t snapshot_pages = 0;
+    std::uint64_t snapshot_reserved_bytes = 0;
+    bool snapshot_page_backed = false;
 };
 
 class source_manager_update;
@@ -169,6 +175,60 @@ private:
 
     static_assert(sizeof(path_slot) == 8);
 
+    // Transaction-friendly page owner for immutable Source snapshot bytes.
+    // Update-local pages move into the committed construction Source Manager;
+    // string_view addresses never change during the ownership transfer.
+    class snapshot_page_store final {
+    public:
+        snapshot_page_store() = default;
+
+        snapshot_page_store(
+            const snapshot_page_store&) = delete;
+        snapshot_page_store& operator=(
+            const snapshot_page_store&) = delete;
+        snapshot_page_store(
+            snapshot_page_store&&) noexcept = default;
+        snapshot_page_store& operator=(
+            snapshot_page_store&&) noexcept = default;
+
+        [[nodiscard]] status append(
+            std::string_view path,
+            std::string_view text,
+            std::string_view& path_view,
+            std::string_view& text_view) noexcept;
+
+        [[nodiscard]] status prepare_absorb(
+            const snapshot_page_store& other) noexcept;
+
+        void absorb_prepared(
+            snapshot_page_store&& other) noexcept;
+
+        [[nodiscard]] std::size_t page_count() const noexcept {
+            return path_pages.size() + text_pages.size();
+        }
+
+        [[nodiscard]] std::size_t reserved_bytes() const noexcept;
+
+    private:
+        struct page final {
+            std::unique_ptr<char[]> bytes;
+            std::size_t capacity = 0;
+            std::size_t used = 0;
+        };
+
+        [[nodiscard]] static status append_bytes(
+            std::vector<page>& pages,
+            std::string_view value,
+            std::string_view& output) noexcept;
+
+        [[nodiscard]] static std::size_t next_page_capacity(
+            const std::vector<page>& pages,
+            std::size_t required) noexcept;
+
+        std::vector<page> path_pages;
+        std::vector<page> text_pages;
+    };
+
     friend class source_manager_update;
 
     [[nodiscard]] status rebuild_path_index(
@@ -198,6 +258,11 @@ private:
     std::vector<char> path_storage;
     mapped_vector<committed_source> states;
     source_generation_storage generation_storage_value;
+
+    // Construction-only Source bytes. Canonical persisted Source bytes already
+    // belong to the committed Generation after finalization.
+    snapshot_page_store snapshot_storage;
+
     std::vector<path_slot> path_index;
     std::uint64_t persistence_text_bytes_value = 0;
 };
@@ -343,6 +408,11 @@ private:
     std::vector<prepared_path_insertion> prepared_path_insertions;
     std::vector<source_id> semantic_changes;
     std::vector<source_id> physical_changes_value;
+
+    // Candidate snapshot pages are transaction-owned until publish_prepared().
+    // Failed updates release only their own pages.
+    source_manager::snapshot_page_store candidate_snapshots;
+
     mutable source_manager_update_telemetry telemetry_value{};
     std::size_t prepared_path_storage_size = 0;
     std::uint64_t prepared_text_bytes = 0;
