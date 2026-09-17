@@ -8,6 +8,7 @@
 #include "persistence/build_cache_image.hpp"
 #include "persistence/change_state_image.hpp"
 #include "project_configuration.hpp"
+#include "project_generation.hpp"
 
 #include <cstdint>
 #include <cstring>
@@ -161,6 +162,11 @@ struct project_generation_freeze_telemetry final {
     std::uint32_t build_cache_mapped_baseline_sparse_directory_borrowed_extents = 0;
     std::uint32_t build_cache_mapped_baseline_sparse_frontend_borrowed_extents = 0;
     std::uint32_t build_cache_mapped_baseline_sparse_frontend_owned_extents = 0;
+
+    std::uint64_t build_cache_native_source_directory_direct_bytes = 0;
+    std::uint32_t build_cache_native_source_directory_direct_extents = 0;
+    std::uint32_t build_cache_native_source_directory_direct_sections = 0;
+    std::uint32_t build_cache_native_source_directory_direct_fallback = 0;
 
     std::uint64_t build_cache_native_source_direct_bytes = 0;
     std::uint32_t build_cache_native_source_direct_extents = 0;
@@ -344,6 +350,28 @@ public:
         return snapshot_generation_storage->valid()
             ? status{}
             : status{status_code::initialization_failed};
+    }
+
+    [[nodiscard]] bool
+    build_cache_source_directory_generation_move_owned() const noexcept {
+        return !build_cache_source_directory_generation_storage.empty();
+    }
+
+    [[nodiscard]] status
+    adopt_build_cache_source_directory_generation_storage(
+        std::vector<
+            project_generation_build_cache_source_directory_record>&&
+                storage) noexcept {
+
+        if (storage.empty())
+            return {status_code::invalid_argument};
+
+        build_cache_source_directory_generation_storage =
+            std::move(storage);
+
+        return build_cache_source_directory_generation_storage.empty()
+            ? status{status_code::initialization_failed}
+            : status{};
     }
 
     [[nodiscard]] status adopt_contribution_generation_storage(
@@ -672,6 +700,11 @@ private:
     // R5E4-B2: lifetime owner for Build Cache source_bytes extents.
     std::optional<source_snapshot_generation_storage>
         snapshot_generation_storage;
+
+    // R5E4-B3: lifetime owner for the direct Build Cache source_directory.
+    std::vector<
+        project_generation_build_cache_source_directory_record>
+            build_cache_source_directory_generation_storage;
 
     friend status freeze_project_generation(
         const project_context&,

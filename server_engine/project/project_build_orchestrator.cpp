@@ -273,6 +273,23 @@ auto semantic = project.parser_services();
         builder.publish_prepared();
         publish_end = build_clock::now();
         cache_update.publish_prepared();
+
+        const auto source_directory_begin =
+            build_clock::now();
+
+        result =
+            project.
+                prepare_generation_build_cache_source_directory();
+
+        output.telemetry.
+            generation_source_directory_prepare_ns =
+                elapsed_ns(
+                    source_directory_begin,
+                    build_clock::now());
+
+        if (!result.ok())
+            return result;
+
         source_change_capture generation_change;
         auto provenance_result =
             prepare_generation_source_change_capture(
@@ -529,6 +546,7 @@ status project_build_orchestrator::update(
         builder.publish_prepared();
         publish_end = build_clock::now();
         cache_update.publish_prepared();
+        project.clear_generation_build_cache_source_directory();
         interface_publish_end = build_clock::now();
         output.telemetry.publication_ns = elapsed_ns(publish_begin, publish_end);
         output.telemetry.interface_publish_ns =

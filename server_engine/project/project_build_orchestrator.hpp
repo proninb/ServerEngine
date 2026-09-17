@@ -56,6 +56,7 @@ struct project_build_telemetry final {
     std::uint64_t interface_prepare_publish_ns = 0;
     std::uint64_t publication_ns = 0;
     std::uint64_t interface_publish_ns = 0;
+    std::uint64_t generation_source_directory_prepare_ns = 0;
     std::uint64_t total_ns = 0;
 
     // Full-construction Generation finalization. These bytes become the sole
@@ -125,6 +126,8 @@ struct project_build_telemetry final {
     bool generation_finalize_contribution_move_owned = false;
     std::uint64_t generation_finalize_snapshot_handoff_ns = 0;
     bool generation_finalize_snapshot_move_owned = false;
+    std::uint64_t generation_finalize_source_directory_handoff_ns = 0;
+    bool generation_finalize_source_directory_move_owned = false;
     std::uint64_t generation_finalize_segment_snapshot_ns = 0;
     std::uint64_t generation_finalize_activate_ready_ns = 0;
     std::uint64_t generation_finalize_activate_owner_ns = 0;
@@ -158,6 +161,7 @@ struct project_build_telemetry final {
     std::uint64_t generation_finalize_build_cache_logical_bytes = 0;
     std::uint64_t generation_finalize_build_cache_prefix_bytes = 0;
     std::uint64_t generation_finalize_build_cache_owned_section_bytes = 0;
+    std::uint64_t generation_finalize_build_cache_direct_source_directory_bytes = 0;
     std::uint64_t generation_finalize_build_cache_direct_source_bytes = 0;
     std::uint64_t generation_finalize_build_cache_direct_frontend_bytes = 0;
     std::uint64_t generation_finalize_build_cache_direct_contribution_bytes = 0;
@@ -168,6 +172,9 @@ struct project_build_telemetry final {
     std::uint32_t generation_finalize_build_cache_physical_extents = 0;
     std::uint32_t generation_finalize_build_cache_direct_frontend_extents = 0;
     std::uint32_t generation_finalize_build_cache_direct_frontend_sections = 0;
+    std::uint32_t generation_finalize_build_cache_direct_source_directory_extents = 0;
+    std::uint32_t generation_finalize_build_cache_direct_source_directory_sections = 0;
+    std::uint32_t generation_finalize_build_cache_direct_source_directory_fallback = 0;
     std::uint32_t generation_finalize_build_cache_direct_source_extents = 0;
     std::uint32_t generation_finalize_build_cache_direct_source_sections = 0;
     std::uint32_t generation_finalize_build_cache_direct_source_fallback = 0;

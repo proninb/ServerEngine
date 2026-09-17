@@ -61,6 +61,37 @@ constexpr std::uint32_t source_known_flags =
     source_flag_snapshot | source_flag_frontend;
 
 constexpr std::uint32_t source_directory_record_size = 56;
+static_assert(
+    sizeof(project_generation_build_cache_source_directory_record) ==
+        source_directory_record_size);
+static_assert(
+    offsetof(
+        project_generation_build_cache_source_directory_record,
+        source) == 0);
+static_assert(
+    offsetof(
+        project_generation_build_cache_source_directory_record,
+        flags) == 4);
+static_assert(
+    offsetof(
+        project_generation_build_cache_source_directory_record,
+        text_offset) == 8);
+static_assert(
+    offsetof(
+        project_generation_build_cache_source_directory_record,
+        text_length) == 16);
+static_assert(
+    offsetof(
+        project_generation_build_cache_source_directory_record,
+        reserved) == 20);
+static_assert(
+    offsetof(
+        project_generation_build_cache_source_directory_record,
+        local_types_begin) == 24);
+static_assert(
+    offsetof(
+        project_generation_build_cache_source_directory_record,
+        member_slots_count) == 52);
 constexpr std::uint32_t frontend_local_type_record_size = 4;
 constexpr std::uint32_t frontend_type_slot_record_size = 12;
 constexpr std::uint32_t frontend_object_slot_record_size = 16;
@@ -5147,6 +5178,61 @@ status encode_build_cache_image(
         sparse != nullptr &&
         use_native_contribution_storage;
 
+    const auto native_source_directory =
+        project.generation_native_segments().
+            build_cache_source_directory();
+
+    bool direct_native_source_directory = false;
+
+    if (owned != nullptr &&
+        sparse != nullptr &&
+        std::endian::native == std::endian::little &&
+        native_source_directory.size() == source_count) {
+
+        const auto bytes =
+            std::as_bytes(
+                native_source_directory);
+
+        project_generation_segment segment;
+        if (!bytes.empty() &&
+            !segment.append(bytes)) {
+            return {status_code::not_available};
+        }
+
+        if (segment.size() !=
+            source_count *
+                source_directory_record_size) {
+            return {status_code::initialization_failed};
+        }
+
+        sparse->sections[
+            section_index(
+                build_cache_image_section::
+                    source_directory)] =
+                        segment;
+
+        direct_native_source_directory = true;
+
+        if (telemetry != nullptr) {
+            telemetry->
+                native_source_directory_direct_bytes =
+                    segment.size();
+            telemetry->
+                native_source_directory_direct_extents =
+                    static_cast<std::uint32_t>(
+                        segment.extent_count());
+            telemetry->
+                native_source_directory_direct_sections =
+                    segment.empty() ? 0u : 1u;
+        }
+    }
+    else if (telemetry != nullptr &&
+             owned != nullptr &&
+             sparse != nullptr) {
+        telemetry->
+            native_source_directory_direct_fallback = 1;
+    }
+
     project_generation_segment
         direct_source_bytes_segment;
     bool direct_native_source_bytes = false;
@@ -5314,6 +5400,10 @@ status encode_build_cache_image(
                     return {status_code::not_available};
                 }
 
+                const bool native_source_directory_section =
+                    index == section_index(
+                        build_cache_image_section::source_directory);
+
                 const bool native_source_section =
                     index == section_index(
                         build_cache_image_section::source_bytes);
@@ -5342,7 +5432,9 @@ status encode_build_cache_image(
 
                 auto& section = owned->sections[index];
 
-                if ((direct_native_source_bytes &&
+                if ((direct_native_source_directory &&
+                     native_source_directory_section) ||
+                    (direct_native_source_bytes &&
                      native_source_section) ||
                     (defer_native_frontend_staging &&
                      frontend_section) ||
@@ -7769,6 +7861,26 @@ status encode_build_cache_image(
         }
     }
 
+    if (!native_source_encoded &&
+        direct_native_source_directory) {
+
+        text_cursor = source_bytes_count;
+        local_type_cursor =
+            static_cast<std::uint32_t>(
+                local_type_count);
+        type_slot_cursor =
+            static_cast<std::uint32_t>(
+                type_slot_count);
+        object_slot_cursor =
+            static_cast<std::uint32_t>(
+                object_slot_count);
+        member_slot_cursor =
+            static_cast<std::uint32_t>(
+                member_slot_count);
+        observed_frontends = frontend_count;
+        native_source_encoded = true;
+    }
+
     const auto hardware_workers =
         (std::max)(
             std::size_t{1},
@@ -7790,6 +7902,7 @@ status encode_build_cache_image(
             desired_native_workers);
 
     const bool use_parallel_native_sources =
+        !native_source_encoded &&
         use_native_block_storage &&
         native_source_proof_available &&
         native_worker_count > 1;

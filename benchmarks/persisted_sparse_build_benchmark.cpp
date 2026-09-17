@@ -5369,6 +5369,8 @@ struct d4l3b_extent_case final {
              rebuild.telemetry.
                  generation_finalize_build_cache_owned_section_bytes +
              rebuild.telemetry.
+                 generation_finalize_build_cache_direct_source_directory_bytes +
+             rebuild.telemetry.
                  generation_finalize_build_cache_direct_source_bytes +
              rebuild.telemetry.
                  generation_finalize_build_cache_direct_frontend_bytes +
@@ -5445,6 +5447,20 @@ struct d4l3b_extent_case final {
          rebuild.telemetry.
              generation_finalize_build_cache_direct_source_fallback == 0);
 
+    const bool r5e4b3_native_source_directory =
+        !finalized ||
+        (rebuild.telemetry.
+             generation_finalize_source_directory_move_owned &&
+         rebuild.telemetry.
+             generation_finalize_build_cache_direct_source_directory_bytes ==
+                 source_count * 56u &&
+         rebuild.telemetry.
+             generation_finalize_build_cache_direct_source_directory_sections == 1 &&
+         rebuild.telemetry.
+             generation_finalize_build_cache_direct_source_directory_extents == 1 &&
+         rebuild.telemetry.
+             generation_finalize_build_cache_direct_source_directory_fallback == 0);
+
     const auto pass =
         canonical &&
         reconstructed_payloads == 0 &&
@@ -5458,7 +5474,8 @@ struct d4l3b_extent_case final {
         r5e3c1_source_snapshot_pages &&
         r5e4a_finalization_audit &&
         r5e4b1_native_contributions &&
-        r5e4b2_native_source_bytes;
+        r5e4b2_native_source_bytes &&
+        r5e4b3_native_source_directory;
 
     std::cout
         << "R5C_CANONICAL_GENERATION_STORAGE_GATE,"
@@ -5733,6 +5750,21 @@ struct d4l3b_extent_case final {
                 generation_finalize_snapshot_move_owned
             ? 1
             : 0)
+        << ",source_directory_prepare_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_source_directory_prepare_ns) /
+            1'000'000.0
+        << ",source_directory_handoff_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_source_directory_handoff_ns) /
+            1'000'000.0
+        << ",source_directory_generation_move_owned="
+        << (rebuild.telemetry.
+                generation_finalize_source_directory_move_owned
+            ? 1
+            : 0)
         << ",segment_snapshot_ms="
         << static_cast<double>(
             rebuild.telemetry.
@@ -5997,6 +6029,18 @@ struct d4l3b_extent_case final {
         << ",build_cache_owned_section_bytes="
         << rebuild.telemetry.
             generation_finalize_build_cache_owned_section_bytes
+        << ",build_cache_direct_source_directory_bytes="
+        << rebuild.telemetry.
+            generation_finalize_build_cache_direct_source_directory_bytes
+        << ",build_cache_direct_source_directory_extents="
+        << rebuild.telemetry.
+            generation_finalize_build_cache_direct_source_directory_extents
+        << ",build_cache_direct_source_directory_sections="
+        << rebuild.telemetry.
+            generation_finalize_build_cache_direct_source_directory_sections
+        << ",build_cache_direct_source_directory_fallback="
+        << rebuild.telemetry.
+            generation_finalize_build_cache_direct_source_directory_fallback
         << ",build_cache_direct_source_bytes="
         << rebuild.telemetry.
             generation_finalize_build_cache_direct_source_bytes

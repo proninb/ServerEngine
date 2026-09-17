@@ -567,6 +567,14 @@ private:
     release_snapshot_generation_storage(
         project_generation_storage& output) noexcept;
 
+    // Full-G0 BUILD producer boundary for Build Cache source_directory.
+    [[nodiscard]] status
+    prepare_generation_build_cache_source_directory() noexcept;
+
+    [[nodiscard]] status
+    release_build_cache_source_directory_generation_storage(
+        project_generation_storage& output) noexcept;
+
     void replace_compiled(std::unique_ptr<compiled_project_state> replacement) noexcept {
         compiled.swap(replacement);
     }
@@ -608,6 +616,11 @@ private:
 
     void clear_generation_change_segment() noexcept {
         generation_native_segments_value.clear_change();
+    }
+
+    void clear_generation_build_cache_source_directory() noexcept {
+        generation_native_segments_value.
+            clear_build_cache_source_directory();
     }
 
     [[nodiscard]] project_generation_provenance

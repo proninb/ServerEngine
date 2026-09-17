@@ -2,6 +2,7 @@
 #include "project_persistence.hpp"
 
 #include <chrono>
+#include <limits>
 #include <memory>
 #include <new>
 #include <utility>
@@ -84,6 +85,220 @@ release_snapshot_generation_storage(
 
     return output.adopt_snapshot_generation_storage(
         std::move(storage));
+}
+
+
+status project_context::
+prepare_generation_build_cache_source_directory() noexcept {
+
+    if (compiled == nullptr)
+        return {status_code::invalid_state};
+
+    const auto source_count =
+        compiled->sources.source_count();
+
+    const auto native_sources =
+        compiled->sources.native_generation();
+
+    const auto* frontend_storage =
+        compiled->frontend_cache.
+            native_frontend_block_bulk_storage();
+
+    if (source_count == 0 ||
+        !native_sources.complete ||
+        native_sources.physical.size() != source_count ||
+        frontend_storage == nullptr ||
+        !compiled->sources.native_snapshot_text_complete()) {
+        generation_native_segments_value.
+            clear_build_cache_source_directory();
+        return {status_code::invalid_state};
+    }
+
+    if (source_count >
+        static_cast<std::size_t>(
+            (std::numeric_limits<std::uint32_t>::max)())) {
+        return {status_code::not_available};
+    }
+
+    try {
+        std::vector<
+            project_generation_build_cache_source_directory_record>
+                directory(source_count);
+
+        std::uint64_t text_cursor = 0;
+        std::uint32_t local_type_cursor = 0;
+        std::uint32_t type_slot_cursor = 0;
+        std::uint32_t object_slot_cursor = 0;
+        std::uint32_t member_slot_cursor = 0;
+        std::size_t frontend_count = 0;
+
+        for (std::size_t index = 0;
+             index < source_count;
+             ++index) {
+
+            const source_id source{
+                static_cast<std::uint32_t>(
+                    index + 1)};
+
+            auto& output = directory[index];
+            output.source = source;
+
+            const auto& physical =
+                native_sources.physical[index];
+
+            if (physical.reserved != 0 ||
+                (physical.flags &
+                    ~source_generation_physical_present) != 0) {
+                return {status_code::initialization_failed};
+            }
+
+            if (physical.present()) {
+                if (physical.size >
+                        (std::numeric_limits<std::uint32_t>::max)() ||
+                    text_cursor >
+                        (std::numeric_limits<std::uint64_t>::max)() -
+                            physical.size) {
+                    return {status_code::not_available};
+                }
+
+                output.flags |=
+                    project_generation_build_cache_source_directory_record::
+                        snapshot_present;
+
+                output.text_offset = text_cursor;
+                output.text_length =
+                    static_cast<std::uint32_t>(
+                        physical.size);
+
+                text_cursor += physical.size;
+            }
+
+            source_frontend_block_ref block;
+            auto result =
+                compiled->frontend_cache.
+                    native_frontend_block(
+                        source,
+                        block);
+
+            if (!result.ok()) {
+                if (result.code == status_code::not_found)
+                    continue;
+                return result;
+            }
+
+            source_frontend_block_layout layout;
+            result = frontend_storage->layout(
+                block,
+                layout);
+
+            if (!result.ok() ||
+                layout.source != source ||
+                layout.local_types.begin !=
+                    local_type_cursor ||
+                layout.type_slots.begin !=
+                    type_slot_cursor ||
+                layout.object_slots.begin !=
+                    object_slot_cursor ||
+                layout.member_slots.begin !=
+                    member_slot_cursor) {
+                return {status_code::initialization_failed};
+            }
+
+            output.flags |=
+                project_generation_build_cache_source_directory_record::
+                    frontend_present;
+
+            output.local_types_begin =
+                layout.local_types.begin;
+            output.local_types_count =
+                layout.local_types.count;
+            output.type_slots_begin =
+                layout.type_slots.begin;
+            output.type_slots_count =
+                layout.type_slots.count;
+            output.object_slots_begin =
+                layout.object_slots.begin;
+            output.object_slots_count =
+                layout.object_slots.count;
+            output.member_slots_begin =
+                layout.member_slots.begin;
+            output.member_slots_count =
+                layout.member_slots.count;
+
+            if (layout.local_types.count >
+                    (std::numeric_limits<std::uint32_t>::max)() -
+                        local_type_cursor ||
+                layout.type_slots.count >
+                    (std::numeric_limits<std::uint32_t>::max)() -
+                        type_slot_cursor ||
+                layout.object_slots.count >
+                    (std::numeric_limits<std::uint32_t>::max)() -
+                        object_slot_cursor ||
+                layout.member_slots.count >
+                    (std::numeric_limits<std::uint32_t>::max)() -
+                        member_slot_cursor) {
+                return {status_code::not_available};
+            }
+
+            local_type_cursor +=
+                layout.local_types.count;
+            type_slot_cursor +=
+                layout.type_slots.count;
+            object_slot_cursor +=
+                layout.object_slots.count;
+            member_slot_cursor +=
+                layout.member_slots.count;
+            ++frontend_count;
+        }
+
+        const auto& summary =
+            compiled->frontend_cache.persistence_summary();
+
+        if (text_cursor !=
+                compiled->sources.persistence_text_bytes() ||
+            frontend_count != summary.frontend_count ||
+            static_cast<std::size_t>(
+                local_type_cursor) != summary.local_types ||
+            static_cast<std::size_t>(
+                type_slot_cursor) != summary.type_slots ||
+            static_cast<std::size_t>(
+                object_slot_cursor) != summary.object_slots ||
+            static_cast<std::size_t>(
+                member_slot_cursor) != summary.member_slots) {
+            return {status_code::initialization_failed};
+        }
+
+        generation_native_segments_value.
+            publish_build_cache_source_directory(
+                std::move(directory));
+
+        return {};
+    }
+    catch (const std::bad_alloc&) {
+        generation_native_segments_value.
+            clear_build_cache_source_directory();
+        return {status_code::not_available};
+    }
+    catch (const std::length_error&) {
+        generation_native_segments_value.
+            clear_build_cache_source_directory();
+        return {status_code::not_available};
+    }
+}
+
+status project_context::
+release_build_cache_source_directory_generation_storage(
+    project_generation_storage& output) noexcept {
+
+    auto directory =
+        generation_native_segments_value.
+            release_build_cache_source_directory();
+
+    if (directory.empty())
+        return {status_code::invalid_state};
+
+    return output.adopt_build_cache_source_directory_generation_storage(
+        std::move(directory));
 }
 
 

@@ -11,8 +11,34 @@
 
 namespace cw::server {
 
-// Owns persistence-native immutable segments already frozen for the current
-// Generation. GEN-02B starts with change; compiled/sources/build migrate later.
+// Persistence-native Build Cache source_directory record produced by BUILD.
+// Explicit fields make the 56-byte v4 representation independent of implicit
+// compiler padding. The section is Generation-local and ordered by source_id.
+struct project_generation_build_cache_source_directory_record final {
+    static constexpr std::uint32_t snapshot_present = 0x00000001u;
+    static constexpr std::uint32_t frontend_present = 0x00000002u;
+
+    source_id source{};
+    std::uint32_t flags = 0;
+    std::uint64_t text_offset = 0;
+    std::uint32_t text_length = 0;
+    std::uint32_t reserved = 0;
+    std::uint32_t local_types_begin = 0;
+    std::uint32_t local_types_count = 0;
+    std::uint32_t type_slots_begin = 0;
+    std::uint32_t type_slots_count = 0;
+    std::uint32_t object_slots_begin = 0;
+    std::uint32_t object_slots_count = 0;
+    std::uint32_t member_slots_begin = 0;
+    std::uint32_t member_slots_count = 0;
+};
+
+static_assert(
+    sizeof(project_generation_build_cache_source_directory_record) == 56);
+
+// Owns persistence-native immutable segments produced by BUILD for the current
+// Generation. FINALIZE may bind these sections directly and transfer ownership
+// without reconstructing their payload.
 class project_generation_native_segments final {
 public:
     project_generation_native_segments() noexcept = default;
@@ -43,8 +69,37 @@ public:
         change_value.clear();
     }
 
+    [[nodiscard]] std::span<
+        const project_generation_build_cache_source_directory_record>
+    build_cache_source_directory() const noexcept {
+        return build_cache_source_directory_value;
+    }
+
+    void publish_build_cache_source_directory(
+        std::vector<
+            project_generation_build_cache_source_directory_record>&&
+                value) noexcept {
+
+        build_cache_source_directory_value =
+            std::move(value);
+    }
+
+    void clear_build_cache_source_directory() noexcept {
+        build_cache_source_directory_value.clear();
+    }
+
+    [[nodiscard]] std::vector<
+        project_generation_build_cache_source_directory_record>
+    release_build_cache_source_directory() noexcept {
+        return std::move(
+            build_cache_source_directory_value);
+    }
+
 private:
     std::vector<std::byte> change_value;
+    std::vector<
+        project_generation_build_cache_source_directory_record>
+            build_cache_source_directory_value;
 };
 
 // GEN-02C19: configuration proof belongs to the Generation that was built
