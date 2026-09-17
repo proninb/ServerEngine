@@ -363,6 +363,7 @@ status source_manager::snapshot_page_store::append_bytes(
 }
 
 status source_manager::snapshot_page_store::append(
+    source_id source,
     std::string_view path,
     std::string_view text,
     std::string_view& path_view,
@@ -371,8 +372,14 @@ status source_manager::snapshot_page_store::append(
     path_view = {};
     text_view = {};
 
-    if (path.empty())
+    if (!source || path.empty())
         return {status_code::invalid_argument};
+
+    if (text.size() >
+        (std::numeric_limits<std::size_t>::max)() -
+            text_bytes_value) {
+        return {status_code::not_available};
+    }
 
     auto result =
         append_bytes(
@@ -394,6 +401,23 @@ status source_manager::snapshot_page_store::append(
         return result;
     }
 
+    if (text_source_count == 0) {
+        first_text_source = source;
+        last_text_source = source;
+    }
+    else {
+        if (last_text_source.value() ==
+                (std::numeric_limits<std::uint32_t>::max)() ||
+            source.value() !=
+                last_text_source.value() + 1) {
+            text_source_order_contiguous = false;
+        }
+
+        last_text_source = source;
+    }
+
+    ++text_source_count;
+    text_bytes_value += text.size();
     return {};
 }
 
@@ -410,7 +434,13 @@ status source_manager::snapshot_page_store::prepare_absorb(
                 other.path_pages.size() ||
         text_pages.size() >
             (std::numeric_limits<std::size_t>::max)() -
-                other.text_pages.size()) {
+                other.text_pages.size() ||
+        text_source_count >
+            (std::numeric_limits<std::size_t>::max)() -
+                other.text_source_count ||
+        text_bytes_value >
+            (std::numeric_limits<std::size_t>::max)() -
+                other.text_bytes_value) {
         return {status_code::not_available};
     }
 
@@ -436,6 +466,41 @@ status source_manager::snapshot_page_store::prepare_absorb(
 void source_manager::snapshot_page_store::absorb_prepared(
     snapshot_page_store&& other) noexcept {
 
+    const auto had_text = text_source_count != 0;
+    const auto other_had_text =
+        other.text_source_count != 0;
+
+    if (other_had_text) {
+        if (!had_text) {
+            first_text_source =
+                other.first_text_source;
+            last_text_source =
+                other.last_text_source;
+            text_source_order_contiguous =
+                other.text_source_order_contiguous;
+        }
+        else {
+            const bool bridge =
+                last_text_source.value() !=
+                    (std::numeric_limits<std::uint32_t>::max)() &&
+                other.first_text_source.value() ==
+                    last_text_source.value() + 1;
+
+            text_source_order_contiguous =
+                text_source_order_contiguous &&
+                other.text_source_order_contiguous &&
+                bridge;
+
+            last_text_source =
+                other.last_text_source;
+        }
+
+        text_source_count +=
+            other.text_source_count;
+        text_bytes_value +=
+            other.text_bytes_value;
+    }
+
     for (auto& item : other.path_pages)
         path_pages.push_back(std::move(item));
 
@@ -444,6 +509,11 @@ void source_manager::snapshot_page_store::absorb_prepared(
 
     other.path_pages.clear();
     other.text_pages.clear();
+    other.first_text_source = {};
+    other.last_text_source = {};
+    other.text_source_count = 0;
+    other.text_bytes_value = 0;
+    other.text_source_order_contiguous = true;
 }
 
 std::size_t
@@ -474,6 +544,51 @@ source_manager::snapshot_page_store::reserved_bytes() const noexcept {
     }
 
     return total;
+}
+
+
+bool source_manager::snapshot_page_store::
+complete_text_generation(
+    std::size_t source_count,
+    std::uint64_t text_bytes) const noexcept {
+
+    return
+        text_source_order_contiguous &&
+        text_source_count == source_count &&
+        source_count != 0 &&
+        first_text_source.value() == 1 &&
+        last_text_source.value() == source_count &&
+        text_bytes <=
+            (std::numeric_limits<std::size_t>::max)() &&
+        text_bytes_value ==
+            static_cast<std::size_t>(text_bytes);
+}
+
+status source_manager::snapshot_page_store::
+release_text_generation(
+    source_snapshot_generation_storage& output) noexcept {
+
+    output = {};
+
+    if (!text_source_order_contiguous ||
+        text_source_count == 0) {
+        return {status_code::invalid_state};
+    }
+
+    output.text_pages = std::move(text_pages);
+    output.text_bytes = text_bytes_value;
+    output.source_count = text_source_count;
+    output.complete = true;
+
+    first_text_source = {};
+    last_text_source = {};
+    text_source_count = 0;
+    text_bytes_value = 0;
+    text_source_order_contiguous = true;
+
+    return output.valid()
+        ? status{}
+        : status{status_code::initialization_failed};
 }
 
 
@@ -728,6 +843,40 @@ source_manager::native_generation() const noexcept {
 
     return output;
 }
+
+bool source_manager::native_snapshot_text_complete() const noexcept {
+    return
+        !baseline_backed() &&
+        snapshot_storage.complete_text_generation(
+            source_count(),
+            persistence_text_bytes_value);
+}
+
+std::size_t source_manager::
+native_snapshot_text_page_count() const noexcept {
+
+    return snapshot_storage.text_page_count();
+}
+
+std::span<const std::byte> source_manager::
+native_snapshot_text_page(
+    std::size_t index) const noexcept {
+
+    return snapshot_storage.text_page(index);
+}
+
+status source_manager::release_snapshot_generation_storage(
+    source_snapshot_generation_storage& output) noexcept {
+
+    output = {};
+
+    if (!native_snapshot_text_complete())
+        return {status_code::invalid_state};
+
+    return snapshot_storage.release_text_generation(
+        output);
+}
+
 
 source_snapshot source_manager::current(source_id source) const noexcept {
     if (!source)
@@ -1475,6 +1624,7 @@ status source_manager_update::apply_acquire(source_acquire_result&& result) noex
 
         auto storage_result =
             candidate_snapshots.append(
+                result.source,
                 normalized,
                 result.snapshot.bytes,
                 snapshot_path,

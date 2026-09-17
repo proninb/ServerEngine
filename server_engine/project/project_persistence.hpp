@@ -162,6 +162,11 @@ struct project_generation_freeze_telemetry final {
     std::uint32_t build_cache_mapped_baseline_sparse_frontend_borrowed_extents = 0;
     std::uint32_t build_cache_mapped_baseline_sparse_frontend_owned_extents = 0;
 
+    std::uint64_t build_cache_native_source_direct_bytes = 0;
+    std::uint32_t build_cache_native_source_direct_extents = 0;
+    std::uint32_t build_cache_native_source_direct_sections = 0;
+    std::uint32_t build_cache_native_source_direct_fallback = 0;
+
     std::uint64_t build_cache_native_frontend_direct_bytes = 0;
     std::uint32_t build_cache_native_frontend_direct_extents = 0;
     std::uint32_t build_cache_native_frontend_direct_sections = 0;
@@ -318,6 +323,27 @@ public:
         return
             contribution_generation_storage.has_value() &&
             contribution_generation_storage->valid();
+    }
+
+    [[nodiscard]] bool
+    snapshot_generation_move_owned() const noexcept {
+        return
+            snapshot_generation_storage.has_value() &&
+            snapshot_generation_storage->valid();
+    }
+
+    [[nodiscard]] status adopt_snapshot_generation_storage(
+        source_snapshot_generation_storage&& storage) noexcept {
+
+        if (!storage.valid())
+            return {status_code::invalid_argument};
+
+        snapshot_generation_storage.emplace(
+            std::move(storage));
+
+        return snapshot_generation_storage->valid()
+            ? status{}
+            : status{status_code::initialization_failed};
     }
 
     [[nodiscard]] status adopt_contribution_generation_storage(
@@ -642,6 +668,10 @@ private:
     // directly at the buffers released by construction SourceContribution.
     std::optional<source_contribution_generation_storage>
         contribution_generation_storage;
+
+    // R5E4-B2: lifetime owner for Build Cache source_bytes extents.
+    std::optional<source_snapshot_generation_storage>
+        snapshot_generation_storage;
 
     friend status freeze_project_generation(
         const project_context&,

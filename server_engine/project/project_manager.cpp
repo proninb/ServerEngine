@@ -1477,6 +1477,36 @@ status project_manager::construct_reserved(
             return {status_code::initialization_failed};
         }
 
+        const auto snapshot_handoff_begin =
+            std::chrono::steady_clock::now();
+
+        result =
+            candidate->release_snapshot_generation_storage(
+                finalized);
+
+        output.telemetry.
+            generation_finalize_snapshot_handoff_ns =
+                static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<
+                        std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() -
+                            snapshot_handoff_begin).count());
+
+        if (!result.ok()) {
+            abandon_construction();
+            return result;
+        }
+
+        output.telemetry.
+            generation_finalize_snapshot_move_owned =
+                finalized.snapshot_generation_move_owned();
+
+        if (!output.telemetry.
+                generation_finalize_snapshot_move_owned) {
+            abandon_construction();
+            return {status_code::initialization_failed};
+        }
+
         const auto materialize_begin =
             std::chrono::steady_clock::now();
 
@@ -1529,6 +1559,10 @@ status project_manager::construct_reserved(
             generation_finalize_build_cache_owned_section_bytes =
                 finalized.build_cache_owned_section_bytes();
         output.telemetry.
+            generation_finalize_build_cache_direct_source_bytes =
+                finalize_detail.
+                    build_cache_native_source_direct_bytes;
+        output.telemetry.
             generation_finalize_build_cache_direct_frontend_bytes =
                 finalize_detail.
                     build_cache_native_frontend_direct_bytes;
@@ -1561,6 +1595,18 @@ status project_manager::construct_reserved(
             generation_finalize_build_cache_direct_frontend_sections =
                 finalize_detail.
                     build_cache_native_frontend_direct_sections;
+        output.telemetry.
+            generation_finalize_build_cache_direct_source_extents =
+                finalize_detail.
+                    build_cache_native_source_direct_extents;
+        output.telemetry.
+            generation_finalize_build_cache_direct_source_sections =
+                finalize_detail.
+                    build_cache_native_source_direct_sections;
+        output.telemetry.
+            generation_finalize_build_cache_direct_source_fallback =
+                finalize_detail.
+                    build_cache_native_source_direct_fallback;
         output.telemetry.
             generation_finalize_build_cache_direct_frontend_fallback =
                 finalize_detail.

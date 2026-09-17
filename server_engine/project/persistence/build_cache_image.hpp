@@ -156,6 +156,13 @@ struct build_cache_encode_telemetry final {
     // Fresh-G0 canonical Frontend sections that borrow immutable Generation
     // chunks directly instead of copying them into the Build Cache staging
     // buffer. These are current-Generation bytes, not baseline borrows.
+    // R5E4-B2: full-G0 Source text pages are the Build Cache
+    // source_bytes section; no second text buffer is constructed.
+    std::uint64_t native_source_direct_bytes = 0;
+    std::uint32_t native_source_direct_extents = 0;
+    std::uint32_t native_source_direct_sections = 0;
+    std::uint32_t native_source_direct_fallback = 0;
+
     std::uint64_t native_frontend_direct_bytes = 0;
     std::uint32_t native_frontend_direct_extents = 0;
     std::uint32_t native_frontend_direct_sections = 0;

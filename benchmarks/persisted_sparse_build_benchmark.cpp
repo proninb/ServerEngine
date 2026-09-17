@@ -5369,6 +5369,8 @@ struct d4l3b_extent_case final {
              rebuild.telemetry.
                  generation_finalize_build_cache_owned_section_bytes +
              rebuild.telemetry.
+                 generation_finalize_build_cache_direct_source_bytes +
+             rebuild.telemetry.
                  generation_finalize_build_cache_direct_frontend_bytes +
              rebuild.telemetry.
                  generation_finalize_build_cache_direct_contribution_bytes &&
@@ -5430,6 +5432,19 @@ struct d4l3b_extent_case final {
          rebuild.telemetry.
              generation_finalize_build_cache_direct_contribution_fallback == 0);
 
+    const bool r5e4b2_native_source_bytes =
+        !finalized ||
+        (rebuild.telemetry.
+             generation_finalize_snapshot_move_owned &&
+         rebuild.telemetry.
+             generation_finalize_build_cache_direct_source_bytes != 0 &&
+         rebuild.telemetry.
+             generation_finalize_build_cache_direct_source_sections == 1 &&
+         rebuild.telemetry.
+             generation_finalize_build_cache_direct_source_extents != 0 &&
+         rebuild.telemetry.
+             generation_finalize_build_cache_direct_source_fallback == 0);
+
     const auto pass =
         canonical &&
         reconstructed_payloads == 0 &&
@@ -5442,7 +5457,8 @@ struct d4l3b_extent_case final {
         r5e3b2_frontend_runtime &&
         r5e3c1_source_snapshot_pages &&
         r5e4a_finalization_audit &&
-        r5e4b1_native_contributions;
+        r5e4b1_native_contributions &&
+        r5e4b2_native_source_bytes;
 
     std::cout
         << "R5C_CANONICAL_GENERATION_STORAGE_GATE,"
@@ -5705,6 +5721,16 @@ struct d4l3b_extent_case final {
         << ",contribution_generation_move_owned="
         << (rebuild.telemetry.
                 generation_finalize_contribution_move_owned
+            ? 1
+            : 0)
+        << ",snapshot_handoff_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_snapshot_handoff_ns) /
+            1'000'000.0
+        << ",snapshot_generation_move_owned="
+        << (rebuild.telemetry.
+                generation_finalize_snapshot_move_owned
             ? 1
             : 0)
         << ",segment_snapshot_ms="
@@ -5971,6 +5997,18 @@ struct d4l3b_extent_case final {
         << ",build_cache_owned_section_bytes="
         << rebuild.telemetry.
             generation_finalize_build_cache_owned_section_bytes
+        << ",build_cache_direct_source_bytes="
+        << rebuild.telemetry.
+            generation_finalize_build_cache_direct_source_bytes
+        << ",build_cache_direct_source_extents="
+        << rebuild.telemetry.
+            generation_finalize_build_cache_direct_source_extents
+        << ",build_cache_direct_source_sections="
+        << rebuild.telemetry.
+            generation_finalize_build_cache_direct_source_sections
+        << ",build_cache_direct_source_fallback="
+        << rebuild.telemetry.
+            generation_finalize_build_cache_direct_source_fallback
         << ",build_cache_direct_frontend_bytes="
         << rebuild.telemetry.
             generation_finalize_build_cache_direct_frontend_bytes

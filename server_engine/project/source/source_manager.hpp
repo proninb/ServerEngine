@@ -47,6 +47,49 @@ struct source_manager_native_generation_view final {
     bool complete = false;
 };
 
+// R5E4-B2: one immutable page of Source snapshot bytes. Text pages are
+// persistence carriers; moving this owner never changes byte addresses.
+struct source_snapshot_page final {
+    std::unique_ptr<char[]> bytes;
+    std::size_t capacity = 0;
+    std::size_t used = 0;
+
+    [[nodiscard]] std::span<const std::byte> view() const noexcept {
+        return {
+            reinterpret_cast<const std::byte*>(bytes.get()),
+            used,
+        };
+    }
+};
+
+// Lifetime owner transferred from construction Source Manager to Generation.
+// Only text pages move; path pages remain construction-only and die with the
+// Source Manager after READY publication.
+struct source_snapshot_generation_storage final {
+    std::vector<source_snapshot_page> text_pages;
+    std::size_t text_bytes = 0;
+    std::size_t source_count = 0;
+    bool complete = false;
+
+    [[nodiscard]] bool valid() const noexcept {
+        return complete &&
+            source_count != 0 &&
+            (text_bytes == 0 || !text_pages.empty());
+    }
+
+    [[nodiscard]] std::size_t page_count() const noexcept {
+        return text_pages.size();
+    }
+
+    [[nodiscard]] std::span<const std::byte> page(
+        std::size_t index) const noexcept {
+
+        return index < text_pages.size()
+            ? text_pages[index].view()
+            : std::span<const std::byte>{};
+    }
+};
+
 enum class source_acquire_result_kind : std::uint8_t {
     unchanged,
     missing,
@@ -152,6 +195,15 @@ public:
     [[nodiscard]] source_manager_native_generation_view
     native_generation() const noexcept;
 
+    // Fresh-G0 Build Cache source_bytes may borrow these pages directly.
+    [[nodiscard]] bool native_snapshot_text_complete() const noexcept;
+    [[nodiscard]] std::size_t native_snapshot_text_page_count() const noexcept;
+    [[nodiscard]] std::span<const std::byte> native_snapshot_text_page(
+        std::size_t index) const noexcept;
+
+    [[nodiscard]] status release_snapshot_generation_storage(
+        source_snapshot_generation_storage& output) noexcept;
+
     [[nodiscard]] status publish_memory(
         std::string_view normalized_path,
         std::string_view text,
@@ -192,6 +244,7 @@ private:
             snapshot_page_store&&) noexcept = default;
 
         [[nodiscard]] status append(
+            source_id source,
             std::string_view path,
             std::string_view text,
             std::string_view& path_view,
@@ -209,12 +262,26 @@ private:
 
         [[nodiscard]] std::size_t reserved_bytes() const noexcept;
 
+        [[nodiscard]] bool complete_text_generation(
+            std::size_t source_count,
+            std::uint64_t text_bytes) const noexcept;
+
+        [[nodiscard]] std::size_t text_page_count() const noexcept {
+            return text_pages.size();
+        }
+
+        [[nodiscard]] std::span<const std::byte> text_page(
+            std::size_t index) const noexcept {
+            return index < text_pages.size()
+                ? text_pages[index].view()
+                : std::span<const std::byte>{};
+        }
+
+        [[nodiscard]] status release_text_generation(
+            source_snapshot_generation_storage& output) noexcept;
+
     private:
-        struct page final {
-            std::unique_ptr<char[]> bytes;
-            std::size_t capacity = 0;
-            std::size_t used = 0;
-        };
+        using page = source_snapshot_page;
 
         [[nodiscard]] static status append_bytes(
             std::vector<page>& pages,
@@ -227,6 +294,12 @@ private:
 
         std::vector<page> path_pages;
         std::vector<page> text_pages;
+
+        source_id first_text_source{};
+        source_id last_text_source{};
+        std::size_t text_source_count = 0;
+        std::size_t text_bytes_value = 0;
+        bool text_source_order_contiguous = true;
     };
 
     friend class source_manager_update;

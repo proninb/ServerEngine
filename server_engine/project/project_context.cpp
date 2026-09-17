@@ -66,6 +66,27 @@ release_contribution_generation_storage(
 }
 
 
+status project_context::
+release_snapshot_generation_storage(
+    project_generation_storage& output) noexcept {
+
+    if (compiled == nullptr)
+        return {status_code::invalid_state};
+
+    source_snapshot_generation_storage storage;
+    auto result =
+        compiled->sources.
+            release_snapshot_generation_storage(
+                storage);
+
+    if (!result.ok())
+        return result;
+
+    return output.adopt_snapshot_generation_storage(
+        std::move(storage));
+}
+
+
 status project_context::activate_ready_generation(
     project_generation_storage&& storage,
     project_ready_generation_activation_telemetry* telemetry) noexcept {

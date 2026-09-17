@@ -5055,6 +5055,13 @@ status encode_build_cache_image(
     const auto source_bytes_count =
         project.sources().persistence_text_bytes();
 
+    const auto native_sources =
+        project.sources().native_generation();
+
+    const bool native_source_proof_available =
+        native_sources.complete &&
+        native_sources.physical.size() == source_count;
+
     const auto& frontend_summary =
         frontend.persistence_summary();
 
@@ -5139,6 +5146,72 @@ status encode_build_cache_image(
         owned != nullptr &&
         sparse != nullptr &&
         use_native_contribution_storage;
+
+    project_generation_segment
+        direct_source_bytes_segment;
+    bool direct_native_source_bytes = false;
+
+    const bool direct_source_candidate =
+        owned != nullptr &&
+        sparse != nullptr &&
+        native_source_proof_available &&
+        project.sources().
+            native_snapshot_text_complete();
+
+    if (direct_source_candidate) {
+        bool pages_valid = true;
+
+        for (std::size_t page_index = 0;
+             page_index <
+                project.sources().
+                    native_snapshot_text_page_count();
+             ++page_index) {
+
+            const auto page =
+                project.sources().
+                    native_snapshot_text_page(
+                        page_index);
+
+            if (!page.empty() &&
+                !direct_source_bytes_segment.append(
+                    page)) {
+                pages_valid = false;
+                break;
+            }
+        }
+
+        direct_native_source_bytes =
+            pages_valid &&
+            direct_source_bytes_segment.size() ==
+                source_bytes_count;
+
+        if (direct_native_source_bytes) {
+            sparse->sections[
+                section_index(
+                    build_cache_image_section::
+                        source_bytes)] =
+                            direct_source_bytes_segment;
+
+            if (telemetry != nullptr) {
+                telemetry->native_source_direct_bytes =
+                    direct_source_bytes_segment.size();
+                telemetry->native_source_direct_extents =
+                    static_cast<std::uint32_t>(
+                        direct_source_bytes_segment.
+                            extent_count());
+                telemetry->native_source_direct_sections =
+                    source_bytes_count != 0 ? 1u : 0u;
+            }
+        }
+        else if (telemetry != nullptr) {
+            telemetry->native_source_direct_fallback = 1;
+        }
+    }
+    else if (telemetry != nullptr &&
+             owned != nullptr &&
+             sparse != nullptr) {
+        telemetry->native_source_direct_fallback = 1;
+    }
 
     std::array<layout_section, build_cache_image_directory_count> layout{{
         {build_cache_image_section::source_directory,
@@ -5241,6 +5314,10 @@ status encode_build_cache_image(
                     return {status_code::not_available};
                 }
 
+                const bool native_source_section =
+                    index == section_index(
+                        build_cache_image_section::source_bytes);
+
                 const bool frontend_section =
                     index >= section_index(
                         build_cache_image_section::frontend_local_types) &&
@@ -5265,7 +5342,9 @@ status encode_build_cache_image(
 
                 auto& section = owned->sections[index];
 
-                if ((defer_native_frontend_staging &&
+                if ((direct_native_source_bytes &&
+                     native_source_section) ||
+                    (defer_native_frontend_staging &&
                      frontend_section) ||
                     (defer_native_contribution_staging &&
                      native_contribution_section)) {
@@ -5999,13 +6078,6 @@ status encode_build_cache_image(
     constexpr std::size_t minimum_sources_per_worker = 8192;
 
     bool native_source_encoded = false;
-
-    const auto native_sources =
-        project.sources().native_generation();
-
-    const bool native_source_proof_available =
-        native_sources.complete &&
-        native_sources.physical.size() == source_count;
 
     // D4G2: baseline-backed Source/Frontend reconstruction.
     //
@@ -7940,7 +8012,8 @@ status encode_build_cache_image(
                             static_cast<std::uint32_t>(
                                 text.size()));
 
-                        if (!text.empty()) {
+                        if (!text.empty() &&
+                            !direct_native_source_bytes) {
                             std::memcpy(
                                 source_bytes +
                                     static_cast<std::size_t>(
@@ -8136,7 +8209,8 @@ status encode_build_cache_image(
                 directory_record + 16,
                 static_cast<std::uint32_t>(text.size()));
 
-            if (!text.empty()) {
+            if (!text.empty() &&
+                !direct_native_source_bytes) {
                 std::memcpy(
                     source_bytes + static_cast<std::size_t>(text_cursor),
                     text.data(),
