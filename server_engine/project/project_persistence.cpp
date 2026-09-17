@@ -124,6 +124,7 @@ status project_generation_storage::materialize_owned_contiguous() noexcept {
                 return result;
 
             build_sections.reset();
+            build_owned_sections.reset();
         }
 
         baseline_reuse_provenance =
@@ -843,7 +844,8 @@ status freeze_project_generation(
             : nullptr,
         &build_cache_provenance,
         &build_cache_borrowed,
-        &build_cache_sparse);
+        &build_cache_sparse,
+        &output.build_owned_sections);
 
     if (telemetry != nullptr) {
         telemetry->build_cache_ns =
@@ -973,29 +975,84 @@ status freeze_project_generation(
     if (!result.ok())
         return result;
 
-    result =
-        build_cache_sparse.any()
-        ? build_cache.bind_encoded_sparse(
-            output.build,
-            build_cache_borrowed,
-            build_cache_sparse)
-        : build_cache_borrowed.any()
-            ? build_cache.bind_encoded_mixed(
-                output.build,
-                build_cache_borrowed)
-            : build_cache.bind(output.build);
-    if (!result.ok())
-        return result;
+    // R5E2D-B_GENERATION_SECTION_BIND
+    if (output.build_owned_sections.active()) {
+        std::array<
+            project_generation_segment,
+            build_cache_image_directory_count>
+            section_values{};
 
-    result = output.build_sections.
-        bind_validated_sections(
-            output.build,
-            build_cache,
+        for (std::size_t index = 0;
+             index < section_values.size();
+             ++index) {
+
+            if (!build_cache_sparse.sections[index].empty()) {
+                section_values[index] =
+                    build_cache_sparse.sections[index];
+                continue;
+            }
+
+            if (!build_cache_borrowed.sections[index].empty()) {
+                section_values[index] =
+                    project_generation_segment{
+                        build_cache_borrowed.sections[index]};
+                continue;
+            }
+
+            const auto& section =
+                output.build_owned_sections.sections[index];
+
+            section_values[index] =
+                project_generation_segment{
+                    std::span<const std::byte>{
+                        section.data(),
+                        section.size()}};
+        }
+
+        result =
+            build_cache.bind_sectioned(
+                std::span<const std::byte>{
+                    output.build.data(),
+                    output.build.size()},
+                section_values);
+        if (!result.ok())
+            return result;
+
+        result =
+            output.build_sections.bind_sectioned(
+                std::span<const std::byte>{
+                    output.build.data(),
+                    output.build.size()},
+                section_values,
+                output.build_owned_sections.logical_size);
+        if (!result.ok())
+            return result;
+    }
+    else {
+        result =
             build_cache_sparse.any()
-                ? &build_cache_sparse
-                : nullptr);
-    if (!result.ok())
-        return result;
+            ? build_cache.bind_encoded_sparse(
+                output.build,
+                build_cache_borrowed,
+                build_cache_sparse)
+            : build_cache_borrowed.any()
+                ? build_cache.bind_encoded_mixed(
+                    output.build,
+                    build_cache_borrowed)
+                : build_cache.bind(output.build);
+        if (!result.ok())
+            return result;
+
+        result = output.build_sections.
+            bind_validated_sections(
+                output.build,
+                build_cache,
+                build_cache_sparse.any()
+                    ? &build_cache_sparse
+                    : nullptr);
+        if (!result.ok())
+            return result;
+    }
 
     if (telemetry != nullptr)
         telemetry->bind_ns = elapsed(bind_begin);

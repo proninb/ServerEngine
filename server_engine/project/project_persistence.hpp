@@ -427,6 +427,7 @@ public:
         native_change = {};
         frontend_generation_lifetime = {};
         build_sections.reset();
+        build_owned_sections.reset();
         build.clear();
     }
 
@@ -493,6 +494,7 @@ private:
     std::vector<std::byte> change_fallback;
     std::span<const std::byte> native_change;
     std::vector<std::byte> build;
+    build_cache_encode_owned_sections build_owned_sections;
     build_cache_generation_segments build_sections;
     source_frontend_block_store_lifetime frontend_generation_lifetime;
 

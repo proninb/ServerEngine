@@ -194,6 +194,26 @@ struct build_cache_encode_sparse_sections final {
     }
 };
 
+// R5E2D-B physical ownership for Build Cache sections that still require
+// encoding. Prefix/directory bytes remain in the legacy output vector while
+// each staged logical section owns only its exact payload bytes.
+struct build_cache_encode_owned_sections final {
+    std::array<
+        std::vector<std::byte>,
+        build_cache_image_directory_count> sections{};
+    std::size_t logical_size = 0;
+
+    void reset() noexcept {
+        for (auto& section : sections)
+            section.clear();
+        logical_size = 0;
+    }
+
+    [[nodiscard]] bool active() const noexcept {
+        return logical_size != 0;
+    }
+};
+
 
 // Mmap-native BUILD-only baseline. The view contains Source bytes, Parser-local
 // interface tables, SourceContribution append arenas, and Builder lineage caches.
@@ -620,6 +640,7 @@ private:
     build_cache_encode_telemetry* telemetry,
     build_cache_encode_provenance* provenance = nullptr,
     build_cache_encode_borrowed_sections* borrowed = nullptr,
-    build_cache_encode_sparse_sections* sparse = nullptr) noexcept;
+    build_cache_encode_sparse_sections* sparse = nullptr,
+    build_cache_encode_owned_sections* owned = nullptr) noexcept;
 
 } // namespace cw::server

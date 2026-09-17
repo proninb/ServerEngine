@@ -4940,7 +4940,8 @@ status encode_build_cache_image(
     build_cache_encode_telemetry* telemetry,
     build_cache_encode_provenance* provenance,
     build_cache_encode_borrowed_sections* borrowed,
-    build_cache_encode_sparse_sections* sparse) noexcept {
+    build_cache_encode_sparse_sections* sparse,
+    build_cache_encode_owned_sections* owned) noexcept {
 
     output.clear();
     if (telemetry != nullptr)
@@ -4951,6 +4952,8 @@ status encode_build_cache_image(
         *borrowed = {};
     if (sparse != nullptr)
         *sparse = {};
+    if (owned != nullptr)
+        owned->reset();
 
     build_cache_section_identity_tracker
         section_identity{provenance};
@@ -5038,6 +5041,22 @@ status encode_build_cache_image(
         return {status_code::not_available};
     }
 
+    const auto* native_block_storage =
+        frontend.native_frontend_block_bulk_storage();
+
+    const bool use_native_block_storage =
+        std::endian::native == std::endian::little &&
+        native_block_storage != nullptr &&
+        native_block_storage->local_type_count() == local_type_count &&
+        native_block_storage->type_slot_count() == type_slot_count &&
+        native_block_storage->object_slot_count() == object_slot_count &&
+        native_block_storage->member_slot_count() == member_slot_count;
+
+    const bool defer_native_frontend_staging =
+        owned != nullptr &&
+        sparse != nullptr &&
+        use_native_block_storage;
+
     std::array<layout_section, build_cache_image_directory_count> layout{{
         {build_cache_image_section::source_directory,
             source_directory_record_size, source_count},
@@ -5111,10 +5130,58 @@ status encode_build_cache_image(
     if (cursor > (std::numeric_limits<std::size_t>::max)())
         return {status_code::not_available};
 
+    const auto logical_size =
+        static_cast<std::size_t>(cursor);
+
     try {
-        output.assign(
-            static_cast<std::size_t>(cursor),
-            std::byte{0});
+        if (owned != nullptr) {
+            // R5E2D-B: section-owned Build Cache staging. The legacy vector
+            // owns only the immutable prefix; logical sections own exact bytes.
+            output.assign(
+                build_cache_image_prefix_size,
+                std::byte{0});
+
+            owned->logical_size = logical_size;
+
+            for (std::size_t index = 0;
+                 index < layout.size();
+                 ++index) {
+
+                const auto& value = layout[index];
+                std::uint64_t byte_count = 0;
+                if (!multiply_u64(
+                        value.count,
+                        value.record_size,
+                        byte_count) ||
+                    byte_count >
+                        (std::numeric_limits<std::size_t>::max)()) {
+                    return {status_code::not_available};
+                }
+
+                const bool frontend_section =
+                    index >= section_index(
+                        build_cache_image_section::frontend_local_types) &&
+                    index <= section_index(
+                        build_cache_image_section::frontend_member_slots);
+
+                auto& section = owned->sections[index];
+
+                if (defer_native_frontend_staging &&
+                    frontend_section) {
+                    section.clear();
+                    continue;
+                }
+
+                section.assign(
+                    static_cast<std::size_t>(byte_count),
+                    std::byte{0});
+            }
+        }
+        else {
+            output.assign(
+                logical_size,
+                std::byte{0});
+        }
     }
     catch (const std::bad_alloc&) {
         return {status_code::not_available};
@@ -5126,8 +5193,17 @@ status encode_build_cache_image(
     auto* base = output.data();
     const auto section_data =
         [&](build_cache_image_section kind) noexcept {
+            const auto index = section_index(kind);
+
+            if (owned != nullptr) {
+                auto& section = owned->sections[index];
+                return section.empty()
+                    ? base
+                    : section.data();
+            }
+
             return base + static_cast<std::size_t>(
-                layout[section_index(kind)].offset);
+                layout[index].offset);
         };
 
     const auto* baseline_build_cache =
@@ -5339,17 +5415,6 @@ status encode_build_cache_image(
         static_cast<bool>(native_frontend) &&
         native_frontend.size() == source_count;
 
-    const auto* native_block_storage =
-        frontend.native_frontend_block_bulk_storage();
-
-    const bool use_native_block_storage =
-        std::endian::native == std::endian::little &&
-        native_block_storage != nullptr &&
-        native_block_storage->local_type_count() == local_type_count &&
-        native_block_storage->type_slot_count() == type_slot_count &&
-        native_block_storage->object_slot_count() == object_slot_count &&
-        native_block_storage->member_slot_count() == member_slot_count;
-
     // R5E2B_DIRECT_FRONTEND_SECTIONS
     // Fresh G0 Frontend payload is already persistence-native inside immutable
     // Generation chunks. Prefer those chunks as the exact Build Cache section
@@ -5499,10 +5564,12 @@ status encode_build_cache_image(
             add_extent_count(direct_object_slots) &&
             add_extent_count(direct_member_slots);
 
-        // One prefix extent plus every non-direct logical section must still
-        // fit the final fixed-capacity Generation carrier.
+        // R5E2D-B/R5E2D-A: reserve one extent for every non-direct
+        // section plus prefix and every possible canonical alignment gap.
         constexpr std::size_t direct_carrier_reserve =
-            build_cache_image_directory_count - 4 + 1;
+            1 +
+            (build_cache_image_directory_count - 4) +
+            build_cache_image_directory_count;
 
         static_assert(
             project_generation_segment_max_extents >
@@ -5604,6 +5671,58 @@ status encode_build_cache_image(
         if (telemetry != nullptr &&
             sparse != nullptr) {
             telemetry->native_frontend_direct_fallback = 1;
+        }
+
+        // R5E2D-B_FRONTEND_FALLBACK_STORAGE
+        if (defer_native_frontend_staging) {
+            try {
+                constexpr std::array<
+                    build_cache_image_section,
+                    4> frontend_sections{{
+                    build_cache_image_section::frontend_local_types,
+                    build_cache_image_section::frontend_type_slots,
+                    build_cache_image_section::frontend_object_slots,
+                    build_cache_image_section::frontend_member_slots,
+                }};
+
+                for (const auto kind : frontend_sections) {
+                    const auto index = section_index(kind);
+                    const auto& value = layout[index];
+
+                    std::uint64_t byte_count = 0;
+                    if (!multiply_u64(
+                            value.count,
+                            value.record_size,
+                            byte_count) ||
+                        byte_count >
+                            (std::numeric_limits<std::size_t>::max)()) {
+                        return {status_code::not_available};
+                    }
+
+                    owned->sections[index].assign(
+                        static_cast<std::size_t>(byte_count),
+                        std::byte{0});
+                }
+            }
+            catch (const std::bad_alloc&) {
+                return {status_code::not_available};
+            }
+            catch (const std::length_error&) {
+                return {status_code::not_available};
+            }
+
+            local_types =
+                section_data(
+                    build_cache_image_section::frontend_local_types);
+            type_slots =
+                section_data(
+                    build_cache_image_section::frontend_type_slots);
+            object_slots =
+                section_data(
+                    build_cache_image_section::frontend_object_slots);
+            member_slots =
+                section_data(
+                    build_cache_image_section::frontend_member_slots);
         }
 
         if (!copy_native_pages(
@@ -8844,16 +8963,35 @@ status encode_build_cache_image(
                 return;
             }
 
-            std::span<const std::byte> crc_bytes{
-                base + static_cast<std::size_t>(value.offset),
-                static_cast<std::size_t>(byte_count)};
+            const auto expected_crc_bytes =
+                static_cast<std::size_t>(byte_count);
+
+            std::span<const std::byte> crc_bytes;
+
+            if (owned != nullptr) {
+                const auto& section =
+                    owned->sections[index];
+
+                crc_bytes = {
+                    section.empty()
+                        ? base
+                        : section.data(),
+                    section.size(),
+                };
+            }
+            else {
+                crc_bytes = {
+                    base + static_cast<std::size_t>(value.offset),
+                    expected_crc_bytes,
+                };
+            }
 
             if (borrowed != nullptr) {
                 const auto exact =
                     borrowed->sections[index];
 
                 if (!exact.empty()) {
-                    if (exact.size() != crc_bytes.size()) {
+                    if (exact.size() != expected_crc_bytes) {
                         crc_failed.store(
                             true,
                             std::memory_order_relaxed);
@@ -8871,7 +9009,7 @@ status encode_build_cache_image(
                     sparse->sections[index];
 
                 if (segment.size() !=
-                    crc_bytes.size()) {
+                    expected_crc_bytes) {
                     crc_failed.store(
                         true,
                         std::memory_order_relaxed);
@@ -8893,6 +9031,13 @@ status encode_build_cache_image(
                 value.crc64 = crc;
             }
             else {
+                if (crc_bytes.size() != expected_crc_bytes) {
+                    crc_failed.store(
+                        true,
+                        std::memory_order_relaxed);
+                    return;
+                }
+
                 value.crc64 =
                     persistence_crc64(
                         crc_bytes);
@@ -8957,7 +9102,7 @@ status encode_build_cache_image(
         base + header_flags_offset,
         flag_frontend_complete | flag_contributions_complete);
     write_u64(base + 32, directory_offset);
-    write_u64(base + 40, output.size());
+    write_u64(base + 40, logical_size);
     write_u64(base + header_source_count_offset, source_count);
     write_u64(base + header_frontend_count_offset, frontend_count);
     write_u64(base + header_source_bytes_offset, source_bytes_count);
@@ -9043,21 +9188,70 @@ status encode_build_cache_image(
     const auto bind_begin =
         std::chrono::steady_clock::now();
 
-    auto result =
-        sparse != nullptr &&
-            sparse->any()
-        ? validation.bind_encoded_sparse(
-            output,
-            borrowed != nullptr
-                ? *borrowed
-                : build_cache_encode_borrowed_sections{},
-            *sparse)
-        : borrowed != nullptr &&
-            borrowed->any()
-            ? validation.bind_encoded_mixed(
+    status result;
+
+    if (owned != nullptr) {
+        // R5E2D-B_SECTIONED_VALIDATION
+        std::array<
+            project_generation_segment,
+            build_cache_image_directory_count>
+            section_values{};
+
+        for (std::size_t index = 0;
+             index < section_values.size();
+             ++index) {
+
+            if (sparse != nullptr &&
+                !sparse->sections[index].empty()) {
+
+                section_values[index] =
+                    sparse->sections[index];
+                continue;
+            }
+
+            if (borrowed != nullptr &&
+                !borrowed->sections[index].empty()) {
+
+                section_values[index] =
+                    project_generation_segment{
+                        borrowed->sections[index]};
+                continue;
+            }
+
+            const auto& section =
+                owned->sections[index];
+
+            section_values[index] =
+                project_generation_segment{
+                    std::span<const std::byte>{
+                        section.data(),
+                        section.size()}};
+        }
+
+        result =
+            validation.bind_sectioned(
+                std::span<const std::byte>{
+                    output.data(),
+                    output.size()},
+                section_values);
+    }
+    else {
+        result =
+            sparse != nullptr &&
+                sparse->any()
+            ? validation.bind_encoded_sparse(
                 output,
-                *borrowed)
-            : validation.bind(output);
+                borrowed != nullptr
+                    ? *borrowed
+                    : build_cache_encode_borrowed_sections{},
+                *sparse)
+            : borrowed != nullptr &&
+                borrowed->any()
+                ? validation.bind_encoded_mixed(
+                    output,
+                    *borrowed)
+                : validation.bind(output);
+    }
 
     if (telemetry != nullptr)
         telemetry->bind_ns =
