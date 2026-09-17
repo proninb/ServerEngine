@@ -265,6 +265,42 @@ source_contribution_storage_usage source_contribution_cache::storage_usage() con
     return output;
 }
 
+status source_contribution_cache::release_native_generation_storage(
+    source_contribution_generation_storage& output) noexcept {
+
+    output = {};
+
+    if (baseline_cache != nullptr ||
+        !provenance_complete) {
+        return {status_code::invalid_state};
+    }
+
+    const auto native = native_generation();
+    if (!native.complete ||
+        native.sources.empty() ||
+        native.construction.empty()) {
+        return {status_code::initialization_failed};
+    }
+
+    output.sources = committed.sources.release_local_values();
+    output.types = committed.types.release_local_values();
+    output.members = committed.members.release_local_values();
+    output.modifiers = committed.modifiers.release_local_values();
+    output.enum_values = committed.enum_values.release_local_values();
+    output.objects = committed.objects.release_local_values();
+    output.links = committed.links.release_local_values();
+    output.construction =
+        committed.construction.release_local_values();
+    output.complete = true;
+
+    if (!output.valid())
+        return {status_code::initialization_failed};
+
+    statistics_value = {};
+    provenance_complete = false;
+    return {};
+}
+
 source_contribution_cache_update source_contribution_cache::begin_rebuild() noexcept {
     return source_contribution_cache_update{*this};
 }

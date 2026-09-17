@@ -1236,6 +1236,89 @@ status project_manager::construct_reserved(
                         std::chrono::steady_clock::now() -
                         finalize_freeze_begin).count());
 
+        output.telemetry.generation_finalize_freeze_internal_ns =
+            finalize_detail.internal_ns;
+        output.telemetry.generation_finalize_freeze_roots_ns =
+            finalize_detail.roots_ns;
+
+        output.telemetry.generation_finalize_freeze_source_manager_ns =
+            finalize_detail.source_manager_ns;
+        output.telemetry.generation_finalize_freeze_source_manager_internal_ns =
+            finalize_detail.source_manager_internal_ns;
+        output.telemetry.generation_finalize_freeze_source_manager_preflight_ns =
+            finalize_detail.source_manager_preflight_ns;
+        output.telemetry.generation_finalize_freeze_source_manager_layout_ns =
+            finalize_detail.source_manager_layout_ns;
+        output.telemetry.generation_finalize_freeze_source_manager_allocate_zero_ns =
+            finalize_detail.source_manager_allocate_zero_ns;
+        output.telemetry.generation_finalize_freeze_source_manager_source_records_ns =
+            finalize_detail.source_manager_source_records_ns;
+        output.telemetry.generation_finalize_freeze_source_manager_roots_ns =
+            finalize_detail.source_manager_roots_ns;
+        output.telemetry.generation_finalize_freeze_source_manager_path_index_ns =
+            finalize_detail.source_manager_path_index_ns;
+        output.telemetry.generation_finalize_freeze_source_manager_file_identity_ns =
+            finalize_detail.source_manager_file_identity_ns;
+        output.telemetry.generation_finalize_freeze_source_manager_directory_identity_ns =
+            finalize_detail.source_manager_directory_identity_ns;
+        output.telemetry.generation_finalize_freeze_source_manager_crc_wall_ns =
+            finalize_detail.source_manager_crc_wall_ns;
+        output.telemetry.generation_finalize_freeze_source_manager_prefix_directory_encode_ns =
+            finalize_detail.source_manager_prefix_directory_encode_ns;
+        output.telemetry.generation_finalize_freeze_source_manager_directory_crc_ns =
+            finalize_detail.source_manager_directory_crc_ns;
+        output.telemetry.generation_finalize_freeze_source_manager_header_crc_ns =
+            finalize_detail.source_manager_header_crc_ns;
+        output.telemetry.generation_finalize_freeze_source_manager_bind_ns =
+            finalize_detail.source_manager_bind_ns;
+        output.telemetry.generation_finalize_freeze_source_manager_verify_ns =
+            finalize_detail.source_manager_verify_ns;
+        output.telemetry.generation_finalize_freeze_source_manager_segment_validate_ns =
+            finalize_detail.source_manager_segment_validate_ns;
+        output.telemetry.generation_finalize_freeze_source_manager_identity_copy_ns =
+            finalize_detail.source_manager_identity_copy_ns;
+        output.telemetry.generation_finalize_freeze_source_manager_mode =
+            finalize_detail.source_manager_mode;
+        output.telemetry.generation_finalize_freeze_source_manager_extent_count =
+            finalize_detail.source_manager_extent_count;
+
+        output.telemetry.generation_finalize_freeze_change_state_ns =
+            finalize_detail.change_state_ns;
+
+        output.telemetry.generation_finalize_freeze_build_cache_ns =
+            finalize_detail.build_cache_ns;
+        output.telemetry.generation_finalize_freeze_build_cache_layout_allocate_ns =
+            finalize_detail.build_cache_layout_allocate_ns;
+        output.telemetry.generation_finalize_freeze_build_cache_source_frontend_ns =
+            finalize_detail.build_cache_source_frontend_ns;
+        output.telemetry.generation_finalize_freeze_build_cache_contribution_ns =
+            finalize_detail.build_cache_contribution_ns;
+        output.telemetry.generation_finalize_freeze_build_cache_graph_ns =
+            finalize_detail.build_cache_graph_ns;
+        output.telemetry.generation_finalize_freeze_build_cache_change_identity_ns =
+            finalize_detail.build_cache_change_identity_ns;
+        output.telemetry.generation_finalize_freeze_build_cache_section_crc_ns =
+            finalize_detail.build_cache_section_crc_ns;
+        output.telemetry.generation_finalize_freeze_build_cache_header_directory_ns =
+            finalize_detail.build_cache_header_directory_ns;
+        output.telemetry.generation_finalize_freeze_build_cache_bind_ns =
+            finalize_detail.build_cache_bind_ns;
+        output.telemetry.generation_finalize_freeze_build_cache_verify_ns =
+            finalize_detail.build_cache_verify_ns;
+
+        output.telemetry.generation_finalize_freeze_bind_ns =
+            finalize_detail.bind_ns;
+        output.telemetry.generation_finalize_freeze_verify_change_state_ns =
+            finalize_detail.verify_change_state_ns;
+        output.telemetry.generation_finalize_freeze_verify_build_cache_ns =
+            finalize_detail.verify_build_cache_ns;
+        output.telemetry.generation_finalize_freeze_audit_staging_ns =
+            finalize_detail.audit_staging_ns;
+        output.telemetry.generation_finalize_freeze_audit_validation_ns =
+            finalize_detail.audit_validation_ns;
+        output.telemetry.generation_finalize_freeze_audit_unclassified_ns =
+            finalize_detail.audit_unclassified_ns;
+
         if (!result.ok()) {
             abandon_construction();
             return result;
@@ -1364,6 +1447,36 @@ status project_manager::construct_reserved(
             return result;
         }
 
+        const auto contribution_handoff_begin =
+            std::chrono::steady_clock::now();
+
+        result =
+            candidate->release_contribution_generation_storage(
+                finalized);
+
+        output.telemetry.
+            generation_finalize_contribution_handoff_ns =
+                static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<
+                        std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() -
+                            contribution_handoff_begin).count());
+
+        if (!result.ok()) {
+            abandon_construction();
+            return result;
+        }
+
+        output.telemetry.
+            generation_finalize_contribution_move_owned =
+                finalized.contribution_generation_move_owned();
+
+        if (!output.telemetry.
+                generation_finalize_contribution_move_owned) {
+            abandon_construction();
+            return {status_code::initialization_failed};
+        }
+
         const auto materialize_begin =
             std::chrono::steady_clock::now();
 
@@ -1420,6 +1533,10 @@ status project_manager::construct_reserved(
                 finalize_detail.
                     build_cache_native_frontend_direct_bytes;
         output.telemetry.
+            generation_finalize_build_cache_direct_contribution_bytes =
+                finalize_detail.
+                    build_cache_native_contribution_direct_bytes;
+        output.telemetry.
             generation_finalize_build_cache_physical_bytes =
                 finalized.build_cache_physical_bytes();
         output.telemetry.
@@ -1448,6 +1565,18 @@ status project_manager::construct_reserved(
             generation_finalize_build_cache_direct_frontend_fallback =
                 finalize_detail.
                     build_cache_native_frontend_direct_fallback;
+        output.telemetry.
+            generation_finalize_build_cache_direct_contribution_extents =
+                finalize_detail.
+                    build_cache_native_contribution_direct_extents;
+        output.telemetry.
+            generation_finalize_build_cache_direct_contribution_sections =
+                finalize_detail.
+                    build_cache_native_contribution_direct_sections;
+        output.telemetry.
+            generation_finalize_build_cache_direct_contribution_fallback =
+                finalize_detail.
+                    build_cache_native_contribution_direct_fallback;
 
         project_ready_generation_activation_telemetry
             activation_detail;

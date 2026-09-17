@@ -27,12 +27,14 @@ struct source_contribution_type_ref final {
     identity_ref identity = nullptr;
     source_fact_range modifiers{};
     intrinsic_type intrinsic = intrinsic_type::none;
+    std::uint8_t reserved[3]{};
 };
 
 struct source_contribution_member final {
     source_contribution_type_ref type{};
     string_id name{};
     source_member_access access = source_member_access::public_access;
+    std::uint8_t reserved[3]{};
 };
 
 struct source_contribution_enum_value final {
@@ -68,6 +70,7 @@ struct source_contribution_type final {
 // vector/allocation is required, including for a million one-type Sources.
 struct source_contribution_state final {
     source_id source{};
+    std::uint32_t reserved = 0;
     source_fact_range types{};
     source_fact_range members{};
     source_fact_range modifiers{};
@@ -91,6 +94,7 @@ struct source_construction_state final {
     std::uint32_t enum_fixed = 0;
     intrinsic_type fixed_underlying = intrinsic_type::none;
     source_contribution_type_kind kind = source_contribution_type_kind::record;
+    std::uint8_t reserved[2]{};
 };
 
 struct source_contribution_statistics final {
@@ -123,6 +127,54 @@ struct source_contribution_data_view final {
     mapped_vector_view<source_construction_state> construction;
     source_contribution_statistics statistics{};
     bool complete = false;
+};
+
+// Full-G0 persistence-native view. These spans are valid only while the
+// construction contribution cache owns its local vectors. R5E4-B1 transfers
+// those vector buffers to the committed Generation without moving their bytes.
+struct source_contribution_native_generation_view final {
+    std::span<const source_contribution_state> sources;
+    std::span<const source_contribution_type> types;
+    std::span<const source_contribution_member> members;
+    std::span<const source_type_modifier> modifiers;
+    std::span<const source_contribution_enum_value> enum_values;
+    std::span<const source_contribution_object> objects;
+    std::span<const source_contribution_link> links;
+    std::span<const source_construction_state> construction;
+    bool complete = false;
+};
+
+// Move-owned lifetime carrier for Build Cache sections that directly reference
+// full-G0 SourceContribution storage. It is not a second semantic owner: the
+// construction cache releases these exact vector buffers at READY handoff.
+struct source_contribution_generation_storage final {
+    std::vector<source_contribution_state> sources;
+    std::vector<source_contribution_type> types;
+    std::vector<source_contribution_member> members;
+    std::vector<source_type_modifier> modifiers;
+    std::vector<source_contribution_enum_value> enum_values;
+    std::vector<source_contribution_object> objects;
+    std::vector<source_contribution_link> links;
+    std::vector<source_construction_state> construction;
+    bool complete = false;
+
+    [[nodiscard]] bool valid() const noexcept {
+        return complete &&
+            !sources.empty() &&
+            !construction.empty();
+    }
+
+    [[nodiscard]] std::size_t bytes() const noexcept {
+        return
+            sources.size() * sizeof(source_contribution_state) +
+            types.size() * sizeof(source_contribution_type) +
+            members.size() * sizeof(source_contribution_member) +
+            modifiers.size() * sizeof(source_type_modifier) +
+            enum_values.size() * sizeof(source_contribution_enum_value) +
+            objects.size() * sizeof(source_contribution_object) +
+            links.size() * sizeof(source_contribution_link) +
+            construction.size() * sizeof(source_construction_state);
+    }
 };
 
 class source_contribution_cache_update;
@@ -166,6 +218,29 @@ public:
             provenance_complete,
         };
     }
+
+    [[nodiscard]] source_contribution_native_generation_view
+    native_generation() const noexcept {
+        if (baseline_cache != nullptr ||
+            !provenance_complete) {
+            return {};
+        }
+
+        return {
+            committed.sources.local_values(),
+            committed.types.local_values(),
+            committed.members.local_values(),
+            committed.modifiers.local_values(),
+            committed.enum_values.local_values(),
+            committed.objects.local_values(),
+            committed.links.local_values(),
+            committed.construction.local_values(),
+            true,
+        };
+    }
+
+    [[nodiscard]] status release_native_generation_storage(
+        source_contribution_generation_storage& output) noexcept;
 
     // Compares Parser output directly with retained build provenance. This is a
     // semantic-delta filter only: identity_ref equality and Source-local payload

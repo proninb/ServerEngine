@@ -160,6 +160,13 @@ struct build_cache_encode_telemetry final {
     std::uint32_t native_frontend_direct_extents = 0;
     std::uint32_t native_frontend_direct_sections = 0;
     std::uint32_t native_frontend_direct_fallback = 0;
+
+    // R5E4-B1: full-G0 SourceContribution sections directly borrow the
+    // construction vectors whose ownership is transferred to Generation.
+    std::uint64_t native_contribution_direct_bytes = 0;
+    std::uint32_t native_contribution_direct_extents = 0;
+    std::uint32_t native_contribution_direct_sections = 0;
+    std::uint32_t native_contribution_direct_fallback = 0;
 };
 
 struct build_cache_encode_borrowed_sections final {

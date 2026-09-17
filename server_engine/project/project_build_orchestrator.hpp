@@ -62,6 +62,53 @@ struct project_build_telemetry final {
     // READY owner before project_manager publishes the Project.
     std::uint64_t generation_finalize_ns = 0;
     std::uint64_t generation_finalize_freeze_ns = 0;
+
+    // R5E4-A: exact construction-to-READY freeze accounting. These are
+    // observational only; they do not alter publication or persistence.
+    std::uint64_t generation_finalize_freeze_internal_ns = 0;
+    std::uint64_t generation_finalize_freeze_roots_ns = 0;
+
+    std::uint64_t generation_finalize_freeze_source_manager_ns = 0;
+    std::uint64_t generation_finalize_freeze_source_manager_internal_ns = 0;
+    std::uint64_t generation_finalize_freeze_source_manager_preflight_ns = 0;
+    std::uint64_t generation_finalize_freeze_source_manager_layout_ns = 0;
+    std::uint64_t generation_finalize_freeze_source_manager_allocate_zero_ns = 0;
+    std::uint64_t generation_finalize_freeze_source_manager_source_records_ns = 0;
+    std::uint64_t generation_finalize_freeze_source_manager_roots_ns = 0;
+    std::uint64_t generation_finalize_freeze_source_manager_path_index_ns = 0;
+    std::uint64_t generation_finalize_freeze_source_manager_file_identity_ns = 0;
+    std::uint64_t generation_finalize_freeze_source_manager_directory_identity_ns = 0;
+    std::uint64_t generation_finalize_freeze_source_manager_crc_wall_ns = 0;
+    std::uint64_t generation_finalize_freeze_source_manager_prefix_directory_encode_ns = 0;
+    std::uint64_t generation_finalize_freeze_source_manager_directory_crc_ns = 0;
+    std::uint64_t generation_finalize_freeze_source_manager_header_crc_ns = 0;
+    std::uint64_t generation_finalize_freeze_source_manager_bind_ns = 0;
+    std::uint64_t generation_finalize_freeze_source_manager_verify_ns = 0;
+    std::uint64_t generation_finalize_freeze_source_manager_segment_validate_ns = 0;
+    std::uint64_t generation_finalize_freeze_source_manager_identity_copy_ns = 0;
+    std::uint32_t generation_finalize_freeze_source_manager_mode = 0;
+    std::uint32_t generation_finalize_freeze_source_manager_extent_count = 0;
+
+    std::uint64_t generation_finalize_freeze_change_state_ns = 0;
+
+    std::uint64_t generation_finalize_freeze_build_cache_ns = 0;
+    std::uint64_t generation_finalize_freeze_build_cache_layout_allocate_ns = 0;
+    std::uint64_t generation_finalize_freeze_build_cache_source_frontend_ns = 0;
+    std::uint64_t generation_finalize_freeze_build_cache_contribution_ns = 0;
+    std::uint64_t generation_finalize_freeze_build_cache_graph_ns = 0;
+    std::uint64_t generation_finalize_freeze_build_cache_change_identity_ns = 0;
+    std::uint64_t generation_finalize_freeze_build_cache_section_crc_ns = 0;
+    std::uint64_t generation_finalize_freeze_build_cache_header_directory_ns = 0;
+    std::uint64_t generation_finalize_freeze_build_cache_bind_ns = 0;
+    std::uint64_t generation_finalize_freeze_build_cache_verify_ns = 0;
+
+    std::uint64_t generation_finalize_freeze_bind_ns = 0;
+    std::uint64_t generation_finalize_freeze_verify_change_state_ns = 0;
+    std::uint64_t generation_finalize_freeze_verify_build_cache_ns = 0;
+    std::uint64_t generation_finalize_freeze_audit_staging_ns = 0;
+    std::uint64_t generation_finalize_freeze_audit_validation_ns = 0;
+    std::uint64_t generation_finalize_freeze_audit_unclassified_ns = 0;
+
     std::uint64_t generation_finalize_materialize_owned_ns = 0;
     std::uint64_t generation_finalize_compiled_bytes = 0;
     std::uint64_t generation_finalize_compiled_build_ns = 0;
@@ -74,6 +121,8 @@ struct project_build_telemetry final {
     std::uint64_t generation_finalize_release_graph_ns = 0;
     std::uint64_t generation_finalize_frontend_handoff_ns = 0;
     bool generation_finalize_frontend_move_owned = false;
+    std::uint64_t generation_finalize_contribution_handoff_ns = 0;
+    bool generation_finalize_contribution_move_owned = false;
     std::uint64_t generation_finalize_segment_snapshot_ns = 0;
     std::uint64_t generation_finalize_activate_ready_ns = 0;
     std::uint64_t generation_finalize_activate_owner_ns = 0;
@@ -108,6 +157,7 @@ struct project_build_telemetry final {
     std::uint64_t generation_finalize_build_cache_prefix_bytes = 0;
     std::uint64_t generation_finalize_build_cache_owned_section_bytes = 0;
     std::uint64_t generation_finalize_build_cache_direct_frontend_bytes = 0;
+    std::uint64_t generation_finalize_build_cache_direct_contribution_bytes = 0;
     std::uint64_t generation_finalize_build_cache_physical_bytes = 0;
     std::uint64_t generation_finalize_build_cache_alignment_padding_bytes = 0;
     std::uint64_t generation_finalize_build_cache_encoder_owned_capacity_bytes = 0;
@@ -116,6 +166,9 @@ struct project_build_telemetry final {
     std::uint32_t generation_finalize_build_cache_direct_frontend_extents = 0;
     std::uint32_t generation_finalize_build_cache_direct_frontend_sections = 0;
     std::uint32_t generation_finalize_build_cache_direct_frontend_fallback = 0;
+    std::uint32_t generation_finalize_build_cache_direct_contribution_extents = 0;
+    std::uint32_t generation_finalize_build_cache_direct_contribution_sections = 0;
+    std::uint32_t generation_finalize_build_cache_direct_contribution_fallback = 0;
 
     bool generation_finalized = false;
 

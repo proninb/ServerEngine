@@ -167,6 +167,11 @@ struct project_generation_freeze_telemetry final {
     std::uint32_t build_cache_native_frontend_direct_sections = 0;
     std::uint32_t build_cache_native_frontend_direct_fallback = 0;
 
+    std::uint64_t build_cache_native_contribution_direct_bytes = 0;
+    std::uint32_t build_cache_native_contribution_direct_extents = 0;
+    std::uint32_t build_cache_native_contribution_direct_sections = 0;
+    std::uint32_t build_cache_native_contribution_direct_fallback = 0;
+
     std::uint64_t build_cache_provenance_bytes = 0;
     std::uint32_t build_cache_provenance_sections = 0;
     std::uint64_t bind_ns = 0;
@@ -306,6 +311,27 @@ public:
             frontend_generation_storage.has_value() &&
             frontend_generation_storage->valid() &&
             !frontend_generation_lifetime;
+    }
+
+    [[nodiscard]] bool
+    contribution_generation_move_owned() const noexcept {
+        return
+            contribution_generation_storage.has_value() &&
+            contribution_generation_storage->valid();
+    }
+
+    [[nodiscard]] status adopt_contribution_generation_storage(
+        source_contribution_generation_storage&& storage) noexcept {
+
+        if (!storage.valid())
+            return {status_code::invalid_argument};
+
+        contribution_generation_storage.emplace(
+            std::move(storage));
+
+        return contribution_generation_storage->valid()
+            ? status{}
+            : status{status_code::initialization_failed};
     }
 
     [[nodiscard]] status adopt_frontend_generation_storage(
@@ -535,6 +561,7 @@ public:
         native_change = {};
         frontend_generation_lifetime = {};
         frontend_generation_storage.reset();
+        contribution_generation_storage.reset();
         build_sections.reset();
         build_owned_sections.reset();
         build.clear();
@@ -610,6 +637,11 @@ private:
     std::optional<source_frontend_block_store>
         frontend_generation_storage;
     source_frontend_block_store_lifetime frontend_generation_lifetime;
+
+    // R5E4-B1: lifetime owner for Build Cache contribution sections that point
+    // directly at the buffers released by construction SourceContribution.
+    std::optional<source_contribution_generation_storage>
+        contribution_generation_storage;
 
     friend status freeze_project_generation(
         const project_context&,

@@ -64,6 +64,7 @@ enum class source_type_modifier_kind : std::uint8_t {
 struct source_type_modifier final {
     std::uint64_t value = 0;
     source_type_modifier_kind kind = source_type_modifier_kind::pointer;
+    std::uint8_t reserved[7]{};
 };
 
 // Fully resolved source-language type reference. Exactly one base representation

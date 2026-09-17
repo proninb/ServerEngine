@@ -130,6 +130,63 @@ static_assert(offsetof(
 static_assert(offsetof(
     source_interface_member_slot, index) == 8);
 
+// R5E4-B1: these construction records are persistence-native on
+// little-endian hosts. Explicit reserved bytes remove implicit-padding
+// dependence from the direct Generation section contract.
+static_assert(sizeof(source_contribution_state) ==
+    contribution_state_record_size);
+static_assert(offsetof(source_contribution_state, source) == 0);
+static_assert(offsetof(source_contribution_state, reserved) == 4);
+static_assert(offsetof(source_contribution_state, types) == 8);
+static_assert(offsetof(source_contribution_state, links) == 48);
+
+static_assert(sizeof(source_contribution_type_ref) == 16);
+static_assert(offsetof(source_contribution_type_ref, identity) == 0);
+static_assert(offsetof(source_contribution_type_ref, modifiers) == 4);
+static_assert(offsetof(source_contribution_type_ref, intrinsic) == 12);
+static_assert(offsetof(source_contribution_type_ref, reserved) == 13);
+
+static_assert(sizeof(source_contribution_type) ==
+    contribution_type_record_size);
+static_assert(offsetof(source_contribution_type, identity) == 0);
+static_assert(offsetof(source_contribution_type, definition_items) == 4);
+static_assert(offsetof(source_contribution_type, explicit_underlying) == 12);
+static_assert(offsetof(source_contribution_type, record_kind) == 13);
+static_assert(offsetof(source_contribution_type, kind) == 14);
+static_assert(offsetof(source_contribution_type, flags) == 15);
+
+static_assert(sizeof(source_contribution_member) ==
+    contribution_member_record_size);
+static_assert(offsetof(source_contribution_member, type) == 0);
+static_assert(offsetof(source_contribution_member, name) == 16);
+static_assert(offsetof(source_contribution_member, access) == 20);
+static_assert(offsetof(source_contribution_member, reserved) == 21);
+
+static_assert(sizeof(source_type_modifier) ==
+    contribution_modifier_record_size);
+static_assert(offsetof(source_type_modifier, value) == 0);
+static_assert(offsetof(source_type_modifier, kind) == 8);
+static_assert(offsetof(source_type_modifier, reserved) == 9);
+
+static_assert(sizeof(source_contribution_object) ==
+    contribution_object_record_size);
+static_assert(offsetof(source_contribution_object, identity) == 0);
+static_assert(offsetof(source_contribution_object, type) == 4);
+
+static_assert(sizeof(source_object_endpoint_fact) == 8);
+static_assert(sizeof(source_contribution_link) ==
+    contribution_link_record_size);
+static_assert(offsetof(source_contribution_link, source) == 0);
+static_assert(offsetof(source_contribution_link, target) == 8);
+
+static_assert(sizeof(source_construction_state) ==
+    construction_state_record_size);
+static_assert(offsetof(source_construction_state, declarations) == 0);
+static_assert(offsetof(source_construction_state, enum_fixed) == 32);
+static_assert(offsetof(source_construction_state, fixed_underlying) == 36);
+static_assert(offsetof(source_construction_state, kind) == 37);
+static_assert(offsetof(source_construction_state, reserved) == 38);
+
 // GEN-02C29 native Graph persistence layout. Fresh G0 may bulk-copy these
 // arrays only when their in-memory representation is exactly Build Cache v4.
 static_assert(sizeof(TypeRef) == type_ref_record_size);
@@ -5057,6 +5114,32 @@ status encode_build_cache_image(
         sparse != nullptr &&
         use_native_block_storage;
 
+    const auto native_contribution =
+        contributions.native_generation();
+
+    const bool use_native_contribution_storage =
+        std::endian::native == std::endian::little &&
+        native_contribution.complete &&
+        native_contribution.sources.size() ==
+            contribution.sources.size() &&
+        native_contribution.types.size() ==
+            contribution.types.size() &&
+        native_contribution.members.size() ==
+            contribution.members.size() &&
+        native_contribution.modifiers.size() ==
+            contribution.modifiers.size() &&
+        native_contribution.objects.size() ==
+            contribution.objects.size() &&
+        native_contribution.links.size() ==
+            contribution.links.size() &&
+        native_contribution.construction.size() ==
+            contribution.construction.size();
+
+    const bool defer_native_contribution_staging =
+        owned != nullptr &&
+        sparse != nullptr &&
+        use_native_contribution_storage;
+
     std::array<layout_section, build_cache_image_directory_count> layout{{
         {build_cache_image_section::source_directory,
             source_directory_record_size, source_count},
@@ -5164,10 +5247,28 @@ status encode_build_cache_image(
                     index <= section_index(
                         build_cache_image_section::frontend_member_slots);
 
+                const bool native_contribution_section =
+                    index == section_index(
+                        build_cache_image_section::contribution_states) ||
+                    index == section_index(
+                        build_cache_image_section::contribution_types) ||
+                    index == section_index(
+                        build_cache_image_section::contribution_members) ||
+                    index == section_index(
+                        build_cache_image_section::contribution_modifiers) ||
+                    index == section_index(
+                        build_cache_image_section::contribution_objects) ||
+                    index == section_index(
+                        build_cache_image_section::contribution_links) ||
+                    index == section_index(
+                        build_cache_image_section::construction_states);
+
                 auto& section = owned->sections[index];
 
-                if (defer_native_frontend_staging &&
-                    frontend_section) {
+                if ((defer_native_frontend_staging &&
+                     frontend_section) ||
+                    (defer_native_contribution_staging &&
+                     native_contribution_section)) {
                     section.clear();
                     continue;
                 }
@@ -5219,6 +5320,13 @@ status encode_build_cache_image(
             const auto& values,
             std::size_t record_size,
             const auto& write_record) noexcept {
+
+            const auto direct_index = section_index(kind);
+            if (sparse != nullptr &&
+                direct_index < sparse->sections.size() &&
+                !sparse->sections[direct_index].empty()) {
+                return true;
+            }
 
             if (!use_mapped_baseline_sections)
                 return false;
@@ -5497,6 +5605,88 @@ status encode_build_cache_image(
 
             return cursor == expected_count;
         };
+
+    bool direct_native_contribution = false;
+
+    if (defer_native_contribution_staging) {
+        const auto bind_direct_contribution =
+            [&](build_cache_image_section kind,
+                const auto& values) noexcept {
+
+                const auto index = section_index(kind);
+                if (index >= sparse->sections.size())
+                    return false;
+
+                const auto bytes = std::as_bytes(values);
+
+                if (bytes.empty()) {
+                    sparse->sections[index] = {};
+                    return true;
+                }
+
+                project_generation_segment segment;
+                if (!segment.append(bytes))
+                    return false;
+
+                sparse->sections[index] = segment;
+                return true;
+            };
+
+        direct_native_contribution =
+            bind_direct_contribution(
+                build_cache_image_section::contribution_states,
+                native_contribution.sources) &&
+            bind_direct_contribution(
+                build_cache_image_section::contribution_types,
+                native_contribution.types) &&
+            bind_direct_contribution(
+                build_cache_image_section::contribution_members,
+                native_contribution.members) &&
+            bind_direct_contribution(
+                build_cache_image_section::contribution_modifiers,
+                native_contribution.modifiers) &&
+            bind_direct_contribution(
+                build_cache_image_section::contribution_objects,
+                native_contribution.objects) &&
+            bind_direct_contribution(
+                build_cache_image_section::contribution_links,
+                native_contribution.links) &&
+            bind_direct_contribution(
+                build_cache_image_section::construction_states,
+                native_contribution.construction);
+
+        if (!direct_native_contribution)
+            return {status_code::initialization_failed};
+
+        if (telemetry != nullptr) {
+            telemetry->native_contribution_direct_bytes =
+                native_contribution.sources.size_bytes() +
+                native_contribution.types.size_bytes() +
+                native_contribution.members.size_bytes() +
+                native_contribution.modifiers.size_bytes() +
+                native_contribution.objects.size_bytes() +
+                native_contribution.links.size_bytes() +
+                native_contribution.construction.size_bytes();
+
+            telemetry->native_contribution_direct_sections =
+                static_cast<std::uint32_t>(
+                    (!native_contribution.sources.empty() ? 1 : 0) +
+                    (!native_contribution.types.empty() ? 1 : 0) +
+                    (!native_contribution.members.empty() ? 1 : 0) +
+                    (!native_contribution.modifiers.empty() ? 1 : 0) +
+                    (!native_contribution.objects.empty() ? 1 : 0) +
+                    (!native_contribution.links.empty() ? 1 : 0) +
+                    (!native_contribution.construction.empty() ? 1 : 0));
+
+            telemetry->native_contribution_direct_extents =
+                telemetry->native_contribution_direct_sections;
+        }
+    }
+    else if (telemetry != nullptr &&
+             owned != nullptr &&
+             sparse != nullptr) {
+        telemetry->native_contribution_direct_fallback = 1;
+    }
 
     bool direct_native_frontend = false;
 

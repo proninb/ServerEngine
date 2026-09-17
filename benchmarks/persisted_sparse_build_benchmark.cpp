@@ -5369,7 +5369,9 @@ struct d4l3b_extent_case final {
              rebuild.telemetry.
                  generation_finalize_build_cache_owned_section_bytes +
              rebuild.telemetry.
-                 generation_finalize_build_cache_direct_frontend_bytes &&
+                 generation_finalize_build_cache_direct_frontend_bytes +
+             rebuild.telemetry.
+                 generation_finalize_build_cache_direct_contribution_bytes &&
          rebuild.telemetry.
              generation_finalize_build_cache_physical_bytes <=
              rebuild.telemetry.
@@ -5406,6 +5408,28 @@ struct d4l3b_extent_case final {
         (rebuild.telemetry.sources.snapshot_page_backed &&
          rebuild.telemetry.sources.snapshot_pages != 0);
 
+    const bool r5e4a_finalization_audit =
+        !finalized ||
+        (rebuild.telemetry.
+             generation_finalize_freeze_internal_ns != 0 &&
+         rebuild.telemetry.
+             generation_finalize_freeze_source_manager_ns != 0 &&
+         rebuild.telemetry.
+             generation_finalize_freeze_build_cache_ns != 0 &&
+         rebuild.telemetry.
+             generation_finalize_compiled_build_ns != 0);
+
+    const bool r5e4b1_native_contributions =
+        !finalized ||
+        (rebuild.telemetry.
+             generation_finalize_contribution_move_owned &&
+         rebuild.telemetry.
+             generation_finalize_build_cache_direct_contribution_bytes != 0 &&
+         rebuild.telemetry.
+             generation_finalize_build_cache_direct_contribution_sections >= 4 &&
+         rebuild.telemetry.
+             generation_finalize_build_cache_direct_contribution_fallback == 0);
+
     const auto pass =
         canonical &&
         reconstructed_payloads == 0 &&
@@ -5416,7 +5440,9 @@ struct d4l3b_extent_case final {
         r5e3a_frontend_handoff &&
         r5e3b1_frontend_context &&
         r5e3b2_frontend_runtime &&
-        r5e3c1_source_snapshot_pages;
+        r5e3c1_source_snapshot_pages &&
+        r5e4a_finalization_audit &&
+        r5e4b1_native_contributions;
 
     std::cout
         << "R5C_CANONICAL_GENERATION_STORAGE_GATE,"
@@ -5442,6 +5468,197 @@ struct d4l3b_extent_case final {
         << static_cast<double>(
             rebuild.telemetry.
                 generation_finalize_freeze_ns) /
+            1'000'000.0
+        << ",freeze_internal_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_internal_ns) /
+            1'000'000.0
+        << ",freeze_roots_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_roots_ns) /
+            1'000'000.0
+        << ",freeze_source_manager_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_source_manager_ns) /
+            1'000'000.0
+        << ",freeze_source_manager_internal_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_source_manager_internal_ns) /
+            1'000'000.0
+        << ",freeze_source_manager_preflight_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_source_manager_preflight_ns) /
+            1'000'000.0
+        << ",freeze_source_manager_layout_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_source_manager_layout_ns) /
+            1'000'000.0
+        << ",freeze_source_manager_allocate_zero_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_source_manager_allocate_zero_ns) /
+            1'000'000.0
+        << ",freeze_source_manager_records_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_source_manager_source_records_ns) /
+            1'000'000.0
+        << ",freeze_source_manager_roots_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_source_manager_roots_ns) /
+            1'000'000.0
+        << ",freeze_source_manager_path_index_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_source_manager_path_index_ns) /
+            1'000'000.0
+        << ",freeze_source_manager_file_identity_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_source_manager_file_identity_ns) /
+            1'000'000.0
+        << ",freeze_source_manager_directory_identity_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_source_manager_directory_identity_ns) /
+            1'000'000.0
+        << ",freeze_source_manager_crc_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_source_manager_crc_wall_ns) /
+            1'000'000.0
+        << ",freeze_source_manager_prefix_directory_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_source_manager_prefix_directory_encode_ns) /
+            1'000'000.0
+        << ",freeze_source_manager_directory_crc_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_source_manager_directory_crc_ns) /
+            1'000'000.0
+        << ",freeze_source_manager_header_crc_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_source_manager_header_crc_ns) /
+            1'000'000.0
+        << ",freeze_source_manager_bind_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_source_manager_bind_ns) /
+            1'000'000.0
+        << ",freeze_source_manager_verify_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_source_manager_verify_ns) /
+            1'000'000.0
+        << ",freeze_source_manager_segment_validate_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_source_manager_segment_validate_ns) /
+            1'000'000.0
+        << ",freeze_source_manager_identity_copy_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_source_manager_identity_copy_ns) /
+            1'000'000.0
+        << ",freeze_source_manager_mode="
+        << rebuild.telemetry.
+            generation_finalize_freeze_source_manager_mode
+        << ",freeze_source_manager_extents="
+        << rebuild.telemetry.
+            generation_finalize_freeze_source_manager_extent_count
+        << ",freeze_change_state_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_change_state_ns) /
+            1'000'000.0
+        << ",freeze_build_cache_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_build_cache_ns) /
+            1'000'000.0
+        << ",freeze_build_cache_layout_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_build_cache_layout_allocate_ns) /
+            1'000'000.0
+        << ",freeze_build_cache_source_frontend_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_build_cache_source_frontend_ns) /
+            1'000'000.0
+        << ",freeze_build_cache_contribution_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_build_cache_contribution_ns) /
+            1'000'000.0
+        << ",freeze_build_cache_graph_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_build_cache_graph_ns) /
+            1'000'000.0
+        << ",freeze_build_cache_change_identity_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_build_cache_change_identity_ns) /
+            1'000'000.0
+        << ",freeze_build_cache_crc_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_build_cache_section_crc_ns) /
+            1'000'000.0
+        << ",freeze_build_cache_header_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_build_cache_header_directory_ns) /
+            1'000'000.0
+        << ",freeze_build_cache_bind_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_build_cache_bind_ns) /
+            1'000'000.0
+        << ",freeze_build_cache_verify_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_build_cache_verify_ns) /
+            1'000'000.0
+        << ",freeze_bind_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_bind_ns) /
+            1'000'000.0
+        << ",freeze_verify_change_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_verify_change_state_ns) /
+            1'000'000.0
+        << ",freeze_verify_build_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_verify_build_cache_ns) /
+            1'000'000.0
+        << ",freeze_audit_staging_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_audit_staging_ns) /
+            1'000'000.0
+        << ",freeze_audit_validation_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_audit_validation_ns) /
+            1'000'000.0
+        << ",freeze_audit_unclassified_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_freeze_audit_unclassified_ns) /
             1'000'000.0
         << ",generation_finalize_own_ms="
         << static_cast<double>(
@@ -5478,6 +5695,16 @@ struct d4l3b_extent_case final {
         << ",frontend_generation_move_owned="
         << (rebuild.telemetry.
                 generation_finalize_frontend_move_owned
+            ? 1
+            : 0)
+        << ",contribution_handoff_ms="
+        << static_cast<double>(
+            rebuild.telemetry.
+                generation_finalize_contribution_handoff_ns) /
+            1'000'000.0
+        << ",contribution_generation_move_owned="
+        << (rebuild.telemetry.
+                generation_finalize_contribution_move_owned
             ? 1
             : 0)
         << ",segment_snapshot_ms="
@@ -5747,6 +5974,18 @@ struct d4l3b_extent_case final {
         << ",build_cache_direct_frontend_bytes="
         << rebuild.telemetry.
             generation_finalize_build_cache_direct_frontend_bytes
+        << ",build_cache_direct_contribution_bytes="
+        << rebuild.telemetry.
+            generation_finalize_build_cache_direct_contribution_bytes
+        << ",build_cache_direct_contribution_extents="
+        << rebuild.telemetry.
+            generation_finalize_build_cache_direct_contribution_extents
+        << ",build_cache_direct_contribution_sections="
+        << rebuild.telemetry.
+            generation_finalize_build_cache_direct_contribution_sections
+        << ",build_cache_direct_contribution_fallback="
+        << rebuild.telemetry.
+            generation_finalize_build_cache_direct_contribution_fallback
         << ",build_cache_direct_frontend_extents="
         << rebuild.telemetry.
             generation_finalize_build_cache_direct_frontend_extents

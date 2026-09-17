@@ -938,6 +938,14 @@ status freeze_project_generation(
             build_cache_detail.native_frontend_direct_sections;
         telemetry->build_cache_native_frontend_direct_fallback =
             build_cache_detail.native_frontend_direct_fallback;
+        telemetry->build_cache_native_contribution_direct_bytes =
+            build_cache_detail.native_contribution_direct_bytes;
+        telemetry->build_cache_native_contribution_direct_extents =
+            build_cache_detail.native_contribution_direct_extents;
+        telemetry->build_cache_native_contribution_direct_sections =
+            build_cache_detail.native_contribution_direct_sections;
+        telemetry->build_cache_native_contribution_direct_fallback =
+            build_cache_detail.native_contribution_direct_fallback;
     }
 
     if (!result.ok())
