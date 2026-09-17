@@ -83,12 +83,6 @@ constexpr std::uint32_t tracked_directory_identity_index_record_size = 16;
 
 // GEN-02C18 native arena serialization is valid only when the in-memory
 // compact value layout is byte-identical to Build Cache v4 on little-endian.
-static_assert(sizeof(source_frontend_native_persistence_range) == 8);
-static_assert(offsetof(
-    source_frontend_native_persistence_range, begin) == 0);
-static_assert(offsetof(
-    source_frontend_native_persistence_range, count) == 4);
-
 static_assert(sizeof(identity_ref) ==
     frontend_local_type_record_size);
 static_assert(sizeof(source_interface_type_slot) ==
@@ -291,6 +285,74 @@ private:
     output = left * right;
     return true;
 }
+
+template <typename T>
+[[nodiscard]] status native_frontend_span(
+    std::span<const std::byte> bytes,
+    build_cache_range range,
+    std::uint32_t record_size,
+    std::span<const T>& output) noexcept {
+
+    output = {};
+
+    if constexpr (std::endian::native != std::endian::little)
+        return {status_code::not_available};
+
+    if (record_size != sizeof(T) ||
+        !std::is_trivially_copyable_v<T> ||
+        !std::is_standard_layout_v<T> ||
+        !std::has_unique_object_representations_v<T>) {
+        return {status_code::not_available};
+    }
+
+    const auto stride =
+        static_cast<std::size_t>(record_size);
+    const auto begin =
+        static_cast<std::size_t>(range.begin);
+    const auto count =
+        static_cast<std::size_t>(range.count);
+    const auto maximum =
+        (std::numeric_limits<std::size_t>::max)();
+
+    if (stride == 0 ||
+        begin > maximum / stride ||
+        count > maximum / stride) {
+        return {status_code::artifact_corrupt};
+    }
+
+    const auto byte_begin = begin * stride;
+    const auto byte_count = count * stride;
+
+    // A valid sparse/sectioned image may not expose one contiguous byte span.
+    // R4a is a native-view optimization only; keep the canonical accessor path
+    // available by reporting not_available instead of treating that as damage.
+    if (count != 0 && bytes.empty())
+        return {status_code::not_available};
+
+    if (byte_begin > bytes.size() ||
+        byte_count > bytes.size() - byte_begin) {
+        return {status_code::artifact_corrupt};
+    }
+
+    if (count == 0)
+        return {};
+
+    const auto* address =
+        bytes.data() + byte_begin;
+
+    if (reinterpret_cast<std::uintptr_t>(address) %
+            alignof(T) != 0) {
+        return {status_code::not_available};
+    }
+
+    output = std::span<const T>{
+        reinterpret_cast<const T*>(address),
+        count,
+    };
+
+    return {};
+}
+
 
 // GEN-02C15: persisted integers are little-endian. Native little-endian hosts
 // can load/store the complete scalar with memcpy; big/mixed-endian hosts retain
@@ -2100,6 +2162,148 @@ std::string_view build_cache_image_view::source_text(
     return {};
 }
 
+status build_cache_image_view::frontend_block_view(
+    source_id source_value,
+    source_interface_data_view& output) const noexcept {
+
+    output = {};
+
+    build_cache_source_record record;
+    auto result =
+        source(
+            source_value,
+            record);
+
+    if (!result.ok())
+        return result;
+
+    if (!record.frontend_present)
+        return {status_code::not_found};
+
+    std::span<const identity_ref> local_types;
+    std::span<const source_interface_type_slot> type_slots;
+    std::span<const source_interface_object_slot> object_slots;
+    std::span<const source_interface_member_slot> member_slots;
+
+    result =
+        native_frontend_span(
+            section_bytes(
+                build_cache_image_section::frontend_local_types),
+            record.local_types,
+            frontend_local_type_record_size,
+            local_types);
+    if (!result.ok())
+        return result;
+
+    result =
+        native_frontend_span(
+            section_bytes(
+                build_cache_image_section::frontend_type_slots),
+            record.type_slots,
+            frontend_type_slot_record_size,
+            type_slots);
+    if (!result.ok())
+        return result;
+
+    result =
+        native_frontend_span(
+            section_bytes(
+                build_cache_image_section::frontend_object_slots),
+            record.object_slots,
+            frontend_object_slot_record_size,
+            object_slots);
+    if (!result.ok())
+        return result;
+
+    result =
+        native_frontend_span(
+            section_bytes(
+                build_cache_image_section::frontend_member_slots),
+            record.member_slots,
+            frontend_member_slot_record_size,
+            member_slots);
+    if (!result.ok())
+        return result;
+
+    output = {
+        local_types,
+        type_slots,
+        object_slots,
+        member_slots,
+    };
+
+    return {};
+}
+
+
+const std::byte* build_cache_image_view::section_record_data(
+    build_cache_image_section kind,
+    std::uint64_t index) const noexcept {
+
+    const auto& values = section(kind);
+
+    if (values.record_size == 0 ||
+        index >= values.count) {
+        return nullptr;
+    }
+
+    std::uint64_t raw_offset = 0;
+    if (!multiply_u64(
+            index,
+            values.record_size,
+            raw_offset) ||
+        raw_offset >
+            (std::numeric_limits<std::size_t>::max)()) {
+        return nullptr;
+    }
+
+    const auto offset =
+        static_cast<std::size_t>(raw_offset);
+    const auto record_size =
+        static_cast<std::size_t>(
+            values.record_size);
+
+    if (values.segment.empty()) {
+        if (values.data == nullptr)
+            return nullptr;
+
+        return values.data + offset;
+    }
+
+    std::size_t cursor = 0;
+
+    for (std::size_t extent_index = 0;
+         extent_index < values.segment.extent_count();
+         ++extent_index) {
+
+        const auto extent =
+            values.segment.extent(extent_index);
+
+        if (offset >= cursor) {
+            const auto local_offset =
+                offset - cursor;
+
+            if (local_offset <= extent.size() &&
+                record_size <=
+                    extent.size() - local_offset) {
+                return extent.data() +
+                    local_offset;
+            }
+        }
+
+        if (extent.size() >
+            (std::numeric_limits<std::size_t>::max)() -
+                cursor) {
+            return nullptr;
+        }
+
+        cursor += extent.size();
+    }
+
+    return nullptr;
+}
+
+
 status build_cache_image_view::frontend_local_type(
     source_id source_value,
     std::size_t index,
@@ -2120,8 +2324,14 @@ status build_cache_image_view::frontend_local_type(
     if (absolute >= values.count)
         return {status_code::artifact_corrupt};
 
-    output = identity_from_raw(read_u32(
-        values.data + static_cast<std::size_t>(absolute) * 4));
+    const auto* value =
+        section_record_data(
+            build_cache_image_section::frontend_local_types,
+            absolute);
+    if (value == nullptr)
+        return {status_code::artifact_corrupt};
+
+    output = identity_from_raw(read_u32(value));
     return output ? status{} : status{status_code::artifact_corrupt};
 }
 
@@ -2146,9 +2356,11 @@ status build_cache_image_view::frontend_type_slot(
         return {status_code::artifact_corrupt};
 
     const auto* value =
-        values.data +
-        static_cast<std::size_t>(absolute) *
-            frontend_type_slot_record_size;
+        section_record_data(
+            build_cache_image_section::frontend_type_slots,
+            absolute);
+    if (value == nullptr)
+        return {status_code::artifact_corrupt};
 
     const auto raw_parent = read_u32(value);
     const auto raw_name = read_u32(value + 4);
@@ -2190,9 +2402,11 @@ status build_cache_image_view::frontend_object_slot(
         return {status_code::artifact_corrupt};
 
     const auto* value =
-        values.data +
-        static_cast<std::size_t>(absolute) *
-            frontend_object_slot_record_size;
+        section_record_data(
+            build_cache_image_section::frontend_object_slots,
+            absolute);
+    if (value == nullptr)
+        return {status_code::artifact_corrupt};
 
     const auto raw_parent = read_u32(value);
     const auto raw_name = read_u32(value + 4);
@@ -2236,9 +2450,11 @@ status build_cache_image_view::frontend_member_slot(
         return {status_code::artifact_corrupt};
 
     const auto* value =
-        values.data +
-        static_cast<std::size_t>(absolute) *
-            frontend_member_slot_record_size;
+        section_record_data(
+            build_cache_image_section::frontend_member_slots,
+            absolute);
+    if (value == nullptr)
+        return {status_code::artifact_corrupt};
 
     const auto raw_type = read_u32(value);
     const auto raw_name = read_u32(value + 4);
@@ -4520,47 +4736,125 @@ status encode_build_cache_image(
         static_cast<bool>(native_frontend) &&
         native_frontend.size() == source_count;
 
-    const auto native_storage =
-        frontend.native_persistence_storage();
+    const auto* native_block_storage =
+        frontend.native_frontend_block_bulk_storage();
 
-    const bool use_native_storage =
+    const bool use_native_block_storage =
         std::endian::native == std::endian::little &&
-        static_cast<bool>(native_storage) &&
-        native_storage.records.size() == source_count &&
-        native_storage.local_types.size() == local_type_count &&
-        native_storage.type_slots.size() == type_slot_count &&
-        native_storage.object_slots.size() == object_slot_count &&
-        native_storage.member_slots.size() == member_slot_count;
+        native_block_storage != nullptr &&
+        native_block_storage->local_type_count() == local_type_count &&
+        native_block_storage->type_slot_count() == type_slot_count &&
+        native_block_storage->object_slot_count() == object_slot_count &&
+        native_block_storage->member_slot_count() == member_slot_count;
 
-    if (use_native_storage) {
-        if (!native_storage.local_types.empty()) {
-            std::memcpy(
+    const auto copy_native_pages =
+        [&](std::size_t page_count,
+            const auto& page_at,
+            std::byte* target,
+            std::size_t expected_count,
+            std::size_t record_size) noexcept {
+
+            std::size_t cursor = 0;
+
+            for (std::size_t page_index = 0;
+                 page_index < page_count;
+                 ++page_index) {
+
+                const auto page = page_at(page_index);
+
+                if (cursor > expected_count ||
+                    page.size() > expected_count - cursor) {
+                    return false;
+                }
+
+                if (!page.empty()) {
+                    std::memcpy(
+                        target + cursor * record_size,
+                        page.data(),
+                        page.size_bytes());
+                }
+
+                cursor += page.size();
+            }
+
+            return cursor == expected_count;
+        };
+
+    if (use_native_block_storage) {
+        if (!copy_native_pages(
+                native_block_storage->local_type_page_count(),
+                [&](std::size_t index) noexcept {
+                    return native_block_storage->local_type_page(index);
+                },
                 local_types,
-                native_storage.local_types.data(),
-                native_storage.local_types.size_bytes());
-        }
-
-        if (!native_storage.type_slots.empty()) {
-            std::memcpy(
+                local_type_count,
+                frontend_local_type_record_size) ||
+            !copy_native_pages(
+                native_block_storage->type_slot_page_count(),
+                [&](std::size_t index) noexcept {
+                    return native_block_storage->type_slot_page(index);
+                },
                 type_slots,
-                native_storage.type_slots.data(),
-                native_storage.type_slots.size_bytes());
-        }
-
-        if (!native_storage.object_slots.empty()) {
-            std::memcpy(
+                type_slot_count,
+                frontend_type_slot_record_size) ||
+            !copy_native_pages(
+                native_block_storage->object_slot_page_count(),
+                [&](std::size_t index) noexcept {
+                    return native_block_storage->object_slot_page(index);
+                },
                 object_slots,
-                native_storage.object_slots.data(),
-                native_storage.object_slots.size_bytes());
-        }
-
-        if (!native_storage.member_slots.empty()) {
-            std::memcpy(
+                object_slot_count,
+                frontend_object_slot_record_size) ||
+            !copy_native_pages(
+                native_block_storage->member_slot_page_count(),
+                [&](std::size_t index) noexcept {
+                    return native_block_storage->member_slot_page(index);
+                },
                 member_slots,
-                native_storage.member_slots.data(),
-                native_storage.member_slots.size_bytes());
+                member_slot_count,
+                frontend_member_slot_record_size)) {
+
+            return {status_code::initialization_failed};
         }
     }
+
+    const auto read_native_block_layout =
+        [&](source_id source_value,
+            source_frontend_block_layout& layout_value,
+            bool& present) noexcept {
+
+            layout_value = {};
+            present = false;
+
+            if (!use_native_block_storage)
+                return status{status_code::not_available};
+
+            source_frontend_block_ref block;
+            auto result =
+                frontend.native_frontend_block(
+                    source_value,
+                    block);
+
+            if (!result.ok()) {
+                if (result.code == status_code::not_found)
+                    return status{};
+                return result;
+            }
+
+            result =
+                native_block_storage->layout(
+                    block,
+                    layout_value);
+
+            if (!result.ok())
+                return result;
+
+            if (layout_value.source != source_value)
+                return status{status_code::initialization_failed};
+
+            present = true;
+            return status{};
+        };
 
     // GEN-02C24.1: production cleanup keeps the C24 fast path while removing
     // temporary C23 phase timing from the SAVE hot path.
@@ -4892,6 +5186,13 @@ status encode_build_cache_image(
                         std::size_t logical_cursor = 0;
                         std::size_t copy_cursor = 0;
                         std::size_t output_cursor = 0;
+                        project_generation_segment sparse_segment;
+                        std::size_t owned_run_begin = 0;
+                        std::size_t owned_run_bytes = 0;
+                        std::uint64_t borrowed_bytes = 0;
+                        std::uint64_t owned_bytes = 0;
+                        std::uint32_t borrowed_extents = 0;
+                        std::uint32_t owned_extents = 0;
                         bool borrow_candidate = false;
                         bool whole_materialized = false;
                     };
@@ -4952,6 +5253,9 @@ status encode_build_cache_image(
                             },
                         }};
 
+                    const bool use_sparse_frontend_arenas =
+                        sparse != nullptr;
+
                     for (auto& arena : arenas) {
                         if (arena.record_size == 0 ||
                             arena.baseline_count >
@@ -4978,7 +5282,9 @@ status encode_build_cache_image(
                                 borrowed != nullptr &&
                                 !arena.baseline.empty();
 
-                            if (!arena.borrow_candidate) {
+                            if (!arena.borrow_candidate &&
+                                !use_sparse_frontend_arenas) {
+
                                 if (!arena.baseline.empty()) {
                                     std::memcpy(
                                         arena.output,
@@ -5003,6 +5309,11 @@ status encode_build_cache_image(
                                 return;
                             }
 
+                            arena.borrow_candidate = false;
+
+                            if (use_sparse_frontend_arenas)
+                                return;
+
                             if (!arena.baseline.empty()) {
                                 std::memcpy(
                                     arena.output,
@@ -5014,7 +5325,48 @@ status encode_build_cache_image(
                             }
 
                             arena.whole_materialized = true;
-                            arena.borrow_candidate = false;
+                        };
+
+                    const auto flush_arena_owned =
+                        [&](sparse_arena_state& arena) noexcept {
+
+                            if (arena.owned_run_bytes == 0)
+                                return true;
+
+                            if (arena.record_size == 0 ||
+                                arena.current_count >
+                                    (std::numeric_limits<
+                                        std::size_t>::max)() /
+                                        arena.record_size) {
+                                return false;
+                            }
+
+                            const auto section_bytes =
+                                arena.current_count *
+                                arena.record_size;
+
+                            if (arena.owned_run_begin >
+                                    section_bytes ||
+                                arena.owned_run_bytes >
+                                    section_bytes -
+                                        arena.owned_run_begin) {
+                                return false;
+                            }
+
+                            const auto run =
+                                std::span<const std::byte>{
+                                    arena.output +
+                                        arena.owned_run_begin,
+                                    arena.owned_run_bytes};
+
+                            if (!arena.sparse_segment.append(run))
+                                return false;
+
+                            arena.owned_bytes += run.size();
+                            ++arena.owned_extents;
+                            arena.owned_run_begin = 0;
+                            arena.owned_run_bytes = 0;
+                            return true;
                         };
 
                     const auto copy_arena_until =
@@ -5052,45 +5404,64 @@ status encode_build_cache_image(
                                     arena.copy_cursor *
                                     arena.record_size;
 
-                                // Equal-geometry arenas were copied wholesale
-                                // once above. A baseline run that remains at
-                                // the same offset is therefore already present.
-                                // Shifted runs are copied and audited only over
-                                // the bytes actually moved.
-                                const bool already_exact_at_target =
-                                    arena.baseline_count ==
-                                        arena.current_count &&
-                                    output_offset ==
-                                        baseline_offset;
+                                if (use_sparse_frontend_arenas) {
+                                    if (!flush_arena_owned(arena))
+                                        return false;
 
-                                if (!already_exact_at_target) {
-                                    materialize_equal_arena(
-                                        arena);
-
-                                    auto* target =
-                                        arena.output +
-                                        output_offset;
-
-                                    std::memcpy(
-                                        target,
-                                        arena.baseline.data() +
+                                    const auto baseline_run =
+                                        arena.baseline.subspan(
                                             baseline_offset,
-                                        bytes);
+                                            bytes);
 
-                                    baseline_bytes_copied +=
-                                        bytes;
+                                    if (!arena.sparse_segment.append(
+                                            baseline_run)) {
+                                        return false;
+                                    }
 
-                                    if (arena.baseline_count ==
-                                        arena.current_count) {
+                                    arena.borrowed_bytes += bytes;
+                                    ++arena.borrowed_extents;
+                                }
+                                else {
+                                    // Equal-geometry arenas were copied
+                                    // wholesale once above. A baseline run that
+                                    // remains at the same offset is already
+                                    // present; shifted runs are copied only over
+                                    // the bytes actually moved.
+                                    const bool already_exact_at_target =
+                                        arena.baseline_count ==
+                                            arena.current_count &&
+                                        output_offset ==
+                                            baseline_offset;
 
-                                        section_identity.observe_overwrite(
-                                            arena.kind,
-                                            std::span<const std::byte>{
-                                                target,
-                                                bytes},
-                                            arena.baseline.subspan(
-                                                output_offset,
-                                                bytes));
+                                    if (!already_exact_at_target) {
+                                        materialize_equal_arena(
+                                            arena);
+
+                                        auto* target =
+                                            arena.output +
+                                            output_offset;
+
+                                        std::memcpy(
+                                            target,
+                                            arena.baseline.data() +
+                                                baseline_offset,
+                                            bytes);
+
+                                        baseline_bytes_copied +=
+                                            bytes;
+
+                                        if (arena.baseline_count ==
+                                            arena.current_count) {
+
+                                            section_identity.observe_overwrite(
+                                                arena.kind,
+                                                std::span<const std::byte>{
+                                                    target,
+                                                    bytes},
+                                                arena.baseline.subspan(
+                                                    output_offset,
+                                                    bytes));
+                                        }
                                     }
                                 }
                             }
@@ -5167,6 +5538,12 @@ status encode_build_cache_image(
                                 replacement_bytes) {
                                 return false;
                             }
+
+                            const auto replaced_baseline_count =
+                                baseline_source && old_present
+                                ? static_cast<std::size_t>(
+                                    old_range.count)
+                                : std::size_t{0};
 
                             if (baseline_source) {
                                 if (old_present) {
@@ -5258,6 +5635,8 @@ status encode_build_cache_image(
 
                                 const bool replacement_exact =
                                     arena.borrow_candidate &&
+                                    replaced_baseline_count ==
+                                        replacement_count &&
                                     baseline_replacement.size() ==
                                         replacement.size() &&
                                     std::memcmp(
@@ -5265,7 +5644,20 @@ status encode_build_cache_image(
                                         baseline_replacement.data(),
                                         replacement.size()) == 0;
 
-                                if (!replacement_exact) {
+                                if (replacement_exact) {
+                                    if (use_sparse_frontend_arenas) {
+                                        if (!flush_arena_owned(arena) ||
+                                            !arena.sparse_segment.append(
+                                                baseline_replacement)) {
+                                            return false;
+                                        }
+
+                                        arena.borrowed_bytes +=
+                                            baseline_replacement.size();
+                                        ++arena.borrowed_extents;
+                                    }
+                                }
+                                else {
                                     materialize_equal_arena(
                                         arena);
 
@@ -5277,14 +5669,55 @@ status encode_build_cache_image(
                                         target,
                                         replacement.data(),
                                         replacement.size());
+
+                                    if (use_sparse_frontend_arenas) {
+                                        if (arena.owned_run_bytes == 0) {
+                                            arena.owned_run_begin =
+                                                output_offset;
+                                        }
+                                        else {
+                                            if (arena.owned_run_begin >
+                                                    (std::numeric_limits<
+                                                        std::size_t>::max)() -
+                                                        arena.owned_run_bytes ||
+                                                arena.owned_run_begin +
+                                                    arena.owned_run_bytes !=
+                                                    output_offset) {
+                                                return false;
+                                            }
+                                        }
+
+                                        if (replacement.size() >
+                                                (std::numeric_limits<
+                                                    std::size_t>::max)() -
+                                                    arena.owned_run_bytes) {
+                                            return false;
+                                        }
+
+                                        arena.owned_run_bytes +=
+                                            replacement.size();
+                                    }
                                 }
 
                                 if (equal_geometry) {
-                                    section_identity.observe_overwrite(
-                                        arena.kind,
-                                        replacement,
-                                        baseline_replacement);
+                                    if (!replacement_exact)
+                                        section_identity.invalidate(
+                                            arena.kind);
+                                    else
+                                        section_identity.observe_overwrite(
+                                            arena.kind,
+                                            replacement,
+                                            baseline_replacement);
                                 }
+                            }
+                            else if (arena.borrow_candidate &&
+                                     replaced_baseline_count != 0) {
+                                // Equal total section geometry does not imply
+                                // byte identity when one Source removes a
+                                // non-empty range and another Source adds it
+                                // elsewhere.
+                                materialize_equal_arena(arena);
+                                section_identity.invalidate(arena.kind);
                             }
 
                             arena.output_cursor +=
@@ -5905,14 +6338,101 @@ status encode_build_cache_image(
                             sparse_source_bytes;
                     }
 
+                    std::uint64_t
+                        sparse_frontend_borrowed_bytes = 0;
+                    std::uint64_t
+                        sparse_frontend_owned_bytes = 0;
+                    std::uint32_t
+                        sparse_frontend_borrowed_extents = 0;
+                    std::uint32_t
+                        sparse_frontend_owned_extents = 0;
+
                     for (auto& arena : arenas) {
                         if (arena.logical_cursor !=
                                 arena.baseline_count ||
                             !copy_arena_until(
                                 arena,
                                 arena.baseline_count) ||
+                            !flush_arena_owned(arena) ||
                             arena.output_cursor !=
                                 arena.current_count) {
+                            return false;
+                        }
+
+                        if (use_sparse_frontend_arenas &&
+                            !arena.borrow_candidate) {
+
+                            if (arena.current_count >
+                                (std::numeric_limits<
+                                    std::size_t>::max)() /
+                                    arena.record_size) {
+                                return false;
+                            }
+
+                            const auto expected_bytes =
+                                arena.current_count *
+                                arena.record_size;
+
+                            if (arena.sparse_segment.size() !=
+                                    expected_bytes) {
+                                return false;
+                            }
+
+                            if (expected_bytes != 0) {
+                                const auto sparse_index =
+                                    section_index(arena.kind);
+
+                                if (sparse_index >=
+                                        sparse->sections.size()) {
+                                    return false;
+                                }
+
+                                sparse->sections[sparse_index] =
+                                    arena.sparse_segment;
+                            }
+
+                            sparse_frontend_borrowed_bytes +=
+                                arena.borrowed_bytes;
+                            sparse_frontend_owned_bytes +=
+                                arena.owned_bytes;
+                            sparse_frontend_borrowed_extents +=
+                                arena.borrowed_extents;
+                            sparse_frontend_owned_extents +=
+                                arena.owned_extents;
+                        }
+                    }
+
+                    if (sparse != nullptr) {
+                        std::size_t sparse_extent_count = 0;
+
+                        for (const auto& section :
+                             sparse->sections) {
+
+                            if (section.extent_count() >
+                                    (std::numeric_limits<
+                                        std::size_t>::max)() -
+                                        sparse_extent_count) {
+                                return false;
+                            }
+
+                            sparse_extent_count +=
+                                section.extent_count();
+                        }
+
+                        // Reserve one extent for the prefix and one for every
+                        // non-sparse logical section. This is conservative but
+                        // guarantees the final flattened Build Cache carrier
+                        // cannot exceed its fixed extent capacity.
+                        constexpr auto carrier_reserve =
+                            build_cache_image_directory_count + 1;
+
+                        static_assert(
+                            project_generation_segment_max_extents >
+                            carrier_reserve);
+
+                        if (sparse_extent_count >
+                            project_generation_segment_max_extents -
+                                carrier_reserve) {
                             return false;
                         }
                     }
@@ -5969,17 +6489,25 @@ status encode_build_cache_image(
                                 baseline_bytes_copied +
                                 baseline_bytes_borrowed +
                                 sparse_source_bytes_borrowed +
-                                sparse_source_directory_borrowed;
+                                sparse_source_directory_borrowed +
+                                sparse_frontend_borrowed_bytes;
                         telemetry->
                             mapped_baseline_borrowed_bytes +=
                                 baseline_bytes_borrowed;
                         telemetry->
                             mapped_baseline_sparse_borrowed_bytes +=
                                 sparse_source_bytes_borrowed +
-                                sparse_source_directory_borrowed;
+                                sparse_source_directory_borrowed +
+                                sparse_frontend_borrowed_bytes;
                         telemetry->
                             mapped_baseline_sparse_directory_borrowed_bytes +=
                                 sparse_source_directory_borrowed;
+                        telemetry->
+                            mapped_baseline_sparse_frontend_borrowed_bytes +=
+                                sparse_frontend_borrowed_bytes;
+                        telemetry->
+                            mapped_baseline_sparse_frontend_owned_bytes +=
+                                sparse_frontend_owned_bytes;
                         telemetry->
                             mapped_baseline_borrowed_sections +=
                                 baseline_sections_borrowed;
@@ -5995,6 +6523,17 @@ status encode_build_cache_image(
                             telemetry->
                                 mapped_baseline_sparse_directory_borrowed_extents +=
                                     sparse_source_directory_borrowed_extents;
+                        }
+                        if (use_sparse_frontend_arenas) {
+                            telemetry->
+                                mapped_baseline_sparse_borrowed_extents +=
+                                    sparse_frontend_borrowed_extents;
+                            telemetry->
+                                mapped_baseline_sparse_frontend_borrowed_extents +=
+                                    sparse_frontend_borrowed_extents;
+                            telemetry->
+                                mapped_baseline_sparse_frontend_owned_extents +=
+                                    sparse_frontend_owned_extents;
                         }
                         telemetry->
                             mapped_baseline_bulk_sections +=
@@ -6045,7 +6584,7 @@ status encode_build_cache_image(
             desired_native_workers);
 
     const bool use_parallel_native_sources =
-        use_native_storage &&
+        use_native_block_storage &&
         native_source_proof_available &&
         native_worker_count > 1;
 
@@ -6126,13 +6665,20 @@ status encode_build_cache_image(
                     }
                 }
 
-                const auto& record =
-                    native_storage.records[index];
+                source_frontend_block_layout record;
+                bool record_present = false;
+                const auto block_result =
+                    read_native_block_layout(
+                        source_id{
+                            static_cast<std::uint32_t>(
+                                index + 1)},
+                        record,
+                        record_present);
 
-                if (record.present > 1)
-                    return {status_code::initialization_failed};
+                if (!block_result.ok())
+                    return block_result;
 
-                if (record.present == 0)
+                if (!record_present)
                     continue;
 
                 ++native_frontend_count;
@@ -6164,14 +6710,10 @@ status encode_build_cache_image(
                     return {status_code::initialization_failed};
                 }
 
-                native_local_type_cursor +=
-                    record.local_types.count;
-                native_type_slot_cursor +=
-                    record.type_slots.count;
-                native_object_slot_cursor +=
-                    record.object_slots.count;
-                native_member_slot_cursor +=
-                    record.member_slots.count;
+                native_local_type_cursor += record.local_types.count;
+                native_type_slot_cursor += record.type_slots.count;
+                native_object_slot_cursor += record.object_slots.count;
+                native_member_slot_cursor += record.member_slots.count;
             }
 
             chunk_text_end[worker] =
@@ -6282,10 +6824,18 @@ status encode_build_cache_image(
                                 initialization_failed};
                     }
 
-                    const auto& record =
-                        native_storage.records[index];
+                    source_frontend_block_layout record;
+                    bool record_present = false;
+                    const auto block_result =
+                        read_native_block_layout(
+                            source_value,
+                            record,
+                            record_present);
 
-                    if (record.present != 0) {
+                    if (!block_result.ok())
+                        return block_result;
+
+                    if (record_present) {
                         if ((flags &
                                 source_flag_snapshot) == 0) {
                             return {
@@ -6295,33 +6845,14 @@ status encode_build_cache_image(
 
                         flags |= source_flag_frontend;
 
-                        write_u32(
-                            directory_record + 24,
-                            record.local_types.begin);
-                        write_u32(
-                            directory_record + 28,
-                            record.local_types.count);
-
-                        write_u32(
-                            directory_record + 32,
-                            record.type_slots.begin);
-                        write_u32(
-                            directory_record + 36,
-                            record.type_slots.count);
-
-                        write_u32(
-                            directory_record + 40,
-                            record.object_slots.begin);
-                        write_u32(
-                            directory_record + 44,
-                            record.object_slots.count);
-
-                        write_u32(
-                            directory_record + 48,
-                            record.member_slots.begin);
-                        write_u32(
-                            directory_record + 52,
-                            record.member_slots.count);
+                        write_u32(directory_record + 24, record.local_types.begin);
+                        write_u32(directory_record + 28, record.local_types.count);
+                        write_u32(directory_record + 32, record.type_slots.begin);
+                        write_u32(directory_record + 36, record.type_slots.count);
+                        write_u32(directory_record + 40, record.object_slots.begin);
+                        write_u32(directory_record + 44, record.object_slots.count);
+                        write_u32(directory_record + 48, record.member_slots.begin);
+                        write_u32(directory_record + 52, record.member_slots.count);
                     }
 
                     write_u32(
@@ -6485,27 +7016,31 @@ status encode_build_cache_image(
         source_frontend_persistence_storage interface_storage =
             source_frontend_persistence_storage::none;
         source_interface_data_view interface_data{};
-        const source_frontend_native_persistence_record*
-            native_record = nullptr;
+        source_frontend_block_layout native_record{};
+        bool native_record_present = false;
         bool interface_preencoded = false;
 
         status result;
-        if (use_native_storage) {
-            native_record = &native_storage.records[index];
+        if (use_native_block_storage) {
+            result =
+                read_native_block_layout(
+                    source_value,
+                    native_record,
+                    native_record_present);
 
-            if (native_record->present > 1)
-                return {status_code::initialization_failed};
+            if (!result.ok())
+                return result;
 
-            if (native_record->present != 0) {
+            if (native_record_present) {
                 interface_record.present = true;
                 interface_record.local_types =
-                    native_record->local_types.count;
+                    native_record.local_types.count;
                 interface_record.type_slots =
-                    native_record->type_slots.count;
+                    native_record.type_slots.count;
                 interface_record.object_slots =
-                    native_record->object_slots.count;
+                    native_record.object_slots.count;
                 interface_record.member_slots =
-                    native_record->member_slots.count;
+                    native_record.member_slots.count;
                 interface_preencoded = true;
             }
         }
@@ -6591,22 +7126,22 @@ status encode_build_cache_image(
             write_cache_range(directory_record + 48, member_slot_range);
 
             if (interface_preencoded) {
-                if (native_record == nullptr ||
-                    native_record->local_types.begin !=
+                if (!native_record_present ||
+                    native_record.local_types.begin !=
                         local_type_range.begin ||
-                    native_record->local_types.count !=
+                    native_record.local_types.count !=
                         local_type_range.count ||
-                    native_record->type_slots.begin !=
+                    native_record.type_slots.begin !=
                         type_slot_range.begin ||
-                    native_record->type_slots.count !=
+                    native_record.type_slots.count !=
                         type_slot_range.count ||
-                    native_record->object_slots.begin !=
+                    native_record.object_slots.begin !=
                         object_slot_range.begin ||
-                    native_record->object_slots.count !=
+                    native_record.object_slots.count !=
                         object_slot_range.count ||
-                    native_record->member_slots.begin !=
+                    native_record.member_slots.begin !=
                         member_slot_range.begin ||
-                    native_record->member_slots.count !=
+                    native_record.member_slots.count !=
                         member_slot_range.count) {
                     return {status_code::initialization_failed};
                 }
@@ -6679,6 +7214,25 @@ status encode_build_cache_image(
             }
             else if (interface_storage ==
                      source_frontend_persistence_storage::persisted_baseline) {
+
+                if (telemetry != nullptr) {
+                    const auto elements =
+                        static_cast<std::uint64_t>(
+                            interface_record.local_types) +
+                        static_cast<std::uint64_t>(
+                            interface_record.type_slots) +
+                        static_cast<std::uint64_t>(
+                            interface_record.object_slots) +
+                        static_cast<std::uint64_t>(
+                            interface_record.member_slots);
+
+                    telemetry->
+                        mapped_baseline_frontend_element_reads +=
+                            elements;
+                    telemetry->
+                        mapped_baseline_frontend_elements_encoded +=
+                            elements;
+                }
 
                 for (std::size_t item = 0;
                      item < interface_record.local_types;

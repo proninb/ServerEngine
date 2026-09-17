@@ -50,6 +50,21 @@ private:
 static_assert(sizeof(source_frontend_block_ref) == 4);
 static_assert(std::is_trivially_copyable_v<source_frontend_block_ref>);
 
+struct source_frontend_block_logical_range final {
+    std::uint32_t begin = 0;
+    std::uint32_t count = 0;
+};
+
+// Flat logical Build Cache-compatible layout of one immutable frontend block.
+// Payload bytes remain page-owned by source_frontend_block_store.
+struct source_frontend_block_layout final {
+    source_id source{};
+    source_frontend_block_logical_range local_types{};
+    source_frontend_block_logical_range type_slots{};
+    source_frontend_block_logical_range object_slots{};
+    source_frontend_block_logical_range member_slots{};
+};
+
 // Append-only Generation-owned storage for immutable Source frontend blocks.
 // Typed pages keep previously published spans stable while new/changed Sources
 // append blocks without per-Source heap allocations or cascading offsets.
@@ -62,7 +77,7 @@ public:
         checkpoint() noexcept = default;
 
     private:
-        std::array<std::size_t, 9> state{};
+        std::array<std::size_t, 13> state{};
         friend class source_frontend_block_store;
     };
 
@@ -90,6 +105,29 @@ public:
 
     [[nodiscard]] source_id source(
         source_frontend_block_ref block) const noexcept;
+
+    [[nodiscard]] status layout(
+        source_frontend_block_ref block,
+        source_frontend_block_layout& output) const noexcept;
+
+    [[nodiscard]] std::size_t local_type_count() const noexcept;
+    [[nodiscard]] std::size_t type_slot_count() const noexcept;
+    [[nodiscard]] std::size_t object_slot_count() const noexcept;
+    [[nodiscard]] std::size_t member_slot_count() const noexcept;
+
+    [[nodiscard]] std::size_t local_type_page_count() const noexcept;
+    [[nodiscard]] std::size_t type_slot_page_count() const noexcept;
+    [[nodiscard]] std::size_t object_slot_page_count() const noexcept;
+    [[nodiscard]] std::size_t member_slot_page_count() const noexcept;
+
+    [[nodiscard]] std::span<const identity_ref> local_type_page(
+        std::size_t index) const noexcept;
+    [[nodiscard]] std::span<const source_interface_type_slot> type_slot_page(
+        std::size_t index) const noexcept;
+    [[nodiscard]] std::span<const source_interface_object_slot> object_slot_page(
+        std::size_t index) const noexcept;
+    [[nodiscard]] std::span<const source_interface_member_slot> member_slot_page(
+        std::size_t index) const noexcept;
 
     [[nodiscard]] std::size_t block_count() const noexcept;
 

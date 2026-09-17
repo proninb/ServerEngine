@@ -107,294 +107,8 @@ persistence_record_of(
     return true;
 }
 
-[[nodiscard]] bool make_native_range(
-    std::size_t begin,
-    std::size_t count,
-    source_frontend_native_persistence_range& output) noexcept {
-
-    constexpr auto maximum =
-        static_cast<std::size_t>(
-            (std::numeric_limits<std::uint32_t>::max)());
-
-    if (begin > maximum ||
-        count > maximum ||
-        count > maximum - begin) {
-        return false;
-    }
-
-    output.begin = static_cast<std::uint32_t>(begin);
-    output.count = static_cast<std::uint32_t>(count);
-    return true;
-}
-
-[[nodiscard]] status build_native_persistence_storage(
-    std::vector<std::unique_ptr<source_interface>>& interfaces,
-    std::size_t source_count,
-    const source_frontend_persistence_summary& summary,
-    std::vector<source_frontend_native_persistence_record>& records,
-    std::vector<identity_ref>& local_types,
-    std::vector<source_interface_type_slot>& type_slots,
-    std::vector<source_interface_object_slot>& object_slots,
-    std::vector<source_interface_member_slot>& member_slots) noexcept {
-
-    records.clear();
-    local_types.clear();
-    type_slots.clear();
-    object_slots.clear();
-    member_slots.clear();
-
-    constexpr auto maximum =
-        static_cast<std::size_t>(
-            (std::numeric_limits<std::uint32_t>::max)());
-
-    if (source_count > maximum ||
-        summary.local_types > maximum ||
-        summary.type_slots > maximum ||
-        summary.object_slots > maximum ||
-        summary.member_slots > maximum) {
-        return {status_code::not_available};
-    }
-
-    try {
-        // GEN-02C18.1: allocate the final arena sizes once. Full REBUILD
-        // interfaces deliberately omit their SAVE-only compact mirrors.
-        records.resize(source_count);
-        local_types.resize(summary.local_types);
-        type_slots.resize(summary.type_slots);
-        object_slots.resize(summary.object_slots);
-        member_slots.resize(summary.member_slots);
-
-        std::size_t local_type_cursor = 0;
-        std::size_t type_slot_cursor = 0;
-        std::size_t object_slot_cursor = 0;
-        std::size_t member_slot_cursor = 0;
-        std::size_t observed_frontends = 0;
-
-        for (std::size_t index = 0;
-             index < source_count;
-             ++index) {
-
-            if (index >= interfaces.size())
-                return {status_code::initialization_failed};
-
-            auto* interface_value =
-                interfaces[index].get();
-
-            if (interface_value == nullptr)
-                continue;
-
-            const auto counts =
-                interface_value->persistence_counts();
-
-            auto& record = records[index];
-            record.present = 1;
-
-            if (!make_native_range(
-                    local_type_cursor,
-                    counts.local_types,
-                    record.local_types) ||
-                !make_native_range(
-                    type_slot_cursor,
-                    counts.type_slots,
-                    record.type_slots) ||
-                !make_native_range(
-                    object_slot_cursor,
-                    counts.object_slots,
-                    record.object_slots) ||
-                !make_native_range(
-                    member_slot_cursor,
-                    counts.member_slots,
-                    record.member_slots)) {
-                return {status_code::not_available};
-            }
-
-            const bool compact_available =
-                interface_value->compact_persistence_available();
-
-            const auto runtime =
-                interface_value->runtime_data_view();
-
-            auto owned =
-                interface_value->release_persistence_data();
-
-            if (owned.local_types.size() != counts.local_types)
-                return {status_code::initialization_failed};
-
-            if (local_type_cursor >
-                    local_types.size() ||
-                owned.local_types.size() >
-                    local_types.size() - local_type_cursor) {
-                return {status_code::initialization_failed};
-            }
-
-            std::copy(
-                owned.local_types.begin(),
-                owned.local_types.end(),
-                local_types.begin() +
-                    static_cast<std::ptrdiff_t>(local_type_cursor));
-
-            local_type_cursor +=
-                owned.local_types.size();
-
-            if (compact_available) {
-                if (owned.type_slots.size() != counts.type_slots ||
-                    owned.object_slots.size() != counts.object_slots ||
-                    owned.member_slots.size() != counts.member_slots) {
-                    return {status_code::initialization_failed};
-                }
-
-                if (type_slot_cursor > type_slots.size() ||
-                    owned.type_slots.size() >
-                        type_slots.size() - type_slot_cursor ||
-                    object_slot_cursor > object_slots.size() ||
-                    owned.object_slots.size() >
-                        object_slots.size() - object_slot_cursor ||
-                    member_slot_cursor > member_slots.size() ||
-                    owned.member_slots.size() >
-                        member_slots.size() - member_slot_cursor) {
-                    return {status_code::initialization_failed};
-                }
-
-                std::copy(
-                    owned.type_slots.begin(),
-                    owned.type_slots.end(),
-                    type_slots.begin() +
-                        static_cast<std::ptrdiff_t>(type_slot_cursor));
-                std::copy(
-                    owned.object_slots.begin(),
-                    owned.object_slots.end(),
-                    object_slots.begin() +
-                        static_cast<std::ptrdiff_t>(object_slot_cursor));
-                std::copy(
-                    owned.member_slots.begin(),
-                    owned.member_slots.end(),
-                    member_slots.begin() +
-                        static_cast<std::ptrdiff_t>(member_slot_cursor));
-
-                type_slot_cursor += owned.type_slots.size();
-                object_slot_cursor += owned.object_slots.size();
-                member_slot_cursor += owned.member_slots.size();
-            }
-            else {
-                if (!owned.type_slots.empty() ||
-                    !owned.object_slots.empty() ||
-                    !owned.member_slots.empty()) {
-                    return {status_code::initialization_failed};
-                }
-
-                const auto type_begin = type_slot_cursor;
-
-                // local_types keeps declaration insertion order. Match each
-                // identity back to its occupied runtime hash slot so persisted
-                // type-slot ordering remains canonical.
-                for (const auto identity : owned.local_types) {
-                    const source_interface_type_slot* found = nullptr;
-
-                    for (const auto& slot : runtime.type_slots) {
-                        if (slot.identity == identity) {
-                            found = &slot;
-                            break;
-                        }
-                    }
-
-                    if (found == nullptr ||
-                        type_slot_cursor >= type_slots.size()) {
-                        return {status_code::initialization_failed};
-                    }
-
-                    type_slots[type_slot_cursor++] = *found;
-                }
-
-                if (type_slot_cursor - type_begin != counts.type_slots)
-                    return {status_code::initialization_failed};
-
-                const auto object_begin = object_slot_cursor;
-                for (const auto& slot : runtime.object_slots) {
-                    if (!slot.identity)
-                        continue;
-                    if (object_slot_cursor >= object_slots.size())
-                        return {status_code::initialization_failed};
-                    object_slots[object_slot_cursor++] = slot;
-                }
-
-                if (object_slot_cursor - object_begin != counts.object_slots)
-                    return {status_code::initialization_failed};
-
-                const auto member_begin = member_slot_cursor;
-                for (const auto& slot : runtime.member_slots) {
-                    if (!slot.type)
-                        continue;
-                    if (member_slot_cursor >= member_slots.size())
-                        return {status_code::initialization_failed};
-                    member_slots[member_slot_cursor++] = slot;
-                }
-
-                if (member_slot_cursor - member_begin != counts.member_slots)
-                    return {status_code::initialization_failed};
-            }
-
-            ++observed_frontends;
-        }
-
-        if (observed_frontends != summary.frontend_count ||
-            local_type_cursor != local_types.size() ||
-            type_slot_cursor != type_slots.size() ||
-            object_slot_cursor != object_slots.size() ||
-            member_slot_cursor != member_slots.size()) {
-            return {status_code::initialization_failed};
-        }
-
-        const auto bind_range =
-            [](const auto& values,
-               source_frontend_native_persistence_range range) noexcept {
-                using vector_type =
-                    std::remove_reference_t<decltype(values)>;
-                using value_type =
-                    typename vector_type::value_type;
-
-                if (range.count == 0)
-                    return std::span<const value_type>{};
-
-                return std::span<const value_type>{values}.subspan(
-                    static_cast<std::size_t>(range.begin),
-                    static_cast<std::size_t>(range.count));
-            };
-
-        for (std::size_t index = 0;
-             index < source_count;
-             ++index) {
-
-            const auto& record = records[index];
-            if (record.present == 0)
-                continue;
-
-            auto* interface_value =
-                interfaces[index].get();
-
-            if (interface_value == nullptr)
-                return {status_code::initialization_failed};
-
-            interface_value->bind_persistence_data({
-                bind_range(local_types, record.local_types),
-                bind_range(type_slots, record.type_slots),
-                bind_range(object_slots, record.object_slots),
-                bind_range(member_slots, record.member_slots),
-            });
-        }
-
-        return {};
-    }
-    catch (const std::bad_alloc&) {
-        return {status_code::not_available};
-    }
-    catch (const std::length_error&) {
-        return {status_code::not_available};
-    }
-}
-
-
 [[nodiscard]] status build_generation_frontend_blocks(
-    const std::vector<std::unique_ptr<source_interface>>& interfaces,
+    std::vector<std::unique_ptr<source_interface>>& interfaces,
     std::size_t source_count,
     source_frontend_block_store& blocks,
     std::vector<source_frontend_block_ref>& refs) noexcept {
@@ -410,65 +124,159 @@ persistence_record_of(
 
     try {
         refs.resize(source_count);
+
+        // Reused scratch removes the old four generation-wide arenas without
+        // replacing them with per-Source heap allocations.
+        std::vector<source_interface_type_slot> type_scratch;
+        std::vector<source_interface_object_slot> object_scratch;
+        std::vector<source_interface_member_slot> member_scratch;
+
+        for (std::size_t index = 0;
+             index < source_count;
+             ++index) {
+
+            if (index >= interfaces.size()) {
+                blocks.clear();
+                refs.clear();
+                return {status_code::initialization_failed};
+            }
+
+            auto* interface_value = interfaces[index].get();
+
+            if (interface_value == nullptr)
+                continue;
+
+            const auto counts = interface_value->persistence_counts();
+            const bool compact_available =
+                interface_value->compact_persistence_available();
+            const auto runtime = interface_value->runtime_data_view();
+
+            auto owned = interface_value->release_persistence_data();
+
+            if (owned.local_types.size() != counts.local_types)
+                return {status_code::initialization_failed};
+
+            source_interface_data_view data;
+
+            if (compact_available) {
+                if (owned.type_slots.size() != counts.type_slots ||
+                    owned.object_slots.size() != counts.object_slots ||
+                    owned.member_slots.size() != counts.member_slots) {
+                    return {status_code::initialization_failed};
+                }
+
+                data = {
+                    owned.local_types,
+                    owned.type_slots,
+                    owned.object_slots,
+                    owned.member_slots,
+                };
+            }
+            else {
+                if (!owned.type_slots.empty() ||
+                    !owned.object_slots.empty() ||
+                    !owned.member_slots.empty()) {
+                    return {status_code::initialization_failed};
+                }
+
+                type_scratch.clear();
+                object_scratch.clear();
+                member_scratch.clear();
+
+                if (type_scratch.capacity() < counts.type_slots)
+                    type_scratch.reserve(counts.type_slots);
+                if (object_scratch.capacity() < counts.object_slots)
+                    object_scratch.reserve(counts.object_slots);
+                if (member_scratch.capacity() < counts.member_slots)
+                    member_scratch.reserve(counts.member_slots);
+
+                for (const auto identity : owned.local_types) {
+                    const source_interface_type_slot* found = nullptr;
+
+                    for (const auto& slot : runtime.type_slots) {
+                        if (slot.identity == identity) {
+                            found = &slot;
+                            break;
+                        }
+                    }
+
+                    if (found == nullptr)
+                        return {status_code::initialization_failed};
+
+                    type_scratch.push_back(*found);
+                }
+
+                for (const auto& slot : runtime.object_slots) {
+                    if (slot.identity)
+                        object_scratch.push_back(slot);
+                }
+
+                for (const auto& slot : runtime.member_slots) {
+                    if (slot.type)
+                        member_scratch.push_back(slot);
+                }
+
+                if (type_scratch.size() != counts.type_slots ||
+                    object_scratch.size() != counts.object_slots ||
+                    member_scratch.size() != counts.member_slots) {
+                    return {status_code::initialization_failed};
+                }
+
+                data = {
+                    owned.local_types,
+                    type_scratch,
+                    object_scratch,
+                    member_scratch,
+                };
+            }
+
+            source_frontend_block_ref block;
+            auto result =
+                blocks.append(
+                    source_id{
+                        static_cast<std::uint32_t>(
+                            index + 1)},
+                    data,
+                    block);
+
+            if (!result.ok()) {
+                blocks.clear();
+                refs.clear();
+                return result;
+            }
+
+            source_interface_data_view canonical;
+            result = blocks.view(block, canonical);
+
+            if (!result.ok() ||
+                canonical.local_types.size() != counts.local_types ||
+                canonical.type_slots.size() != counts.type_slots ||
+                canonical.object_slots.size() != counts.object_slots ||
+                canonical.member_slots.size() != counts.member_slots) {
+
+                blocks.clear();
+                refs.clear();
+                return {status_code::initialization_failed};
+            }
+
+            interface_value->bind_persistence_data(canonical);
+            refs[index] = block;
+        }
+
+        return {};
     }
     catch (const std::bad_alloc&) {
+        blocks.clear();
+        refs.clear();
         return {status_code::not_available};
     }
     catch (const std::length_error&) {
+        blocks.clear();
+        refs.clear();
         return {status_code::not_available};
     }
-
-    for (std::size_t index = 0;
-         index < source_count;
-         ++index) {
-
-        if (index >= interfaces.size()) {
-            blocks.clear();
-            refs.clear();
-            return {status_code::initialization_failed};
-        }
-
-        const auto* interface_value =
-            interfaces[index].get();
-
-        if (interface_value == nullptr)
-            continue;
-
-        const auto counts =
-            interface_value->persistence_counts();
-        const auto data =
-            interface_value->persistence_data_view();
-
-        if (data.local_types.size() != counts.local_types ||
-            data.type_slots.size() != counts.type_slots ||
-            data.object_slots.size() != counts.object_slots ||
-            data.member_slots.size() != counts.member_slots) {
-
-            blocks.clear();
-            refs.clear();
-            return {status_code::initialization_failed};
-        }
-
-        source_frontend_block_ref block;
-        const auto result =
-            blocks.append(
-                source_id{
-                    static_cast<std::uint32_t>(
-                        index + 1)},
-                data,
-                block);
-
-        if (!result.ok()) {
-            blocks.clear();
-            refs.clear();
-            return result;
-        }
-
-        refs[index] = block;
-    }
-
-    return {};
 }
+
 
 } // namespace
 
@@ -587,14 +395,26 @@ status source_frontend_cache::native_frontend_block_view(
     if (!result.ok())
         return result;
 
-    if (descriptor.origin !=
+    if (descriptor.origin ==
         source_frontend_block_origin::generation_owned) {
-        return {status_code::not_available};
+
+        return frontend_blocks.view(
+            descriptor.block,
+            output);
     }
 
-    return frontend_blocks.view(
-        descriptor.block,
-        output);
+    if (descriptor.origin ==
+        source_frontend_block_origin::baseline_borrowed) {
+
+        if (baseline_cache == nullptr)
+            return {status_code::invalid_state};
+
+        return baseline_cache->frontend_block_view(
+            descriptor.source,
+            output);
+    }
+
+    return {status_code::invalid_state};
 }
 
 source_frontend_cache::source_frontend_cache(
@@ -1040,15 +860,10 @@ source_frontend_cache_update source_frontend_cache::begin_update(
 
 void source_frontend_cache::invalidate() noexcept {
     interfaces.clear();
-    persistence_records.clear();
-    persistence_local_types.clear();
-    persistence_type_slots.clear();
-    persistence_object_slots.clear();
-    persistence_member_slots.clear();
-    native_persistence_complete_state = false;
     frontend_blocks.clear();
     frontend_block_refs.clear();
     native_frontend_block_complete_state = false;
+    native_frontend_block_bulk_complete_state = false;
     overlay.clear();
     overlay_index.clear();
     persistence_summary_value = {};
@@ -1063,16 +878,6 @@ source_frontend_cache_update::source_frontend_cache_update(
     source_frontend_cache_update&& other) noexcept
     : owner(std::exchange(other.owner, nullptr)),
       full_candidate(std::move(other.full_candidate)),
-      full_persistence_records(
-          std::move(other.full_persistence_records)),
-      full_persistence_local_types(
-          std::move(other.full_persistence_local_types)),
-      full_persistence_type_slots(
-          std::move(other.full_persistence_type_slots)),
-      full_persistence_object_slots(
-          std::move(other.full_persistence_object_slots)),
-      full_persistence_member_slots(
-          std::move(other.full_persistence_member_slots)),
       full_frontend_blocks(
           std::move(other.full_frontend_blocks)),
       full_frontend_block_refs(
@@ -1366,25 +1171,6 @@ status source_frontend_cache_update::prepare_publish(
                 return {status_code::not_available};
             full_candidate.reserve(capacity);
 
-            // GEN-02C18: full publication canonicalizes compact persistence
-            // payload into cache-wide arenas before the Generation becomes
-            // visible. SAVE can then serialize four dense spans directly.
-            const auto arena_result =
-                build_native_persistence_storage(
-                    full_candidate,
-                    required_source_count,
-                    candidate_summary,
-                    full_persistence_records,
-                    full_persistence_local_types,
-                    full_persistence_type_slots,
-                    full_persistence_object_slots,
-                    full_persistence_member_slots);
-
-            if (!arena_result.ok()) {
-                failure = arena_result;
-                return failure;
-            }
-
             const auto block_result =
                 build_generation_frontend_blocks(
                     full_candidate,
@@ -1518,24 +1304,13 @@ void source_frontend_cache_update::publish_prepared() noexcept {
     if (full_reconstruction) {
         owner->interfaces.swap(full_candidate);
 
-        owner->persistence_records.swap(
-            full_persistence_records);
-        owner->persistence_local_types.swap(
-            full_persistence_local_types);
-        owner->persistence_type_slots.swap(
-            full_persistence_type_slots);
-        owner->persistence_object_slots.swap(
-            full_persistence_object_slots);
-        owner->persistence_member_slots.swap(
-            full_persistence_member_slots);
-
         owner->frontend_blocks =
             std::move(full_frontend_blocks);
         owner->frontend_block_refs.swap(
             full_frontend_block_refs);
 
-        owner->native_persistence_complete_state = true;
         owner->native_frontend_block_complete_state = true;
+        owner->native_frontend_block_bulk_complete_state = true;
         owner->logical_source_count = required_source_count;
     } else if (owner->baseline_backed()) {
         for (std::size_t index = 0;
@@ -1565,7 +1340,7 @@ void source_frontend_cache_update::publish_prepared() noexcept {
 
         owner->logical_source_count = required_source_count;
     } else {
-        const bool invalidates_bulk_persistence =
+        const bool invalidates_bulk_frontend =
             !replacements.empty() ||
             required_source_count !=
                 owner->logical_source_count;
@@ -1575,11 +1350,8 @@ void source_frontend_cache_update::publish_prepared() noexcept {
         for (auto& item : replacements)
             owner->interfaces[item.source.value() - 1] = std::move(item.interface);
 
-        // Do not clear the v4 arenas here. Unchanged interfaces may hold
-        // spans into them. Only disable the v4 bulk directory because replaced
-        // Source ranges no longer describe the complete current Generation.
-        if (invalidates_bulk_persistence)
-            owner->native_persistence_complete_state = false;
+        if (invalidates_bulk_frontend)
+            owner->native_frontend_block_bulk_complete_state = false;
 
         if (frontend_block_sparse_prepared) {
             // reserve() completed in prepare_publish(); resize and slot
@@ -1597,8 +1369,9 @@ void source_frontend_cache_update::publish_prepared() noexcept {
             }
 
             owner->native_frontend_block_complete_state = true;
+            owner->native_frontend_block_bulk_complete_state = false;
             frontend_block_sparse_prepared = false;
-        } else if (invalidates_bulk_persistence) {
+        } else if (invalidates_bulk_frontend) {
             owner->native_frontend_block_complete_state = false;
         }
 

@@ -33,36 +33,6 @@ struct source_frontend_persistence_summary final {
     std::size_t member_slots = 0;
 };
 
-struct source_frontend_native_persistence_range final {
-    std::uint32_t begin = 0;
-    std::uint32_t count = 0;
-};
-
-// Dense Source-indexed directory into cache-wide compact Frontend arenas.
-struct source_frontend_native_persistence_record final {
-    std::uint32_t present = 0;
-    source_frontend_native_persistence_range local_types{};
-    source_frontend_native_persistence_range type_slots{};
-    source_frontend_native_persistence_range object_slots{};
-    source_frontend_native_persistence_range member_slots{};
-};
-
-// Read-only bulk SAVE view. It is exposed only while all Source records still
-// match the canonical native arenas. Sparse publication disables bulk mode but
-// keeps the arenas alive because unchanged interfaces may still reference them.
-struct source_frontend_native_persistence_storage_view final {
-    std::span<const source_frontend_native_persistence_record> records;
-    std::span<const identity_ref> local_types;
-    std::span<const source_interface_type_slot> type_slots;
-    std::span<const source_interface_object_slot> object_slots;
-    std::span<const source_interface_member_slot> member_slots;
-    bool complete = false;
-
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return complete;
-    }
-};
-
 enum class source_frontend_persistence_storage : std::uint8_t {
     none = 0,
     native_interface = 1,
@@ -158,28 +128,6 @@ public:
             interfaces};
     }
 
-    [[nodiscard]] source_frontend_native_persistence_storage_view
-    native_persistence_storage() const noexcept {
-        if (baseline_cache != nullptr ||
-            !native_persistence_complete_state ||
-            persistence_records.size() != logical_source_count) {
-            return {};
-        }
-
-        return {
-            std::span<const source_frontend_native_persistence_record>{
-                persistence_records},
-            std::span<const identity_ref>{persistence_local_types},
-            std::span<const source_interface_type_slot>{
-                persistence_type_slots},
-            std::span<const source_interface_object_slot>{
-                persistence_object_slots},
-            std::span<const source_interface_member_slot>{
-                persistence_member_slots},
-            true,
-        };
-    }
-
     [[nodiscard]] status persistence_view(
         source_id source,
         source_frontend_persistence_view& output) const noexcept;
@@ -212,6 +160,17 @@ public:
     native_frontend_block_storage_complete() const noexcept {
         return native_frontend_block_complete_state &&
             frontend_block_refs.size() == logical_source_count;
+    }
+
+    // Bulk page capability exists only for a canonical full publication.
+    // Sparse replacement keeps block refs valid but drops this capability
+    // because prior immutable blocks remain append-only in the store.
+    [[nodiscard]] const source_frontend_block_store*
+    native_frontend_block_bulk_storage() const noexcept {
+        return native_frontend_block_storage_complete() &&
+            native_frontend_block_bulk_complete_state
+            ? &frontend_blocks
+            : nullptr;
     }
 
     [[nodiscard]] status native_frontend_block(
@@ -283,20 +242,10 @@ private:
     // Detached/G0 storage remains dense and preserves the existing fast path.
     std::vector<std::unique_ptr<source_interface>> interfaces;
 
-    std::vector<source_frontend_native_persistence_record>
-        persistence_records;
-    std::vector<identity_ref> persistence_local_types;
-    std::vector<source_interface_type_slot>
-        persistence_type_slots;
-    std::vector<source_interface_object_slot>
-        persistence_object_slots;
-    std::vector<source_interface_member_slot>
-        persistence_member_slots;
-    bool native_persistence_complete_state = false;
-
     source_frontend_block_store frontend_blocks;
     std::vector<source_frontend_block_ref> frontend_block_refs;
     bool native_frontend_block_complete_state = false;
+    bool native_frontend_block_bulk_complete_state = false;
 
     const build_cache_image_view* baseline_cache = nullptr;
     const source_manager_image_view* baseline_sources = nullptr;
@@ -359,16 +308,6 @@ private:
 
     source_frontend_cache* owner = nullptr;
     std::vector<std::unique_ptr<source_interface>> full_candidate;
-
-    std::vector<source_frontend_native_persistence_record>
-        full_persistence_records;
-    std::vector<identity_ref> full_persistence_local_types;
-    std::vector<source_interface_type_slot>
-        full_persistence_type_slots;
-    std::vector<source_interface_object_slot>
-        full_persistence_object_slots;
-    std::vector<source_interface_member_slot>
-        full_persistence_member_slots;
 
     source_frontend_block_store full_frontend_blocks;
     std::vector<source_frontend_block_ref>

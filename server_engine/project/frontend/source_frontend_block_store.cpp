@@ -12,6 +12,7 @@ namespace {
 struct source_frontend_block_range final {
     std::uint32_t page = 0;
     std::uint32_t begin = 0;
+    std::uint32_t logical_begin = 0;
     std::uint32_t count = 0;
 };
 
@@ -21,6 +22,7 @@ public:
     struct checkpoint final {
         std::size_t page_count = 0;
         std::size_t last_size = 0;
+        std::size_t logical_size = 0;
     };
 
     explicit typed_page_store(
@@ -34,12 +36,14 @@ public:
         return {
             pages.size(),
             pages.empty() ? 0 : pages.back().size(),
+            logical_size_value,
         };
     }
 
     void restore(checkpoint state) noexcept {
         if (state.page_count == 0) {
             pages.clear();
+            logical_size_value = state.logical_size;
             return;
         }
 
@@ -50,6 +54,8 @@ public:
             pages.back().size() > state.last_size) {
             pages.back().resize(state.last_size);
         }
+
+        logical_size_value = state.logical_size;
     }
 
     [[nodiscard]] status append(
@@ -58,11 +64,23 @@ public:
 
         output = {};
 
+        constexpr auto maximum =
+            static_cast<std::size_t>(
+                (std::numeric_limits<std::uint32_t>::max)());
+
+        if (logical_size_value > maximum)
+            return {status_code::not_available};
+
+        // Empty ranges still carry the current logical cursor. Build Cache v4
+        // range geometry is canonical even when count == 0.
+        output.logical_begin =
+            static_cast<std::uint32_t>(logical_size_value);
+
         if (values.empty())
             return {};
 
-        if (values.size() >
-            (std::numeric_limits<std::uint32_t>::max)()) {
+        if (values.size() > maximum ||
+            values.size() > maximum - logical_size_value) {
             return {status_code::not_available};
         }
 
@@ -99,6 +117,8 @@ public:
                 static_cast<std::uint32_t>(pages.size());
             output.begin =
                 static_cast<std::uint32_t>(page.size());
+            output.logical_begin =
+                static_cast<std::uint32_t>(logical_size_value);
             output.count =
                 static_cast<std::uint32_t>(values.size());
 
@@ -107,6 +127,7 @@ public:
                 values.begin(),
                 values.end());
 
+            logical_size_value += values.size();
             return {};
         }
         catch (const std::bad_alloc&) {
@@ -148,12 +169,31 @@ public:
             count);
     }
 
+    [[nodiscard]] std::size_t size() const noexcept {
+        return logical_size_value;
+    }
+
+    [[nodiscard]] std::size_t page_count() const noexcept {
+        return pages.size();
+    }
+
+    [[nodiscard]] std::span<const T> page(
+        std::size_t index) const noexcept {
+
+        if (index >= pages.size())
+            return {};
+
+        return pages[index];
+    }
+
     void clear() noexcept {
         pages.clear();
+        logical_size_value = 0;
     }
 
 private:
     std::size_t page_capacity = 1;
+    std::size_t logical_size_value = 0;
     std::vector<std::vector<T>> pages;
 };
 
@@ -325,7 +365,44 @@ public:
                 block.value() - 1)].source;
     }
 
-    [[nodiscard]] std::array<std::size_t, 9>
+    [[nodiscard]] status layout(
+        source_frontend_block_ref block,
+        source_frontend_block_layout& output) const noexcept {
+
+        output = {};
+
+        if (!block ||
+            static_cast<std::size_t>(block.value()) >
+                records.size()) {
+            return {status_code::not_found};
+        }
+
+        const auto& record =
+            records[
+                static_cast<std::size_t>(
+                    block.value() - 1)];
+
+        output.source = record.source;
+        output.local_types = {
+            record.local_types.logical_begin,
+            record.local_types.count,
+        };
+        output.type_slots = {
+            record.type_slots.logical_begin,
+            record.type_slots.count,
+        };
+        output.object_slots = {
+            record.object_slots.logical_begin,
+            record.object_slots.count,
+        };
+        output.member_slots = {
+            record.member_slots.logical_begin,
+            record.member_slots.count,
+        };
+        return {};
+    }
+
+    [[nodiscard]] std::array<std::size_t, 13>
     mark() const noexcept {
         const auto local = local_types.mark();
         const auto types = type_slots.mark();
@@ -336,17 +413,21 @@ public:
             records.size(),
             local.page_count,
             local.last_size,
+            local.logical_size,
             types.page_count,
             types.last_size,
+            types.logical_size,
             objects.page_count,
             objects.last_size,
+            objects.logical_size,
             members.page_count,
             members.last_size,
+            members.logical_size,
         };
     }
 
     void restore(
-        const std::array<std::size_t, 9>& state) noexcept {
+        const std::array<std::size_t, 13>& state) noexcept {
 
         if (records.size() > state[0])
             records.resize(state[0]);
@@ -354,18 +435,22 @@ public:
         local_types.restore({
             state[1],
             state[2],
+            state[3],
         });
         type_slots.restore({
-            state[3],
             state[4],
-        });
-        object_slots.restore({
             state[5],
             state[6],
         });
-        member_slots.restore({
+        object_slots.restore({
             state[7],
             state[8],
+            state[9],
+        });
+        member_slots.restore({
+            state[10],
+            state[11],
+            state[12],
         });
     }
 
@@ -442,6 +527,86 @@ source_id source_frontend_block_store::source(
     return value
         ? value->source(block)
         : source_id{};
+}
+
+status source_frontend_block_store::layout(
+    source_frontend_block_ref block,
+    source_frontend_block_layout& output) const noexcept {
+
+    output = {};
+
+    if (!value)
+        return {status_code::not_available};
+
+    return value->layout(block, output);
+}
+
+std::size_t source_frontend_block_store::local_type_count() const noexcept {
+    return value ? value->local_types.size() : 0;
+}
+
+std::size_t source_frontend_block_store::type_slot_count() const noexcept {
+    return value ? value->type_slots.size() : 0;
+}
+
+std::size_t source_frontend_block_store::object_slot_count() const noexcept {
+    return value ? value->object_slots.size() : 0;
+}
+
+std::size_t source_frontend_block_store::member_slot_count() const noexcept {
+    return value ? value->member_slots.size() : 0;
+}
+
+std::size_t source_frontend_block_store::local_type_page_count() const noexcept {
+    return value ? value->local_types.page_count() : 0;
+}
+
+std::size_t source_frontend_block_store::type_slot_page_count() const noexcept {
+    return value ? value->type_slots.page_count() : 0;
+}
+
+std::size_t source_frontend_block_store::object_slot_page_count() const noexcept {
+    return value ? value->object_slots.page_count() : 0;
+}
+
+std::size_t source_frontend_block_store::member_slot_page_count() const noexcept {
+    return value ? value->member_slots.page_count() : 0;
+}
+
+std::span<const identity_ref>
+source_frontend_block_store::local_type_page(
+    std::size_t index) const noexcept {
+
+    return value
+        ? value->local_types.page(index)
+        : std::span<const identity_ref>{};
+}
+
+std::span<const source_interface_type_slot>
+source_frontend_block_store::type_slot_page(
+    std::size_t index) const noexcept {
+
+    return value
+        ? value->type_slots.page(index)
+        : std::span<const source_interface_type_slot>{};
+}
+
+std::span<const source_interface_object_slot>
+source_frontend_block_store::object_slot_page(
+    std::size_t index) const noexcept {
+
+    return value
+        ? value->object_slots.page(index)
+        : std::span<const source_interface_object_slot>{};
+}
+
+std::span<const source_interface_member_slot>
+source_frontend_block_store::member_slot_page(
+    std::size_t index) const noexcept {
+
+    return value
+        ? value->member_slots.page(index)
+        : std::span<const source_interface_member_slot>{};
 }
 
 std::size_t source_frontend_block_store::block_count() const noexcept {
