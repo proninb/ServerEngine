@@ -227,11 +227,26 @@ auto semantic = project.parser_services();
         if (!result.ok())
             return result;
 
-        auto cache_update = state.frontend_cache.begin_update(true);
-        for (auto& entry : frontend.entries) {
-            result = cache_update.replace(entry.source, std::move(entry.interface));
+        auto cache_update =
+            state.frontend_cache.begin_update(true);
+
+        if (frontend.context_backed()) {
+            result =
+                cache_update.replace_full_context(
+                    frontend.release_context());
+
             if (!result.ok())
                 return result;
+        }
+        else {
+            for (auto& entry : frontend.entries) {
+                result = cache_update.replace(
+                    entry.source,
+                    std::move(entry.interface));
+
+                if (!result.ok())
+                    return result;
+            }
         }
 
         const auto source_prepare_begin = build_clock::now();

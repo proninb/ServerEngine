@@ -107,8 +107,9 @@ persistence_record_of(
     return true;
 }
 
+template <typename InterfaceAt>
 [[nodiscard]] status build_generation_frontend_blocks(
-    std::vector<std::unique_ptr<source_interface>>& interfaces,
+    InterfaceAt&& interface_at,
     std::size_t source_count,
     source_frontend_block_store& blocks,
     std::vector<source_frontend_block_ref>& refs) noexcept {
@@ -135,13 +136,8 @@ persistence_record_of(
              index < source_count;
              ++index) {
 
-            if (index >= interfaces.size()) {
-                blocks.clear();
-                refs.clear();
-                return {status_code::initialization_failed};
-            }
-
-            auto* interface_value = interfaces[index].get();
+            auto* interface_value =
+                interface_at(index);
 
             if (interface_value == nullptr)
                 continue;
@@ -617,8 +613,16 @@ const source_interface* source_frontend_cache::interface(source_id source) const
         return nullptr;
 
     if (baseline_cache == nullptr) {
-        const auto index = static_cast<std::size_t>(source.value() - 1);
-        return index < interfaces.size() ? interfaces[index].get() : nullptr;
+        if (dense_context.active())
+            return dense_context.interface(source);
+
+        const auto index =
+            static_cast<std::size_t>(
+                source.value() - 1);
+
+        return index < interfaces.size()
+            ? interfaces[index].get()
+            : nullptr;
     }
 
     if (const auto* item = find_overlay(source); item != nullptr)
@@ -640,11 +644,18 @@ status source_frontend_cache::persistence_view(
     const source_interface* value = nullptr;
 
     if (baseline_cache == nullptr) {
-        const auto index =
-            static_cast<std::size_t>(source.value() - 1);
-        value = index < interfaces.size()
-            ? interfaces[index].get()
-            : nullptr;
+        if (dense_context.active()) {
+            value = dense_context.interface(source);
+        }
+        else {
+            const auto index =
+                static_cast<std::size_t>(
+                    source.value() - 1);
+
+            value = index < interfaces.size()
+                ? interfaces[index].get()
+                : nullptr;
+        }
     }
     else if (const auto* item = find_overlay(source);
              item != nullptr) {
@@ -764,10 +775,21 @@ status source_frontend_cache::persistence_local_type(
             return baseline_cache->frontend_local_type(source, index, output);
     }
 
-    const auto dense_index = static_cast<std::size_t>(source.value() - 1);
-    if (dense_index >= interfaces.size() || interfaces[dense_index] == nullptr)
+    const auto* dense_interface =
+        dense_context.active()
+        ? dense_context.interface(source)
+        : (static_cast<std::size_t>(
+               source.value() - 1) < interfaces.size()
+            ? interfaces[
+                static_cast<std::size_t>(
+                    source.value() - 1)].get()
+            : nullptr);
+
+    if (dense_interface == nullptr)
         return {status_code::not_found};
-    const auto values = interfaces[dense_index]->data_view().local_types;
+
+    const auto values =
+        dense_interface->data_view().local_types;
     if (index >= values.size())
         return {status_code::not_found};
     output = values[index];
@@ -797,10 +819,21 @@ status source_frontend_cache::persistence_type_slot(
             return baseline_cache->frontend_type_slot(source, index, output);
     }
 
-    const auto dense_index = static_cast<std::size_t>(source.value() - 1);
-    if (dense_index >= interfaces.size() || interfaces[dense_index] == nullptr)
+    const auto* dense_interface =
+        dense_context.active()
+        ? dense_context.interface(source)
+        : (static_cast<std::size_t>(
+               source.value() - 1) < interfaces.size()
+            ? interfaces[
+                static_cast<std::size_t>(
+                    source.value() - 1)].get()
+            : nullptr);
+
+    if (dense_interface == nullptr)
         return {status_code::not_found};
-    const auto values = interfaces[dense_index]->data_view().type_slots;
+
+    const auto values =
+        dense_interface->data_view().type_slots;
     if (index >= values.size())
         return {status_code::not_found};
     output = values[index];
@@ -830,10 +863,21 @@ status source_frontend_cache::persistence_object_slot(
             return baseline_cache->frontend_object_slot(source, index, output);
     }
 
-    const auto dense_index = static_cast<std::size_t>(source.value() - 1);
-    if (dense_index >= interfaces.size() || interfaces[dense_index] == nullptr)
+    const auto* dense_interface =
+        dense_context.active()
+        ? dense_context.interface(source)
+        : (static_cast<std::size_t>(
+               source.value() - 1) < interfaces.size()
+            ? interfaces[
+                static_cast<std::size_t>(
+                    source.value() - 1)].get()
+            : nullptr);
+
+    if (dense_interface == nullptr)
         return {status_code::not_found};
-    const auto values = interfaces[dense_index]->data_view().object_slots;
+
+    const auto values =
+        dense_interface->data_view().object_slots;
     if (index >= values.size())
         return {status_code::not_found};
     output = values[index];
@@ -863,10 +907,21 @@ status source_frontend_cache::persistence_member_slot(
             return baseline_cache->frontend_member_slot(source, index, output);
     }
 
-    const auto dense_index = static_cast<std::size_t>(source.value() - 1);
-    if (dense_index >= interfaces.size() || interfaces[dense_index] == nullptr)
+    const auto* dense_interface =
+        dense_context.active()
+        ? dense_context.interface(source)
+        : (static_cast<std::size_t>(
+               source.value() - 1) < interfaces.size()
+            ? interfaces[
+                static_cast<std::size_t>(
+                    source.value() - 1)].get()
+            : nullptr);
+
+    if (dense_interface == nullptr)
         return {status_code::not_found};
-    const auto values = interfaces[dense_index]->data_view().member_slots;
+
+    const auto values =
+        dense_interface->data_view().member_slots;
     if (index >= values.size())
         return {status_code::not_found};
     output = values[index];
@@ -880,6 +935,7 @@ source_frontend_cache_update source_frontend_cache::begin_update(
 }
 
 void source_frontend_cache::invalidate() noexcept {
+    dense_context = source_frontend_context{};
     interfaces.clear();
     frontend_blocks.clear();
     frontend_block_refs.clear();
@@ -899,6 +955,12 @@ source_frontend_cache_update::source_frontend_cache_update(
     source_frontend_cache_update&& other) noexcept
     : owner(std::exchange(other.owner, nullptr)),
       full_candidate(std::move(other.full_candidate)),
+      full_context_candidate(
+          std::move(other.full_context_candidate)),
+      full_context_candidate_active(
+          std::exchange(
+              other.full_context_candidate_active,
+              false)),
       full_frontend_blocks(
           std::move(other.full_frontend_blocks)),
       full_frontend_block_refs(
@@ -1008,6 +1070,60 @@ source_frontend_cache_update::find_replacement(
 
     return nullptr;
 }
+
+status source_frontend_cache_update::
+replace_full_context(
+    source_frontend_context&& context) noexcept {
+
+    if (!failure.ok())
+        return failure;
+
+    if (owner == nullptr ||
+        prepared ||
+        published ||
+        !full_reconstruction ||
+        owner->baseline_backed() ||
+        !context.active()) {
+        failure = {status_code::invalid_state};
+        return failure;
+    }
+
+    source_frontend_persistence_summary next_summary;
+
+    for (std::size_t index = 0;
+         index < context.source_slots();
+         ++index) {
+
+        if (index >= static_cast<std::size_t>(
+                (std::numeric_limits<std::uint32_t>::max)())) {
+            failure = {status_code::not_available};
+            return failure;
+        }
+
+        const auto* interface_value =
+            context.interface(
+                source_id{
+                    static_cast<std::uint32_t>(
+                        index + 1)});
+
+        if (!add_persistence_record(
+                next_summary,
+                persistence_record_of(
+                    interface_value))) {
+            failure = {status_code::not_available};
+            return failure;
+        }
+    }
+
+    full_context_candidate =
+        std::move(context);
+    full_context_candidate_active = true;
+    full_candidate.clear();
+    candidate_summary = next_summary;
+
+    return {};
+}
+
 
 status source_frontend_cache_update::replace(
     source_id source,
@@ -1185,16 +1301,56 @@ status source_frontend_cache_update::prepare_publish(
         if (full_reconstruction) {
             if (owner->baseline_backed())
                 return {status_code::invalid_state};
-            if (full_candidate.size() < required_source_count)
-                full_candidate.resize(required_source_count);
-            std::size_t capacity = 0;
-            if (!cache_headroom(required_source_count, capacity))
-                return {status_code::not_available};
-            full_candidate.reserve(capacity);
+
+            if (full_context_candidate_active) {
+                if (full_context_candidate.source_slots() !=
+                    required_source_count) {
+                    return {status_code::initialization_failed};
+                }
+            }
+            else {
+                if (full_candidate.size() < required_source_count)
+                    full_candidate.resize(required_source_count);
+
+                std::size_t capacity = 0;
+                if (!cache_headroom(
+                        required_source_count,
+                        capacity)) {
+                    return {status_code::not_available};
+                }
+
+                full_candidate.reserve(capacity);
+            }
 
             const auto block_result =
-                build_generation_frontend_blocks(
-                    full_candidate,
+                full_context_candidate_active
+                ? build_generation_frontend_blocks(
+                    [this](std::size_t index) noexcept
+                        -> source_interface* {
+
+                        if (index >=
+                            static_cast<std::size_t>(
+                                (std::numeric_limits<std::uint32_t>::max)())) {
+                            return nullptr;
+                        }
+
+                        return full_context_candidate.
+                            mutable_interface(
+                                source_id{
+                                    static_cast<std::uint32_t>(
+                                        index + 1)});
+                    },
+                    required_source_count,
+                    full_frontend_blocks,
+                    full_frontend_block_refs)
+                : build_generation_frontend_blocks(
+                    [this](std::size_t index) noexcept
+                        -> source_interface* {
+
+                        return index < full_candidate.size()
+                            ? full_candidate[index].get()
+                            : nullptr;
+                    },
                     required_source_count,
                     full_frontend_blocks,
                     full_frontend_block_refs);
@@ -1216,11 +1372,25 @@ status source_frontend_cache_update::prepare_publish(
                 }
             }
         } else {
-            if (required_source_count > owner->interfaces.capacity())
+            if (owner->dense_context.active()) {
+                const auto context_result =
+                    owner->dense_context.
+                        ensure_source_slots(
+                            required_source_count);
+
+                if (!context_result.ok())
+                    return context_result;
+            }
+            else if (required_source_count >
+                     owner->interfaces.capacity()) {
                 return {status_code::rebuild_required};
+            }
+
             for (const auto& item : replacements) {
                 if (!item.source ||
-                    static_cast<std::size_t>(item.source.value()) > required_source_count) {
+                    static_cast<std::size_t>(
+                        item.source.value()) >
+                        required_source_count) {
                     return {status_code::invalid_argument};
                 }
             }
@@ -1323,7 +1493,16 @@ void source_frontend_cache_update::publish_prepared() noexcept {
         return;
 
     if (full_reconstruction) {
-        owner->interfaces.swap(full_candidate);
+        if (full_context_candidate_active) {
+            owner->dense_context =
+                std::move(full_context_candidate);
+            owner->interfaces.clear();
+        }
+        else {
+            owner->dense_context =
+                source_frontend_context{};
+            owner->interfaces.swap(full_candidate);
+        }
 
         owner->frontend_blocks =
             std::move(full_frontend_blocks);
@@ -1366,10 +1545,25 @@ void source_frontend_cache_update::publish_prepared() noexcept {
             required_source_count !=
                 owner->logical_source_count;
 
-        while (owner->interfaces.size() < required_source_count)
-            owner->interfaces.emplace_back();
-        for (auto& item : replacements)
-            owner->interfaces[item.source.value() - 1] = std::move(item.interface);
+        if (owner->dense_context.active()) {
+            for (auto& item : replacements) {
+                owner->dense_context.adopt(
+                    item.source,
+                    std::move(item.interface));
+            }
+        }
+        else {
+            while (owner->interfaces.size() <
+                   required_source_count) {
+                owner->interfaces.emplace_back();
+            }
+
+            for (auto& item : replacements) {
+                owner->interfaces[
+                    item.source.value() - 1] =
+                        std::move(item.interface);
+            }
+        }
 
         if (invalidates_bulk_frontend)
             owner->native_frontend_block_bulk_complete_state = false;

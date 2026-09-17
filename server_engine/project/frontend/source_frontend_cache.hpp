@@ -8,7 +8,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <limits>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
 namespace cw::server {
@@ -65,6 +67,179 @@ struct source_frontend_persistence_view final {
     source_interface_data_view data{};
 };
 
+// Owns dense construction-time Source interfaces for one full Frontend build.
+// One heap owner keeps all interface object addresses stable across context moves;
+// individual Sources are identities, never heap owners.
+class source_frontend_context final {
+public:
+    source_frontend_context() noexcept = default;
+
+    source_frontend_context(
+        const source_frontend_context&) = delete;
+    source_frontend_context& operator=(
+        const source_frontend_context&) = delete;
+    source_frontend_context(
+        source_frontend_context&&) noexcept = default;
+    source_frontend_context& operator=(
+        source_frontend_context&&) noexcept = default;
+
+    [[nodiscard]] status initialize(
+        std::size_t source_slots) noexcept {
+
+        if (source_slots == 0)
+            return {status_code::invalid_argument};
+
+        try {
+            auto candidate =
+                std::make_unique<storage>();
+
+            candidate->base.resize(source_slots);
+            candidate->current.assign(
+                source_slots,
+                nullptr);
+            candidate->overlay.resize(
+                source_slots);
+
+            value = std::move(candidate);
+            return {};
+        }
+        catch (const std::bad_alloc&) {
+            return {status_code::not_available};
+        }
+        catch (const std::length_error&) {
+            return {status_code::not_available};
+        }
+    }
+
+    [[nodiscard]] bool active() const noexcept {
+        return value != nullptr;
+    }
+
+    [[nodiscard]] std::size_t source_slots() const noexcept {
+        return value != nullptr
+            ? value->current.size()
+            : 0;
+    }
+
+    [[nodiscard]] source_interface* prepare(
+        source_id source) noexcept {
+
+        if (value == nullptr || !source)
+            return nullptr;
+
+        const auto index =
+            static_cast<std::size_t>(
+                source.value() - 1);
+
+        return index < value->base.size()
+            ? &value->base[index]
+            : nullptr;
+    }
+
+    void publish(source_id source) noexcept {
+        if (value == nullptr || !source)
+            return;
+
+        const auto index =
+            static_cast<std::size_t>(
+                source.value() - 1);
+
+        if (index < value->base.size() &&
+            index < value->current.size()) {
+            value->current[index] =
+                &value->base[index];
+        }
+    }
+
+    [[nodiscard]] status ensure_source_slots(
+        std::size_t required) noexcept {
+
+        if (value == nullptr)
+            return {status_code::invalid_state};
+
+        if (required <= value->current.size())
+            return {};
+
+        try {
+            value->current.resize(
+                required,
+                nullptr);
+            value->overlay.resize(
+                required);
+            return {};
+        }
+        catch (const std::bad_alloc&) {
+            return {status_code::not_available};
+        }
+        catch (const std::length_error&) {
+            return {status_code::not_available};
+        }
+    }
+
+    void adopt(
+        source_id source,
+        std::unique_ptr<source_interface> replacement) noexcept {
+
+        if (value == nullptr || !source)
+            return;
+
+        const auto index =
+            static_cast<std::size_t>(
+                source.value() - 1);
+
+        if (index >= value->current.size() ||
+            index >= value->overlay.size()) {
+            return;
+        }
+
+        value->overlay[index] =
+            std::move(replacement);
+
+        value->current[index] =
+            value->overlay[index]
+            ? value->overlay[index].get()
+            : nullptr;
+    }
+
+    [[nodiscard]] const source_interface* interface(
+        source_id source) const noexcept {
+
+        if (value == nullptr || !source)
+            return nullptr;
+
+        const auto index =
+            static_cast<std::size_t>(
+                source.value() - 1);
+
+        return index < value->current.size()
+            ? value->current[index]
+            : nullptr;
+    }
+
+    [[nodiscard]] source_interface* mutable_interface(
+        source_id source) noexcept {
+
+        return const_cast<source_interface*>(
+            static_cast<
+                const source_frontend_context&>(
+                    *this).interface(source));
+    }
+
+private:
+    struct storage final {
+        std::vector<source_interface> base;
+        std::vector<source_interface*> current;
+
+        // Sparse Gn replacements only. G0 does not allocate one interface
+        // object per Source.
+        std::vector<
+            std::unique_ptr<source_interface>>
+                overlay;
+    };
+
+    std::unique_ptr<storage> value;
+};
+
 // Dense G0 persistence traversal. The view keeps ownership private while
 // allowing SAVE to walk native Source interfaces directly by source_id order.
 class source_frontend_native_persistence_view final {
@@ -72,30 +247,57 @@ public:
     source_frontend_native_persistence_view() noexcept = default;
 
     [[nodiscard]] explicit operator bool() const noexcept {
-        return values != nullptr;
+        return context != nullptr || values != nullptr;
     }
 
     [[nodiscard]] std::size_t size() const noexcept {
-        return values != nullptr ? values->size() : 0;
+        if (context != nullptr)
+            return context->source_slots();
+
+        return values != nullptr
+            ? values->size()
+            : 0;
     }
 
     [[nodiscard]] const source_interface* operator[](
         std::size_t index) const noexcept {
 
-        if (values == nullptr || index >= values->size())
+        if (context != nullptr) {
+            if (index >= context->source_slots() ||
+                index >= static_cast<std::size_t>(
+                    (std::numeric_limits<std::uint32_t>::max)())) {
+                return nullptr;
+            }
+
+            return context->interface(
+                source_id{
+                    static_cast<std::uint32_t>(
+                        index + 1)});
+        }
+
+        if (values == nullptr ||
+            index >= values->size()) {
             return nullptr;
+        }
 
         return (*values)[index].get();
     }
 
 private:
     explicit source_frontend_native_persistence_view(
-        const std::vector<std::unique_ptr<source_interface>>&
+        const source_frontend_context& value) noexcept
+        : context(&value) {}
+
+    explicit source_frontend_native_persistence_view(
+        const std::vector<
+            std::unique_ptr<source_interface>>&
             values_value) noexcept
         : values(&values_value) {}
 
-    const std::vector<std::unique_ptr<source_interface>>* values =
-        nullptr;
+    const source_frontend_context* context = nullptr;
+    const std::vector<
+        std::unique_ptr<source_interface>>* values =
+            nullptr;
 
     friend class source_frontend_cache;
 };
@@ -115,6 +317,13 @@ public:
 
     [[nodiscard]] bool complete() const noexcept { return complete_state; }
 
+    [[nodiscard]] std::size_t
+    dense_context_sources() const noexcept {
+        return dense_context.active()
+            ? dense_context.source_slots()
+            : 0;
+    }
+
     [[nodiscard]] const source_interface* interface(source_id source) const noexcept;
 
     // Allocation-free SAVE boundary. Untouched baseline interface records are
@@ -125,8 +334,11 @@ public:
         if (baseline_cache != nullptr)
             return {};
 
-        return source_frontend_native_persistence_view{
-            interfaces};
+        return dense_context.active()
+            ? source_frontend_native_persistence_view{
+                dense_context}
+            : source_frontend_native_persistence_view{
+                interfaces};
     }
 
     [[nodiscard]] status persistence_view(
@@ -257,7 +469,9 @@ private:
     [[nodiscard]] const source_interface* materialize_baseline(
         source_id source) const noexcept;
 
-    // Detached/G0 storage remains dense and preserves the existing fast path.
+    // Full G0 construction is owned by one dense Frontend context. The legacy
+    // vector remains only as a compatibility fallback for pre-context callers.
+    source_frontend_context dense_context;
     std::vector<std::unique_ptr<source_interface>> interfaces;
 
     source_frontend_block_store frontend_blocks;
@@ -294,6 +508,9 @@ public:
         source_id source,
         std::unique_ptr<source_interface> interface_value) noexcept;
 
+    [[nodiscard]] status replace_full_context(
+        source_frontend_context&& context) noexcept;
+
     [[nodiscard]] status prepare_publish(std::size_t required_source_count) noexcept;
     void publish_prepared() noexcept;
     void cancel() noexcept;
@@ -326,6 +543,8 @@ private:
 
     source_frontend_cache* owner = nullptr;
     std::vector<std::unique_ptr<source_interface>> full_candidate;
+    source_frontend_context full_context_candidate;
+    bool full_context_candidate_active = false;
 
     source_frontend_block_store full_frontend_blocks;
     std::vector<source_frontend_block_ref>

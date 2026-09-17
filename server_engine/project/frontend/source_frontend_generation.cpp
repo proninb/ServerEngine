@@ -39,7 +39,7 @@ struct generation_source_state final {
     std::vector<resolved_import> imports;
     std::vector<std::uint32_t> dependents;
     parsed_source parsed;
-    std::unique_ptr<source_interface> interface;
+    source_interface* interface = nullptr;
     status work_status{};
     std::uint32_t remaining = 0;
 };
@@ -780,6 +780,17 @@ status source_frontend_generation::build(
                 graph_schedule_begin,
                 frontend_clock::now());
 
+        source_frontend_context dense_context;
+
+        result = dense_context.initialize(
+            sources.source_count());
+        if (!result.ok())
+            return result;
+
+        summary.context_backed = true;
+        summary.context_sources =
+            dense_context.source_slots();
+
         const auto parse_begin = frontend_clock::now();
         source_parser parser{semantic};
         std::size_t parsed_count = 0;
@@ -795,7 +806,7 @@ status source_frontend_generation::build(
                     interface_imports.reserve(state.dependencies.size());
                     for (const auto& item : state.imports) {
                         const auto dependency_index = state_by_source[item.dependency.value()];
-                        const auto* imported = states[dependency_index].interface.get();
+                        const auto* imported = states[dependency_index].interface;
                         if (imported == nullptr) {
                             state.work_status = {status_code::initialization_failed};
                             return;
@@ -804,7 +815,7 @@ status source_frontend_generation::build(
                     }
                     for (const auto dependency : state.dependencies) {
                         const auto dependency_index = state_by_source[dependency.value()];
-                        const auto* imported = states[dependency_index].interface.get();
+                        const auto* imported = states[dependency_index].interface;
                         if (imported == nullptr) {
                             state.work_status = {status_code::initialization_failed};
                             return;
@@ -823,7 +834,16 @@ status source_frontend_generation::build(
 
                     const auto facts = state.parsed.facts();
 
-                    state.interface = std::make_unique<source_interface>();
+                    state.interface =
+                        dense_context.prepare(
+                            state.source);
+
+                    if (state.interface == nullptr) {
+                        state.work_status = {
+                            status_code::
+                                initialization_failed};
+                        return;
+                    }
                                         // GEN-02C18.1: retain compact persistence only for incremental
                     // frontend construction. Full REBUILD has no baseline cache and
                     // publishes directly into canonical cache-wide arenas.
@@ -832,6 +852,11 @@ status source_frontend_generation::build(
                         semantic.identities(),
                         interface_imports,
                         cache != nullptr);
+
+                    if (state.work_status.ok()) {
+                        dense_context.publish(
+                            state.source);
+                    }
                 }
                 catch (const std::bad_alloc&) {
                     state.work_status = {status_code::not_available};
@@ -874,12 +899,15 @@ status source_frontend_generation::build(
         const auto result_materialize_begin = frontend_clock::now();
         source_frontend_result candidate;
         candidate.root_sources = std::move(resolved_roots);
+        candidate.dense_context =
+            std::move(dense_context);
+
         candidate.entries.reserve(states.size());
         for (auto& state : states) {
             candidate.entries.push_back(source_frontend_entry{
                 state.source,
                 std::move(state.parsed),
-                std::move(state.interface),
+                std::unique_ptr<source_interface>{},
             });
         }
         summary.result_materialize_ns +=

@@ -47,6 +47,10 @@ struct source_frontend_summary final {
     std::uint64_t graph_schedule_ns = 0;
     std::uint64_t parse_ns = 0;
     std::uint64_t result_materialize_ns = 0;
+
+    // R5E3-B1: full G0 Source interfaces are owned by one dense context.
+    bool context_backed = false;
+    std::size_t context_sources = 0;
 };
 
 struct source_frontend_entry final {
@@ -76,10 +80,21 @@ private:
         return std::move(root_sources);
     }
 
+    [[nodiscard]] bool
+    context_backed() const noexcept {
+        return dense_context.active();
+    }
+
+    [[nodiscard]] source_frontend_context
+    release_context() noexcept {
+        return std::move(dense_context);
+    }
+
     friend class source_frontend_generation;
     friend class project_build_orchestrator;
 
     std::vector<source_frontend_entry> entries;
+    source_frontend_context dense_context;
 
     // Exact configuration-root Source identities in caller order. These are
     // resolved once by the frontend and become Generation composition metadata.

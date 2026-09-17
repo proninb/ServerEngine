@@ -5390,6 +5390,12 @@ struct d4l3b_extent_case final {
         rebuild.telemetry.
             generation_finalize_frontend_move_owned;
 
+    const bool r5e3b1_frontend_context =
+        !finalized ||
+        (rebuild.telemetry.frontend.context_backed &&
+         rebuild.telemetry.frontend.context_sources ==
+             source_count);
+
     const auto pass =
         canonical &&
         reconstructed_payloads == 0 &&
@@ -5397,7 +5403,8 @@ struct d4l3b_extent_case final {
         save_is_durability_only &&
         native_compiled_graph &&
         r5e2d_build_cache_storage &&
-        r5e3a_frontend_handoff;
+        r5e3a_frontend_handoff &&
+        r5e3b1_frontend_context;
 
     std::cout
         << "R5C_CANONICAL_GENERATION_STORAGE_GATE,"
@@ -5434,6 +5441,12 @@ struct d4l3b_extent_case final {
             rebuild.telemetry.
                 generation_finalize_release_graph_ns) /
             1'000'000.0
+        << ",frontend_context_backed="
+        << (rebuild.telemetry.frontend.context_backed
+            ? 1
+            : 0)
+        << ",frontend_context_sources="
+        << rebuild.telemetry.frontend.context_sources
         << ",frontend_handoff_ms="
         << static_cast<double>(
             rebuild.telemetry.
