@@ -1381,6 +1381,49 @@ status project_manager::construct_reserved(
         output.telemetry.generation_finalize_build_cache_bytes =
             finalized_segments.build_segment().size();
 
+        output.telemetry.
+            generation_finalize_build_cache_logical_bytes =
+                finalized.build_cache_logical_bytes();
+        output.telemetry.
+            generation_finalize_build_cache_prefix_bytes =
+                finalized.build_cache_prefix_bytes();
+        output.telemetry.
+            generation_finalize_build_cache_owned_section_bytes =
+                finalized.build_cache_owned_section_bytes();
+        output.telemetry.
+            generation_finalize_build_cache_direct_frontend_bytes =
+                finalize_detail.
+                    build_cache_native_frontend_direct_bytes;
+        output.telemetry.
+            generation_finalize_build_cache_physical_bytes =
+                finalized.build_cache_physical_bytes();
+        output.telemetry.
+            generation_finalize_build_cache_alignment_padding_bytes =
+                finalized.build_cache_alignment_padding_bytes();
+        output.telemetry.
+            generation_finalize_build_cache_encoder_owned_capacity_bytes =
+                finalized.
+                    build_cache_encoder_owned_capacity_bytes();
+        output.telemetry.
+            generation_finalize_build_cache_monolithic_staging_bytes =
+                finalized.build_cache_monolithic_staging_bytes();
+        output.telemetry.
+            generation_finalize_build_cache_physical_extents =
+                static_cast<std::uint32_t>(
+                    finalized.build_cache_physical_extents());
+        output.telemetry.
+            generation_finalize_build_cache_direct_frontend_extents =
+                finalize_detail.
+                    build_cache_native_frontend_direct_extents;
+        output.telemetry.
+            generation_finalize_build_cache_direct_frontend_sections =
+                finalize_detail.
+                    build_cache_native_frontend_direct_sections;
+        output.telemetry.
+            generation_finalize_build_cache_direct_frontend_fallback =
+                finalize_detail.
+                    build_cache_native_frontend_direct_fallback;
+
         project_ready_generation_activation_telemetry
             activation_detail;
 

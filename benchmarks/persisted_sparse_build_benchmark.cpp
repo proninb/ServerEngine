@@ -5345,12 +5345,53 @@ struct d4l3b_extent_case final {
          rebuild.telemetry.
              generation_finalize_compiled_fallback_graph_bytes == 0);
 
+    const bool r5e2d_build_cache_storage =
+        !finalized ||
+        (rebuild.telemetry.
+             generation_finalize_build_cache_logical_bytes ==
+             rebuild.telemetry.
+                 generation_finalize_build_cache_bytes &&
+         rebuild.telemetry.
+             generation_finalize_build_cache_prefix_bytes ==
+             build_cache_image_prefix_size &&
+         rebuild.telemetry.
+             generation_finalize_build_cache_owned_section_bytes != 0 &&
+         rebuild.telemetry.
+             generation_finalize_build_cache_direct_frontend_bytes != 0 &&
+         rebuild.telemetry.
+             generation_finalize_build_cache_direct_frontend_sections != 0 &&
+         rebuild.telemetry.
+             generation_finalize_build_cache_direct_frontend_fallback == 0 &&
+         rebuild.telemetry.
+             generation_finalize_build_cache_physical_bytes ==
+             rebuild.telemetry.
+                 generation_finalize_build_cache_prefix_bytes +
+             rebuild.telemetry.
+                 generation_finalize_build_cache_owned_section_bytes +
+             rebuild.telemetry.
+                 generation_finalize_build_cache_direct_frontend_bytes &&
+         rebuild.telemetry.
+             generation_finalize_build_cache_physical_bytes <=
+             rebuild.telemetry.
+                 generation_finalize_build_cache_logical_bytes &&
+         rebuild.telemetry.
+             generation_finalize_build_cache_alignment_padding_bytes ==
+             rebuild.telemetry.
+                 generation_finalize_build_cache_logical_bytes -
+             rebuild.telemetry.
+                 generation_finalize_build_cache_physical_bytes &&
+         rebuild.telemetry.
+             generation_finalize_build_cache_monolithic_staging_bytes == 0 &&
+         rebuild.telemetry.
+             generation_finalize_build_cache_physical_extents != 0);
+
     const auto pass =
         canonical &&
         reconstructed_payloads == 0 &&
         reconstructed_bytes == 0 &&
         save_is_durability_only &&
-        native_compiled_graph;
+        native_compiled_graph &&
+        r5e2d_build_cache_storage;
 
     std::cout
         << "R5C_CANONICAL_GENERATION_STORAGE_GATE,"
@@ -5634,6 +5675,42 @@ struct d4l3b_extent_case final {
         << ",expected_nonzero_graph_mask="
         << rebuild.telemetry.
             generation_finalize_compiled_expected_nonzero_graph_mask
+        << ",build_cache_logical_bytes="
+        << rebuild.telemetry.
+            generation_finalize_build_cache_logical_bytes
+        << ",build_cache_prefix_bytes="
+        << rebuild.telemetry.
+            generation_finalize_build_cache_prefix_bytes
+        << ",build_cache_owned_section_bytes="
+        << rebuild.telemetry.
+            generation_finalize_build_cache_owned_section_bytes
+        << ",build_cache_direct_frontend_bytes="
+        << rebuild.telemetry.
+            generation_finalize_build_cache_direct_frontend_bytes
+        << ",build_cache_direct_frontend_extents="
+        << rebuild.telemetry.
+            generation_finalize_build_cache_direct_frontend_extents
+        << ",build_cache_direct_frontend_sections="
+        << rebuild.telemetry.
+            generation_finalize_build_cache_direct_frontend_sections
+        << ",build_cache_direct_frontend_fallback="
+        << rebuild.telemetry.
+            generation_finalize_build_cache_direct_frontend_fallback
+        << ",build_cache_physical_bytes="
+        << rebuild.telemetry.
+            generation_finalize_build_cache_physical_bytes
+        << ",build_cache_alignment_padding_bytes="
+        << rebuild.telemetry.
+            generation_finalize_build_cache_alignment_padding_bytes
+        << ",build_cache_physical_extents="
+        << rebuild.telemetry.
+            generation_finalize_build_cache_physical_extents
+        << ",build_cache_encoder_owned_capacity_bytes="
+        << rebuild.telemetry.
+            generation_finalize_build_cache_encoder_owned_capacity_bytes
+        << ",build_cache_monolithic_staging_bytes="
+        << rebuild.telemetry.
+            generation_finalize_build_cache_monolithic_staging_bytes
         << ",save_freeze_ms="
         << static_cast<double>(
             telemetry.generation_freeze_ns) /

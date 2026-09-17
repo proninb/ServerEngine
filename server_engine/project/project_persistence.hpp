@@ -160,6 +160,12 @@ struct project_generation_freeze_telemetry final {
     std::uint32_t build_cache_mapped_baseline_sparse_directory_borrowed_extents = 0;
     std::uint32_t build_cache_mapped_baseline_sparse_frontend_borrowed_extents = 0;
     std::uint32_t build_cache_mapped_baseline_sparse_frontend_owned_extents = 0;
+
+    std::uint64_t build_cache_native_frontend_direct_bytes = 0;
+    std::uint32_t build_cache_native_frontend_direct_extents = 0;
+    std::uint32_t build_cache_native_frontend_direct_sections = 0;
+    std::uint32_t build_cache_native_frontend_direct_fallback = 0;
+
     std::uint64_t build_cache_provenance_bytes = 0;
     std::uint32_t build_cache_provenance_sections = 0;
     std::uint64_t bind_ns = 0;
@@ -293,6 +299,81 @@ public:
     [[nodiscard]] const build_cache_generation_segments&
     build_cache_sections() const noexcept {
         return build_sections;
+    }
+
+    [[nodiscard]] std::size_t
+    build_cache_logical_bytes() const noexcept {
+        return build_sections.valid()
+            ? build_sections.logical_size()
+            : build.size();
+    }
+
+    [[nodiscard]] std::size_t
+    build_cache_prefix_bytes() const noexcept {
+        return build_sections.valid()
+            ? build_sections.prefix().size()
+            : build.size();
+    }
+
+    [[nodiscard]] std::size_t
+    build_cache_owned_section_bytes() const noexcept {
+        std::size_t total = 0;
+
+        for (const auto& section :
+             build_owned_sections.sections) {
+            total += section.size();
+        }
+
+        return total;
+    }
+
+    [[nodiscard]] std::size_t
+    build_cache_encoder_owned_capacity_bytes() const noexcept {
+        std::size_t total = build.capacity();
+
+        for (const auto& section :
+             build_owned_sections.sections) {
+            total += section.capacity();
+        }
+
+        return total;
+    }
+
+    [[nodiscard]] std::size_t
+    build_cache_physical_bytes() const noexcept {
+        return build_sections.valid()
+            ? build_sections.physical_size()
+            : build.size();
+    }
+
+    [[nodiscard]] std::size_t
+    build_cache_alignment_padding_bytes() const noexcept {
+        const auto logical =
+            build_cache_logical_bytes();
+        const auto physical =
+            build_cache_physical_bytes();
+
+        return logical >= physical
+            ? logical - physical
+            : 0;
+    }
+
+    [[nodiscard]] std::size_t
+    build_cache_physical_extents() const noexcept {
+        return build_sections.valid()
+            ? build_sections.physical_extent_count()
+            : (build.empty() ? 0u : 1u);
+    }
+
+    [[nodiscard]] std::size_t
+    build_cache_monolithic_staging_bytes() const noexcept {
+        if (!build_owned_sections.active())
+            return build.size();
+
+        return build.size() ==
+            build_cache_image_prefix_size
+            ? 0
+            : build.size();
     }
 
     [[nodiscard]] status adopt_compiled_native_graph(

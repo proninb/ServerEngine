@@ -100,6 +100,21 @@ struct project_build_telemetry final {
     std::uint64_t generation_finalize_source_manager_bytes = 0;
     std::uint64_t generation_finalize_change_state_bytes = 0;
     std::uint64_t generation_finalize_build_cache_bytes = 0;
+
+    // R5E2D storage proof for the committed Build Cache.
+    std::uint64_t generation_finalize_build_cache_logical_bytes = 0;
+    std::uint64_t generation_finalize_build_cache_prefix_bytes = 0;
+    std::uint64_t generation_finalize_build_cache_owned_section_bytes = 0;
+    std::uint64_t generation_finalize_build_cache_direct_frontend_bytes = 0;
+    std::uint64_t generation_finalize_build_cache_physical_bytes = 0;
+    std::uint64_t generation_finalize_build_cache_alignment_padding_bytes = 0;
+    std::uint64_t generation_finalize_build_cache_encoder_owned_capacity_bytes = 0;
+    std::uint64_t generation_finalize_build_cache_monolithic_staging_bytes = 0;
+    std::uint32_t generation_finalize_build_cache_physical_extents = 0;
+    std::uint32_t generation_finalize_build_cache_direct_frontend_extents = 0;
+    std::uint32_t generation_finalize_build_cache_direct_frontend_sections = 0;
+    std::uint32_t generation_finalize_build_cache_direct_frontend_fallback = 0;
+
     bool generation_finalized = false;
 
     source_frontend_summary frontend{};
