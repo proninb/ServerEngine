@@ -587,6 +587,96 @@ private:
         candidate.declarations.push_back(source_declaration_ref{index, kind, declaration});
     }
 
+    // Skips an initializer up to the next ',' or ';' at nesting depth 0,
+    // consuming nested (), {}, []. The terminator is left current.
+    // Returns false on EOF or an unmatched closing bracket.
+    [[nodiscard]] bool skip_declarator_initializer(bool& comma) noexcept {
+        std::size_t depth = 0;
+        comma = false;
+        for (;;) {
+            const auto& token = current();
+            if (token.kind == parser_token_kind::eof)
+                return false;
+            if (token.kind == parser_token_kind::punctuation) {
+                switch (token.punctuation) {
+                case parser_punctuation::left_brace:
+                case parser_punctuation::left_bracket:
+                case parser_punctuation::left_parenthesis:
+                    ++depth;
+                    break;
+                case parser_punctuation::right_brace:
+                case parser_punctuation::right_bracket:
+                case parser_punctuation::right_parenthesis:
+                    if (depth == 0)
+                        return false;
+                    --depth;
+                    break;
+                case parser_punctuation::comma:
+                    if (depth == 0) {
+                        comma = true;
+                        return true;
+                    }
+                    break;
+                case parser_punctuation::semicolon:
+                    if (depth == 0)
+                        return true;
+                    break;
+                default:
+                    break;
+                }
+            }
+            advance();
+        }
+    }
+
+    // Parses one `: <positive-decimal>` bit-field width. The width is
+    // validated but not retained: V3 has no layout stage yet.
+    [[nodiscard]] status parse_bit_field_width() {
+        advance();
+        if (current().kind != parser_token_kind::integer_literal)
+            return fail_unsupported(span(current()), "only decimal bit-field widths are implemented");
+        std::uint64_t bound = 0;
+        const auto number = token_text(current());
+        const auto conversion = std::from_chars(number.data(), number.data() + number.size(), bound);
+        if (conversion.ec != std::errc{} || conversion.ptr != number.data() + number.size() || bound == 0)
+            return fail_syntax(span(current()), "bit-field width must be a positive decimal integer");
+        advance();
+        return {};
+    }
+
+    [[nodiscard]] status parse_array_suffix(bool member_context) {
+        while (punctuation(parser_punctuation::left_bracket)) {
+            advance();
+            if (punctuation(parser_punctuation::right_bracket)) {
+                candidate.modifiers.push_back(source_type_modifier{0, source_type_modifier_kind::unbounded_array});
+                advance();
+                continue;
+            }
+            if (current().kind != parser_token_kind::integer_literal) {
+                return fail_syntax(span(current()), member_context
+                    ? "expected positive member array bound or ']'"
+                    : "expected positive object array bound or ']'");
+            }
+            std::uint64_t bound = 0;
+            const auto number = token_text(current());
+            const auto conversion = std::from_chars(number.data(), number.data() + number.size(), bound);
+            if (conversion.ec != std::errc{} || conversion.ptr != number.data() + number.size() || bound == 0) {
+                return fail_syntax(span(current()), member_context
+                    ? "member array bound must be a positive decimal integer"
+                    : "object array bound must be a positive decimal integer");
+            }
+            advance();
+            if (!punctuation(parser_punctuation::right_bracket)) {
+                return fail_syntax(span(current()), member_context
+                    ? "expected ']' after member array bound"
+                    : "expected ']' after object array bound");
+            }
+            candidate.modifiers.push_back(source_type_modifier{bound, source_type_modifier_kind::bounded_array});
+            advance();
+        }
+        return {};
+    }
+
     [[nodiscard]] status parse_scope(identity_ref scope, bool expect_close, std::size_t depth) {
         if (depth > 128)
             return fail_unsupported(span(current()), "semantic scope nesting exceeds 128 levels");
@@ -643,31 +733,57 @@ private:
         if (current().kind != parser_token_kind::identifier)
             return fail_syntax(span(current()), "expected namespace identifier");
 
-        const auto name_span = span(current());
-        identity_ref identity = nullptr;
-        auto result = semantic.resolve_declaration(
-            parent, token_text(current()), identity_kind::namespace_scope, identity);
-        if (!result.ok()) {
-            return fail(diagnostics::parser_semantic_resolution_failed, name_span,
-                "failed to resolve namespace declaration", result.code);
+        // Nested-name `namespace A::B::C`: one fact/declaration per level,
+        // each nested under the previous, sharing a single brace body.
+        // `::` arrives as two consecutive colon tokens.
+        struct namespace_level final {
+            std::uint32_t namespace_index = 0;
+            std::uint32_t sequence_index = 0;
+        };
+        std::vector<namespace_level> levels;
+        identity_ref scope = parent;
+        for (;;) {
+            const auto name_span = span(current());
+            identity_ref identity = nullptr;
+            auto result = semantic.resolve_declaration(
+                scope, token_text(current()), identity_kind::namespace_scope, identity);
+            if (!result.ok()) {
+                return fail(diagnostics::parser_semantic_resolution_failed, name_span,
+                    "failed to resolve namespace declaration", result.code);
+            }
+            advance();
+            if (levels.size() >= 128)
+                return fail_unsupported(span(current()), "namespace name nesting exceeds 128 levels");
+            const auto namespace_index = static_cast<std::uint32_t>(candidate.namespaces.size());
+            candidate.namespaces.push_back(source_namespace_fact{identity, {}});
+            const auto sequence_index = static_cast<std::uint32_t>(candidate.declarations.size());
+            append_declaration(source_declaration_kind::namespace_scope, namespace_index, {});
+            levels.push_back(namespace_level{namespace_index, sequence_index});
+            scope = identity;
+            if (!punctuation(parser_punctuation::colon))
+                break;
+            const auto* second = cursor + 1 < tokens.size() ? &tokens[cursor + 1] : nullptr;
+            if (second == nullptr || second->kind != parser_token_kind::punctuation ||
+                second->punctuation != parser_punctuation::colon)
+                break;
+            advance();
+            advance();
+            if (current().kind != parser_token_kind::identifier)
+                return fail_syntax(span(current()), "expected namespace identifier after '::'");
         }
-        advance();
         if (!punctuation(parser_punctuation::left_brace))
-            return fail_unsupported(span(current()), "namespace alias/nested-name namespace syntax is not implemented");
-
-        const auto namespace_index = static_cast<std::uint32_t>(candidate.namespaces.size());
-        candidate.namespaces.push_back(source_namespace_fact{identity, {}});
-        const auto sequence_index = candidate.declarations.size();
-        append_declaration(source_declaration_kind::namespace_scope, namespace_index, {});
+            return fail_unsupported(span(current()), "namespace aliases are not implemented");
 
         advance();
-        result = parse_scope(identity, true, depth + 1);
-        if (!result.ok())
-            return result;
+        const auto body = parse_scope(scope, true, depth + 1);
+        if (!body.ok())
+            return body;
         const auto end = current().offset + current().length;
         const auto declaration = source_span{start, end - start};
-        candidate.namespaces[namespace_index].declaration = declaration;
-        candidate.declarations[sequence_index].declaration = declaration;
+        for (const auto& level : levels) {
+            candidate.namespaces[level.namespace_index].declaration = declaration;
+            candidate.declarations[level.sequence_index].declaration = declaration;
+        }
         advance();
         return {};
     }
@@ -828,77 +944,98 @@ private:
             break;
         }
 
-        if (current().kind != parser_token_kind::identifier)
-            return fail_syntax(span(current()), "expected object identifier");
+        // Declarator list: `name [arrays] [= init] (, ...)? ;`
+        // Shared type modifiers are duplicated per declarator (see parse_member).
+        const auto object_shared_end = candidate.modifiers.size();
+        bool object_first = true;
+        for (;;) {
+            if (current().kind != parser_token_kind::identifier)
+                return fail_syntax(span(current()), "expected object identifier");
 
-        const auto object_name_span = span(current());
-        identity_ref object_identity = nullptr;
-        result = semantic.resolve_declaration(
-            scope, token_text(current()), identity_kind::object, object_identity);
-        if (!result.ok()) {
-            return fail(diagnostics::parser_semantic_resolution_failed, object_name_span,
-                "failed to resolve object declaration", result.code);
-        }
-        advance();
-
-        while (punctuation(parser_punctuation::left_bracket)) {
-            advance();
-            if (punctuation(parser_punctuation::right_bracket)) {
-                candidate.modifiers.push_back(source_type_modifier{0, source_type_modifier_kind::unbounded_array});
-                advance();
-                continue;
+            const auto object_name_span = span(current());
+            identity_ref object_identity = nullptr;
+            result = semantic.resolve_declaration(
+                scope, token_text(current()), identity_kind::object, object_identity);
+            if (!result.ok()) {
+                return fail(diagnostics::parser_semantic_resolution_failed, object_name_span,
+                    "failed to resolve object declaration", result.code);
             }
-            if (current().kind != parser_token_kind::integer_literal)
-                return fail_syntax(span(current()), "expected positive object array bound or ']'");
-            std::uint64_t bound = 0;
-            const auto number = token_text(current());
-            const auto conversion = std::from_chars(number.data(), number.data() + number.size(), bound);
-            if (conversion.ec != std::errc{} || conversion.ptr != number.data() + number.size() || bound == 0)
-                return fail_syntax(span(current()), "object array bound must be a positive decimal integer");
             advance();
-            if (!punctuation(parser_punctuation::right_bracket))
-                return fail_syntax(span(current()), "expected ']' after object array bound");
-            candidate.modifiers.push_back(source_type_modifier{bound, source_type_modifier_kind::bounded_array});
+
+            std::size_t object_declarator_begin = modifier_begin;
+            if (!object_first) {
+                try {
+                    candidate.modifiers.reserve(object_shared_end + (object_shared_end - modifier_begin));
+                    object_declarator_begin = candidate.modifiers.size();
+                    for (std::size_t index = modifier_begin; index < object_shared_end; ++index)
+                        candidate.modifiers.push_back(candidate.modifiers[index]);
+                }
+                catch (const std::bad_alloc&) {
+                    return {status_code::not_available};
+                }
+                catch (const std::length_error&) {
+                    return {status_code::not_available};
+                }
+            }
+
+            result = parse_array_suffix(false);
+            if (!result.ok())
+                return result;
+
+            bool object_comma = false;
+            if (punctuation(parser_punctuation::equal)) {
+                advance();
+                if (!skip_declarator_initializer(object_comma))
+                    return fail_syntax(span(current()), "expected ',' or ';' after object initializer");
+            }
+            else if (punctuation(parser_punctuation::comma)) {
+                object_comma = true;
+            }
+            else if (!punctuation(parser_punctuation::semicolon)) {
+                return fail_unsupported(span(current()), "functions and function-style declarators are not implemented");
+            }
+
+            const auto object_declaration_end = current().offset + current().length;
+
+            const auto object_modifier_count = candidate.modifiers.size() - object_declarator_begin;
+            if (object_declarator_begin > (std::numeric_limits<std::uint32_t>::max)() ||
+                object_modifier_count > (std::numeric_limits<std::uint32_t>::max)()) {
+                return {status_code::not_available};
+            }
+
+            const auto object_modifier_range = source_fact_range{
+                static_cast<std::uint32_t>(object_declarator_begin),
+                static_cast<std::uint32_t>(object_modifier_count),
+            };
+            const auto spelling = source_span{type_start, type_end - type_start};
+            const auto type = semantic_type != nullptr
+                ? source_type_ref::semantic(semantic_type, object_modifier_range, spelling)
+                : source_type_ref::builtin(intrinsic, object_modifier_range, spelling);
+            const auto object_index = static_cast<std::uint32_t>(candidate.objects.size());
+            candidate.objects.push_back(source_object_fact{
+                object_identity,
+                type,
+                source_span{declaration_start, object_declaration_end - declaration_start},
+            });
+            append_declaration(source_declaration_kind::object, object_index,
+                source_span{declaration_start, object_declaration_end - declaration_start});
+
+            const auto direct_named_type = semantic_type != nullptr && object_modifier_count == 0
+                ? semantic_type
+                : nullptr;
+            result = object_bindings.insert(object_identity, direct_named_type);
+            if (!result.ok()) {
+                return fail(diagnostics::parser_semantic_resolution_failed, object_name_span,
+                    "object name conflicts within scope", result.code);
+            }
+
+            if (!object_comma) {
+                advance();
+                return {};
+            }
             advance();
+            object_first = false;
         }
-
-        if (!punctuation(parser_punctuation::semicolon))
-            return fail_unsupported(span(current()), "object initializers and multi-declarators are not implemented");
-        const auto declaration_end = current().offset + current().length;
-        advance();
-
-        const auto modifier_count = candidate.modifiers.size() - modifier_begin;
-        if (modifier_begin > (std::numeric_limits<std::uint32_t>::max)() ||
-            modifier_count > (std::numeric_limits<std::uint32_t>::max)()) {
-            return {status_code::not_available};
-        }
-
-        const auto modifier_range = source_fact_range{
-            static_cast<std::uint32_t>(modifier_begin),
-            static_cast<std::uint32_t>(modifier_count),
-        };
-        const auto spelling = source_span{type_start, type_end - type_start};
-        const auto type = semantic_type != nullptr
-            ? source_type_ref::semantic(semantic_type, modifier_range, spelling)
-            : source_type_ref::builtin(intrinsic, modifier_range, spelling);
-        const auto object_index = static_cast<std::uint32_t>(candidate.objects.size());
-        candidate.objects.push_back(source_object_fact{
-            object_identity,
-            type,
-            source_span{declaration_start, declaration_end - declaration_start},
-        });
-        append_declaration(source_declaration_kind::object, object_index,
-            source_span{declaration_start, declaration_end - declaration_start});
-
-        const auto direct_named_type = semantic_type != nullptr && modifier_count == 0
-            ? semantic_type
-            : nullptr;
-        result = object_bindings.insert(object_identity, direct_named_type);
-        if (!result.ok()) {
-            return fail(diagnostics::parser_semantic_resolution_failed, object_name_span,
-                "object name conflicts within scope", result.code);
-        }
-        return {};
     }
 
     [[nodiscard]] source_interface_object lookup_visible_object(
@@ -1235,61 +1372,106 @@ private:
             break;
         }
 
-        if (current().kind != parser_token_kind::identifier)
-            return fail_syntax(span(current()), "expected non-static data member identifier");
-        string_id member_name;
-        result = semantic.intern_string(token_text(current()), member_name);
-        if (!result.ok())
-            return result;
-        advance();
-
-        while (punctuation(parser_punctuation::left_bracket)) {
-            advance();
-            if (punctuation(parser_punctuation::right_bracket)) {
-                candidate.modifiers.push_back(source_type_modifier{0, source_type_modifier_kind::unbounded_array});
+        // Declarator list: `name [arrays] [: width] [= init] (, ...)? ;`
+        // The shared type/pointer modifiers are duplicated for every declarator
+        // after the first so each member owns a contiguous modifier range
+        // excluding its siblings' array suffixes.
+        const auto shared_end = candidate.modifiers.size();
+        bool first_declarator = true;
+        for (;;) {
+            // Anonymous bit-field `: N` carries no name; consume and continue.
+            if (punctuation(parser_punctuation::colon)) {
+                result = parse_bit_field_width();
+                if (!result.ok())
+                    return result;
+                if (punctuation(parser_punctuation::comma)) {
+                    advance();
+                    first_declarator = false;
+                    continue;
+                }
+                if (!punctuation(parser_punctuation::semicolon))
+                    return fail_syntax(span(current()), "expected ',' or ';' after bit-field");
                 advance();
-                continue;
+                return {};
             }
-            if (current().kind != parser_token_kind::integer_literal)
-                return fail_syntax(span(current()), "expected positive array bound or ']'");
-            std::uint64_t bound = 0;
-            const auto number = token_text(current());
-            const auto conversion = std::from_chars(number.data(), number.data() + number.size(), bound);
-            if (conversion.ec != std::errc{} || conversion.ptr != number.data() + number.size() || bound == 0)
-                return fail_syntax(span(current()), "array bound must be a positive decimal integer");
+
+            if (current().kind != parser_token_kind::identifier)
+                return fail_syntax(span(current()), "expected non-static data member identifier");
+            string_id member_name;
+            result = semantic.intern_string(token_text(current()), member_name);
+            if (!result.ok())
+                return result;
             advance();
-            if (!punctuation(parser_punctuation::right_bracket))
-                return fail_syntax(span(current()), "expected ']' after array bound");
-            candidate.modifiers.push_back(source_type_modifier{bound, source_type_modifier_kind::bounded_array});
+
+            std::size_t declarator_begin = modifier_begin;
+            if (!first_declarator) {
+                try {
+                    candidate.modifiers.reserve(shared_end + (shared_end - modifier_begin));
+                    declarator_begin = candidate.modifiers.size();
+                    for (std::size_t index = modifier_begin; index < shared_end; ++index)
+                        candidate.modifiers.push_back(candidate.modifiers[index]);
+                }
+                catch (const std::bad_alloc&) {
+                    return {status_code::not_available};
+                }
+                catch (const std::length_error&) {
+                    return {status_code::not_available};
+                }
+            }
+
+            result = parse_array_suffix(true);
+            if (!result.ok())
+                return result;
+
+            if (punctuation(parser_punctuation::colon)) {
+                result = parse_bit_field_width();
+                if (!result.ok())
+                    return result;
+            }
+
+            bool comma = false;
+            if (punctuation(parser_punctuation::equal)) {
+                advance();
+                if (!skip_declarator_initializer(comma))
+                    return fail_syntax(span(current()), "expected ',' or ';' after member initializer");
+            }
+            else if (punctuation(parser_punctuation::comma)) {
+                comma = true;
+            }
+            else if (!punctuation(parser_punctuation::semicolon)) {
+                return fail_unsupported(span(current()), "methods, constructors, and function-style declarators are not implemented");
+            }
+
+            const auto declaration_end = current().offset + current().length;
+
+            const auto modifier_count = candidate.modifiers.size() - declarator_begin;
+            if (declarator_begin > (std::numeric_limits<std::uint32_t>::max)() ||
+                modifier_count > (std::numeric_limits<std::uint32_t>::max)())
+                return {status_code::not_available};
+
+            const auto spelling = source_span{type_start, type_end - type_start};
+            const auto modifier_range = source_fact_range{
+                static_cast<std::uint32_t>(declarator_begin),
+                static_cast<std::uint32_t>(modifier_count),
+            };
+            const auto type = semantic_type != nullptr
+                ? source_type_ref::semantic(semantic_type, modifier_range, spelling)
+                : source_type_ref::builtin(intrinsic, modifier_range, spelling);
+
+            candidate.members.push_back(source_member_fact{
+                type,
+                member_name,
+                source_span{declaration_start, declaration_end - declaration_start},
+                access,
+            });
+
+            if (!comma) {
+                advance();
+                return {};
+            }
             advance();
+            first_declarator = false;
         }
-
-        if (!punctuation(parser_punctuation::semicolon))
-            return fail_unsupported(span(current()), "methods, initializers, bit-fields, and multi-declarators are not implemented");
-        const auto declaration_end = current().offset + current().length;
-        advance();
-
-        const auto modifier_count = candidate.modifiers.size() - modifier_begin;
-        if (modifier_begin > (std::numeric_limits<std::uint32_t>::max)() ||
-            modifier_count > (std::numeric_limits<std::uint32_t>::max)())
-            return {status_code::not_available};
-
-        const auto spelling = source_span{type_start, type_end - type_start};
-        const auto modifier_range = source_fact_range{
-            static_cast<std::uint32_t>(modifier_begin),
-            static_cast<std::uint32_t>(modifier_count),
-        };
-        const auto type = semantic_type != nullptr
-            ? source_type_ref::semantic(semantic_type, modifier_range, spelling)
-            : source_type_ref::builtin(intrinsic, modifier_range, spelling);
-
-        candidate.members.push_back(source_member_fact{
-            type,
-            member_name,
-            source_span{declaration_start, declaration_end - declaration_start},
-            access,
-        });
-        return {};
     }
 
     [[nodiscard]] identity_ref lookup_visible_type(

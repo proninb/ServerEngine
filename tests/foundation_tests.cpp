@@ -917,6 +917,90 @@ bool test_parser_enum_facts() {
            facts.enum_values()[1].value.bits == 0 && facts.enum_values()[2].value.bits == 4294967296ULL;
 }
 
+bool test_parser_member_declarators() {
+    project_configuration configuration;
+    project_context context{std::move(configuration)};
+    source_manager manager;
+    source_snapshot snapshot;
+    constexpr std::string_view text =
+        "struct S { int plain; int with_init = 5; int first, arr[2], last;"
+        " int computed = make(1, 2); unsigned bits : 3; unsigned : 2;"
+        " const char* name = \"hi\"; }; int global = 42, other;";
+    if (!publish_test_source(manager, "memory/declarators.hpp", text, snapshot))
+        return false;
+
+    parsed_source parsed;
+    diagnostic_buffer diagnostics;
+    const source_environment environment;
+    if (!lex_and_parse(context, snapshot, environment, operation_id{430}, diagnostics, parsed) || diagnostics.has_errors())
+        return false;
+
+    const auto facts = parsed.facts();
+    if (facts.records().size() != 1 || facts.members().size() != 8 || facts.objects().size() != 2 ||
+        facts.declarations().size() != 3)
+        return false;
+
+    constexpr std::string_view expected_names[] = {
+        "plain", "with_init", "first", "arr", "last", "computed", "bits", "name"};
+    for (std::size_t index = 0; index < 8; ++index) {
+        if (context.string(facts.members()[index].name) != expected_names[index])
+            return false;
+    }
+    const auto& with_init = facts.members()[1];
+    const auto& arr = facts.members()[3];
+    const auto& last = facts.members()[4];
+    const auto& bits = facts.members()[6];
+    const auto& name = facts.members()[7];
+    if (with_init.type.modifiers.count != 0 || last.type.modifiers.count != 0)
+        return false;
+    if (arr.type.modifiers.count != 1 ||
+        facts.modifiers()[arr.type.modifiers.begin].value != 2)
+        return false;
+    if (bits.type.intrinsic != intrinsic_type::unsigned_int)
+        return false;
+    if (name.type.modifiers.count != 2 ||
+        facts.modifiers()[name.type.modifiers.begin].kind != source_type_modifier_kind::const_qualified ||
+        facts.modifiers()[name.type.modifiers.begin + 1].kind != source_type_modifier_kind::pointer)
+        return false;
+    if (context.string(context.identity_metadata().name(facts.objects()[0].identity)) != "global" ||
+        context.string(context.identity_metadata().name(facts.objects()[1].identity)) != "other" ||
+        facts.objects()[0].type.modifiers.count != 0)
+        return false;
+
+    // Methods remain unsupported.
+    source_snapshot bad_snapshot;
+    if (!publish_test_source(manager, "memory/bad_method.hpp", "struct T { int f(); };", bad_snapshot))
+        return false;
+    parsed_source bad_parsed;
+    return !lex_and_parse(context, bad_snapshot, environment, operation_id{431}, diagnostics, bad_parsed);
+}
+
+bool test_parser_nested_namespace() {
+    project_configuration configuration;
+    project_context context{std::move(configuration)};
+    source_manager manager;
+    source_snapshot snapshot;
+    if (!publish_test_source(manager, "memory/nested.hpp", "namespace A::B { struct S; }", snapshot))
+        return false;
+
+    parsed_source parsed;
+    diagnostic_buffer diagnostics;
+    const source_environment environment;
+    if (!lex_and_parse(context, snapshot, environment, operation_id{432}, diagnostics, parsed) || diagnostics.has_errors())
+        return false;
+
+    const auto facts = parsed.facts();
+    if (facts.namespaces().size() != 2 || facts.records().size() != 1 || facts.declarations().size() != 3)
+        return false;
+    const auto a = facts.namespaces()[0].identity;
+    const auto b = facts.namespaces()[1].identity;
+    const auto s = facts.records()[0].identity;
+    if (!a || !b || !s)
+        return false;
+    const auto& metadata = context.identity_metadata();
+    return metadata.parent(a) == context.identity_root() && metadata.parent(b) == a && metadata.parent(s) == b;
+}
+
 bool test_parser_cross_source_visibility() {
     project_configuration configuration;
     project_context context{std::move(configuration)};
@@ -7193,6 +7277,8 @@ constexpr std::array tests{
     test_case{"lexer_include_discovery", &test_lexer_include_discovery},
     test_case{"parser_source_facts_producer", &test_parser_source_facts_producer},
     test_case{"parser_enum_facts", &test_parser_enum_facts},
+    test_case{"parser_member_declarators", &test_parser_member_declarators},
+    test_case{"parser_nested_namespace", &test_parser_nested_namespace},
     test_case{"parser_cross_source_visibility", &test_parser_cross_source_visibility},
     test_case{"parser_positional_include_visibility", &test_parser_positional_include_visibility},
     test_case{"parser_unresolved_type", &test_parser_unresolved_type},

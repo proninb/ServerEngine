@@ -172,6 +172,8 @@ status lex_source(
                 case '-': token.punctuation = parser_punctuation::minus; ++index; break;
                 case '#': token.punctuation = parser_punctuation::hash; ++index; break;
                 case '*': token.punctuation = parser_punctuation::asterisk; ++index; break;
+                case '(': token.punctuation = parser_punctuation::left_parenthesis; ++index; break;
+                case ')': token.punctuation = parser_punctuation::right_parenthesis; ++index; break;
                 case '&':
                     ++index;
                     if (index < bytes.size() && bytes[index] == '&') {

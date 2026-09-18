@@ -35,6 +35,8 @@ enum class parser_punctuation : std::uint8_t {
     ampersand,
     ampersand_ampersand,
     asterisk,
+    left_parenthesis,
+    right_parenthesis,
 };
 
 // offset/length address the Source snapshot. flags bit 0 marks the first
