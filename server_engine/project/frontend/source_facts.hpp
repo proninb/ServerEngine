@@ -138,6 +138,18 @@ struct source_base_fact final {
     bool is_virtual = false;
 };
 
+// One `using Name = Type` / `typedef Type Name` alias. The target is fully
+// resolved at parse time (identity or intrinsic plus modifiers); use sites
+// copy the target modifiers into their own type ranges. Aliases resolve
+// within the defining source only and are not exported through interfaces,
+// consumed by the Builder, or stored in contributions (same slice rule as
+// base classes: recorded and validated, consumed later).
+struct source_alias_fact final {
+    identity_ref identity = nullptr;
+    source_type_ref target{};
+    source_span declaration{};
+};
+
 // Parser-interpreted integer value. bits are the raw value representation and
 // intrinsic identifies the source-language integer category used by later ABI work.
 struct source_integral_constant final {
@@ -194,6 +206,7 @@ enum class source_declaration_kind : std::uint8_t {
     enum_type,
     object,
     link,
+    alias,
 };
 
 // Preserves total lexical declaration order across separate flat fact arrays so
@@ -242,7 +255,9 @@ public:
         std::span<const source_declaration_ref> declarations,
         std::span<const source_object_fact> objects,
         std::span<const source_link_fact> links,
-        std::span<const source_base_fact> bases = {}) noexcept
+        std::span<const source_base_fact> bases = {},
+        std::span<const source_alias_fact> aliases = {},
+        std::span<const source_type_modifier> alias_modifiers = {}) noexcept
         : source_value(source),
           source_text_value(source_text),
           namespaces_value(namespaces),
@@ -254,7 +269,9 @@ public:
           declarations_value(declarations),
           objects_value(objects),
           links_value(links),
-          bases_value(bases) {}
+          bases_value(bases),
+          aliases_value(aliases),
+          alias_modifiers_value(alias_modifiers) {}
 
     [[nodiscard]] constexpr source_id source() const noexcept { return source_value; }
     [[nodiscard]] constexpr std::string_view source_text() const noexcept { return source_text_value; }
@@ -268,6 +285,10 @@ public:
     [[nodiscard]] constexpr std::span<const source_object_fact> objects() const noexcept { return objects_value; }
     [[nodiscard]] constexpr std::span<const source_link_fact> links() const noexcept { return links_value; }
     [[nodiscard]] constexpr std::span<const source_base_fact> bases() const noexcept { return bases_value; }
+    [[nodiscard]] constexpr std::span<const source_alias_fact> aliases() const noexcept { return aliases_value; }
+    [[nodiscard]] constexpr std::span<const source_type_modifier> alias_modifiers() const noexcept {
+        return alias_modifiers_value;
+    }
 
     [[nodiscard]] constexpr std::string_view text(source_span range) const noexcept {
         if (range.offset > source_text_value.size() ||
@@ -290,6 +311,8 @@ private:
     std::span<const source_object_fact> objects_value;
     std::span<const source_link_fact> links_value;
     std::span<const source_base_fact> bases_value;
+    std::span<const source_alias_fact> aliases_value;
+    std::span<const source_type_modifier> alias_modifiers_value;
 };
 
 static_assert(std::is_trivially_copyable_v<source_span>);
@@ -306,6 +329,7 @@ static_assert(std::is_trivially_copyable_v<source_object_fact>);
 static_assert(std::is_trivially_copyable_v<source_object_endpoint_fact>);
 static_assert(std::is_trivially_copyable_v<source_link_fact>);
 static_assert(std::is_trivially_copyable_v<source_base_fact>);
+static_assert(std::is_trivially_copyable_v<source_alias_fact>);
 static_assert(sizeof(source_span) == 8);
 static_assert(sizeof(source_fact_range) == 8);
 

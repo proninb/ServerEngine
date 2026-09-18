@@ -70,6 +70,11 @@ enum class source_facts_error_code : std::uint8_t {
     base_identity_kind,
     base_access,
     base_range,
+    alias_identity_missing,
+    alias_identity_kind,
+    alias_range,
+    alias_order,
+    alias_modifier_partition,
 };
 
 enum class source_fact_category : std::uint8_t {
@@ -83,6 +88,7 @@ enum class source_fact_category : std::uint8_t {
     object_fact,
     link_fact,
     base_fact,
+    alias_fact,
     declaration_ref,
 };
 
@@ -221,6 +227,16 @@ struct source_facts_validation_error {
         return "base fact has an unsupported access value";
     case source_facts_error_code::base_range:
         return "base declaration range is outside the Source snapshot";
+    case source_facts_error_code::alias_identity_missing:
+        return "alias fact has no resolved identity";
+    case source_facts_error_code::alias_identity_kind:
+        return "alias fact identity is not a type identity";
+    case source_facts_error_code::alias_range:
+        return "alias declaration range is outside the Source snapshot";
+    case source_facts_error_code::alias_order:
+        return "alias facts are not in source declaration order";
+    case source_facts_error_code::alias_modifier_partition:
+        return "alias type modifiers do not form an exact dense partition";
     }
     return "source facts validation failed";
 }

@@ -3,11 +3,13 @@
 #include "../frontend/source_facts_validation.hpp"
 #include "../persistence/build_cache_image.hpp"
 #include "../../diagnostics/diagnostic_buffer.hpp"
+#include "../../diagnostics/diagnostic_descriptor.hpp"
 
 #include <bit>
 #include <limits>
 #include <new>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
 #include <utility>
 
@@ -482,6 +484,9 @@ bool source_contribution_cache::equivalent(const source_facts& facts) const noex
                 if (declaration.index >= facts.links().size())
                     return false;
                 break;
+            case source_declaration_kind::alias:
+                // Aliases are recorded and validated but not consumed yet.
+                continue;
             }
         }
     } else {
@@ -593,6 +598,28 @@ status source_contribution_cache_update::replace(
         }
         failure = validation_status;
         return failure;
+    }
+
+    // Construction capability gate: inheritance is recognized by the Parser
+    // and validated in facts, but Generation Builder/layout cannot consume
+    // bases yet (ABI stage). Publication with bases must fail loudly rather
+    // than build a silently incomplete Graph. Parser success != pipeline
+    // acceptance.
+    for (const auto& record : facts.records()) {
+        if (record.bases.count != 0) {
+            try {
+                diagnostics.emit({
+                    diagnostics::generation_build_failed.id,
+                    diagnostics::generation_build_failed.default_severity,
+                    operation,
+                    source_range{facts.source(), record.declaration.offset, record.declaration.length},
+                    "record has base classes: inheritance is not supported by ABI/layout",
+                });
+            } catch (...) {
+            }
+            failure = {status_code::not_available};
+            return failure;
+        }
     }
 
     try {
@@ -715,6 +742,9 @@ status source_contribution_cache_update::replace(
                 case source_declaration_kind::link:
                     result = declaration.index < facts.links().size() ? status{} : status{status_code::invalid_argument};
                     break;
+                case source_declaration_kind::alias:
+                    // Recorded and validated; not consumed by contributions yet.
+                    continue;
                 }
                 if (!result.ok()) {
                     failure = result;
@@ -1016,6 +1046,28 @@ status source_contribution_sparse_update::replace(
         return failure;
     }
 
+    // Construction capability gate: inheritance is recognized by the Parser
+    // and validated in facts, but Generation Builder/layout cannot consume
+    // bases yet (ABI stage). Publication with bases must fail loudly rather
+    // than build a silently incomplete Graph. Parser success != pipeline
+    // acceptance.
+    for (const auto& record : facts.records()) {
+        if (record.bases.count != 0) {
+            try {
+                diagnostics.emit({
+                    diagnostics::generation_build_failed.id,
+                    diagnostics::generation_build_failed.default_severity,
+                    operation,
+                    source_range{facts.source(), record.declaration.offset, record.declaration.length},
+                    "record has base classes: inheritance is not supported by ABI/layout",
+                });
+            } catch (...) {
+            }
+            failure = {status_code::not_available};
+            return failure;
+        }
+    }
+
     source_patch* patch = nullptr;
     auto result = add_source_patch(facts.source(), patch);
     if (!result.ok()) {
@@ -1138,6 +1190,9 @@ status source_contribution_sparse_update::replace(
                 case source_declaration_kind::link:
                     result = declaration.index < facts.links().size() ? status{} : status{status_code::invalid_argument};
                     break;
+                case source_declaration_kind::alias:
+                    // Recorded and validated; not consumed by contributions yet.
+                    continue;
                 }
                 if (!result.ok()) {
                     failure = result;

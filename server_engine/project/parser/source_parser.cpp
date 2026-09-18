@@ -590,6 +590,13 @@ private:
     // Skips an initializer up to the next ',' or ';' at nesting depth 0,
     // consuming nested (), {}, []. The terminator is left current.
     // Returns false on EOF or an unmatched closing bracket.
+    //
+    // Explicit metadata-model contract: initializers are intentionally
+    // outside the model. They are skipped as lexical regions and never
+    // interpreted, so no value/expression semantics reach facts, the Graph,
+    // or runtime. If runtime ever needs values, this contract (not just the
+    // parser) must change: facts, contributions, and images would all gain
+    // initializer representation.
     [[nodiscard]] bool skip_declarator_initializer(bool& comma) noexcept {
         std::size_t depth = 0;
         comma = false;
@@ -629,19 +636,172 @@ private:
         }
     }
 
-    // Parses one `: <positive-decimal>` bit-field width. The width is
-    // validated but not retained: V3 has no layout stage yet.
-    [[nodiscard]] status parse_bit_field_width() {
+    [[nodiscard]] status parse_using(identity_ref scope) {
+        const auto start = current().offset;
         advance();
-        if (current().kind != parser_token_kind::integer_literal)
-            return fail_unsupported(span(current()), "only decimal bit-field widths are implemented");
-        std::uint64_t bound = 0;
-        const auto number = token_text(current());
-        const auto conversion = std::from_chars(number.data(), number.data() + number.size(), bound);
-        if (conversion.ec != std::errc{} || conversion.ptr != number.data() + number.size() || bound == 0)
-            return fail_syntax(span(current()), "bit-field width must be a positive decimal integer");
+        if (current().kind != parser_token_kind::identifier)
+            return fail_syntax(span(current()), "expected alias identifier after 'using'");
+        const auto name_text = token_text(current());
         advance();
+        if (!punctuation(parser_punctuation::equal))
+            return fail_syntax(span(current()), "expected '=' in alias declaration");
+        advance();
+
+        const auto shared_begin = candidate.alias_modifiers.size();
+        identity_ref target_identity = nullptr;
+        intrinsic_type target_intrinsic = intrinsic_type::none;
+        auto result = parse_alias_target(scope, start, target_identity, target_intrinsic);
+        if (!result.ok())
+            return result;
+        result = parse_array_suffix(candidate.alias_modifiers, false);
+        if (!result.ok())
+            return result;
+        if (!punctuation(parser_punctuation::semicolon))
+            return fail_syntax(span(current()), "expected ';' after alias declaration");
+        const auto end = current().offset + current().length;
+        advance();
+
+        result = check_alias_conflict(scope, name_text);
+        if (!result.ok())
+            return result;
+        string_id alias_name;
+        result = semantic.intern_string(name_text, alias_name);
+        if (!result.ok())
+            return result;
+        identity_ref identity = nullptr;
+        result = semantic.resolve_declaration(scope, name_text, identity_kind::type, identity);
+        if (!result.ok()) {
+            return fail(diagnostics::parser_semantic_resolution_failed, span(current()),
+                "failed to resolve alias declaration", result.code);
+        }
+
+        const auto modifier_count = candidate.alias_modifiers.size() - shared_begin;
+        if (shared_begin > (std::numeric_limits<std::uint32_t>::max)() ||
+            modifier_count > (std::numeric_limits<std::uint32_t>::max)())
+            return {status_code::not_available};
+        const auto declaration = source_span{start, end - start};
+        const auto alias_index = static_cast<std::uint32_t>(candidate.aliases.size());
+        candidate.aliases.push_back(source_alias_fact{
+            identity,
+            source_type_ref{
+                target_identity,
+                target_intrinsic,
+                source_fact_range{
+                    static_cast<std::uint32_t>(shared_begin),
+                    static_cast<std::uint32_t>(modifier_count),
+                },
+                {},
+            },
+            declaration,
+        });
+        append_declaration(source_declaration_kind::alias, alias_index, declaration);
+        aliases.push_back(alias_entry{
+            scope,
+            alias_name,
+            target_identity,
+            target_intrinsic,
+            source_fact_range{
+                static_cast<std::uint32_t>(shared_begin),
+                static_cast<std::uint32_t>(modifier_count),
+            },
+        });
         return {};
+    }
+
+    [[nodiscard]] status parse_typedef(identity_ref scope) {
+        const auto start = current().offset;
+        advance();
+        const auto shared_begin = candidate.alias_modifiers.size();
+        identity_ref target_identity = nullptr;
+        intrinsic_type target_intrinsic = intrinsic_type::none;
+        auto result = parse_alias_target(scope, start, target_identity, target_intrinsic);
+        if (!result.ok())
+            return result;
+        const auto shared_end = candidate.alias_modifiers.size();
+
+        bool first_declarator = true;
+        for (;;) {
+            if (current().kind != parser_token_kind::identifier)
+                return fail_syntax(span(current()), "expected typedef declarator name");
+            const auto name_text = token_text(current());
+            advance();
+
+            std::size_t declarator_begin = shared_begin;
+            if (!first_declarator) {
+                try {
+                    candidate.alias_modifiers.reserve(shared_end + (shared_end - shared_begin));
+                    declarator_begin = candidate.alias_modifiers.size();
+                    for (std::size_t index = shared_begin; index < shared_end; ++index)
+                        candidate.alias_modifiers.push_back(candidate.alias_modifiers[index]);
+                }
+                catch (const std::bad_alloc&) {
+                    return {status_code::not_available};
+                }
+                catch (const std::length_error&) {
+                    return {status_code::not_available};
+                }
+            }
+
+            result = parse_array_suffix(candidate.alias_modifiers, false);
+            if (!result.ok())
+                return result;
+
+            const bool comma = punctuation(parser_punctuation::comma);
+            if (!comma && !punctuation(parser_punctuation::semicolon))
+                return fail_syntax(span(current()), "expected ',' or ';' after typedef declarator");
+
+            const auto end = current().offset + current().length;
+            const auto modifier_count = candidate.alias_modifiers.size() - declarator_begin;
+            if (declarator_begin > (std::numeric_limits<std::uint32_t>::max)() ||
+                modifier_count > (std::numeric_limits<std::uint32_t>::max)())
+                return {status_code::not_available};
+
+            result = check_alias_conflict(scope, name_text);
+            if (!result.ok())
+                return result;
+            string_id alias_name;
+            result = semantic.intern_string(name_text, alias_name);
+            if (!result.ok())
+                return result;
+            identity_ref identity = nullptr;
+            result = semantic.resolve_declaration(scope, name_text, identity_kind::type, identity);
+            if (!result.ok()) {
+                return fail(diagnostics::parser_semantic_resolution_failed, span(current()),
+                    "failed to resolve alias declaration", result.code);
+            }
+
+            const auto declaration = source_span{start, end - start};
+            const auto alias_index = static_cast<std::uint32_t>(candidate.aliases.size());
+            candidate.aliases.push_back(source_alias_fact{
+                identity,
+                source_type_ref{
+                    target_identity,
+                    target_intrinsic,
+                    source_fact_range{
+                        static_cast<std::uint32_t>(declarator_begin),
+                        static_cast<std::uint32_t>(modifier_count),
+                    },
+                    {},
+                },
+                declaration,
+            });
+            append_declaration(source_declaration_kind::alias, alias_index, declaration);
+            aliases.push_back(alias_entry{
+                scope,
+                alias_name,
+                target_identity,
+                target_intrinsic,
+                source_fact_range{
+                    static_cast<std::uint32_t>(declarator_begin),
+                    static_cast<std::uint32_t>(modifier_count),
+                },
+            });
+
+            advance();
+            if (!comma)
+                return {};
+            first_declarator = false;
+        }
     }
 
     // Parses `: [virtual] [access] Base (, ...)` after the record name.
@@ -708,11 +868,13 @@ private:
         }
     }
 
-    [[nodiscard]] status parse_array_suffix(bool member_context) {
+    [[nodiscard]] status parse_array_suffix(
+        std::vector<source_type_modifier>& out,
+        bool member_context) {
         while (punctuation(parser_punctuation::left_bracket)) {
             advance();
             if (punctuation(parser_punctuation::right_bracket)) {
-                candidate.modifiers.push_back(source_type_modifier{0, source_type_modifier_kind::unbounded_array});
+                out.push_back(source_type_modifier{0, source_type_modifier_kind::unbounded_array});
                 advance();
                 continue;
             }
@@ -735,8 +897,126 @@ private:
                     ? "expected ']' after member array bound"
                     : "expected ']' after object array bound");
             }
-            candidate.modifiers.push_back(source_type_modifier{bound, source_type_modifier_kind::bounded_array});
+            out.push_back(source_type_modifier{bound, source_type_modifier_kind::bounded_array});
             advance();
+        }
+        return {};
+    }
+
+    // One source-local alias. Entries stay visible through nested scopes via
+    // the scope ancestry chain; no truncation bookkeeping is required.
+    struct alias_entry final {
+        identity_ref scope = nullptr;
+        string_id name{};
+        identity_ref target_identity = nullptr;
+        intrinsic_type target_intrinsic = intrinsic_type::none;
+        source_fact_range target_modifiers{};
+    };
+
+    [[nodiscard]] const alias_entry* find_visible_alias(
+        identity_ref scope,
+        string_id name) const noexcept {
+        for (std::size_t index = aliases.size(); index > 0; --index) {
+            const auto& entry = aliases[index - 1];
+            if (entry.name != name)
+                continue;
+            auto current_scope = scope;
+            while (current_scope != nullptr) {
+                if (current_scope == entry.scope)
+                    return &entry;
+                current_scope = semantic.identities().parent(current_scope);
+            }
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] status check_alias_conflict(identity_ref scope, std::string_view name) {
+        const auto existing = semantic.find_string(name);
+        if (existing) {
+            for (const auto& entry : aliases) {
+                if (entry.scope == scope && entry.name == existing) {
+                    return fail(diagnostics::parser_semantic_resolution_failed, span(current()),
+                        "alias name conflicts with a visible declaration", status_code::semantic_conflict);
+                }
+            }
+            if (bindings.find(scope, existing) != nullptr) {
+                return fail(diagnostics::parser_semantic_resolution_failed, span(current()),
+                    "alias name conflicts with a visible declaration", status_code::semantic_conflict);
+            }
+        }
+        return {};
+    }
+
+    [[nodiscard]] bool using_alias_ahead() const noexcept {
+        if (cursor + 2 >= tokens.size())
+            return false;
+        const auto& name = tokens[cursor + 1];
+        const auto& equal = tokens[cursor + 2];
+        return name.kind == parser_token_kind::identifier &&
+            equal.kind == parser_token_kind::punctuation &&
+            equal.punctuation == parser_punctuation::equal;
+    }
+
+    // Parses an aliased type (`using U = <here>` / `typedef <here> Name`)
+    // into candidate.alias_modifiers: leading cv, base, trailing cv,
+    // pointer/reference suffixes. Array suffixes stay with the caller so
+    // typedef multi-declarators can extend each name separately.
+    [[nodiscard]] status parse_alias_target(
+        identity_ref scope,
+        std::uint32_t lookup_offset,
+        identity_ref& target_identity,
+        intrinsic_type& target_intrinsic) {
+        while (identifier("const") || identifier("volatile")) {
+            candidate.alias_modifiers.push_back(source_type_modifier{
+                0,
+                identifier("const") ? source_type_modifier_kind::const_qualified
+                                    : source_type_modifier_kind::volatile_qualified,
+            });
+            advance();
+        }
+        target_identity = nullptr;
+        target_intrinsic = intrinsic_type::none;
+        std::uint32_t type_end = current().offset;
+        auto result = parse_type_base(
+            scope, target_identity, target_intrinsic, type_end, lookup_offset, candidate.alias_modifiers);
+        if (!result.ok())
+            return result;
+        while (identifier("const") || identifier("volatile")) {
+            candidate.alias_modifiers.push_back(source_type_modifier{
+                0,
+                identifier("const") ? source_type_modifier_kind::const_qualified
+                                    : source_type_modifier_kind::volatile_qualified,
+            });
+            advance();
+        }
+        for (;;) {
+            if (punctuation(parser_punctuation::asterisk)) {
+                candidate.alias_modifiers.push_back(
+                    source_type_modifier{0, source_type_modifier_kind::pointer});
+                advance();
+                while (identifier("const") || identifier("volatile")) {
+                    candidate.alias_modifiers.push_back(source_type_modifier{
+                        0,
+                        identifier("const") ? source_type_modifier_kind::const_qualified
+                                            : source_type_modifier_kind::volatile_qualified,
+                    });
+                    advance();
+                }
+                continue;
+            }
+            if (punctuation(parser_punctuation::ampersand)) {
+                candidate.alias_modifiers.push_back(
+                    source_type_modifier{0, source_type_modifier_kind::lvalue_reference});
+                advance();
+                continue;
+            }
+            if (punctuation(parser_punctuation::ampersand_ampersand)) {
+                candidate.alias_modifiers.push_back(
+                    source_type_modifier{0, source_type_modifier_kind::rvalue_reference});
+                advance();
+                continue;
+            }
+            break;
         }
         return {};
     }
@@ -768,6 +1048,18 @@ private:
             }
             if (current().kind == parser_token_kind::keyword_enum) {
                 const auto result = parse_enum(scope);
+                if (!result.ok())
+                    return result;
+                continue;
+            }
+            if (identifier("typedef")) {
+                const auto result = parse_typedef(scope);
+                if (!result.ok())
+                    return result;
+                continue;
+            }
+            if (identifier("using") && using_alias_ahead()) {
+                const auto result = parse_using(scope);
                 if (!result.ok())
                     return result;
                 continue;
@@ -807,6 +1099,9 @@ private:
         std::vector<namespace_level> levels;
         identity_ref scope = parent;
         for (;;) {
+            const auto alias_conflict = check_alias_conflict(scope, token_text(current()));
+            if (!alias_conflict.ok())
+                return alias_conflict;
             const auto name_span = span(current());
             identity_ref identity = nullptr;
             auto result = semantic.resolve_declaration(
@@ -867,6 +1162,11 @@ private:
         if (current().kind != parser_token_kind::identifier)
             return fail_unsupported(span(current()), "anonymous record definitions are not implemented");
 
+        {
+            const auto alias_conflict = check_alias_conflict(scope, token_text(current()));
+            if (!alias_conflict.ok())
+                return alias_conflict;
+        }
         const auto name_span = span(current());
         identity_ref identity = nullptr;
         auto result = semantic.resolve_declaration(scope, token_text(current()), identity_kind::type, identity);
@@ -977,7 +1277,7 @@ private:
 
         identity_ref semantic_type = nullptr;
         intrinsic_type intrinsic = intrinsic_type::none;
-        auto result = parse_type_base(scope, semantic_type, intrinsic, type_end, declaration_start);
+        auto result = parse_type_base(scope, semantic_type, intrinsic, type_end, declaration_start, candidate.modifiers);
         if (!result.ok())
             return result;
 
@@ -1056,7 +1356,7 @@ private:
                 }
             }
 
-            result = parse_array_suffix(false);
+            result = parse_array_suffix(candidate.modifiers, false);
             if (!result.ok())
                 return result;
 
@@ -1223,6 +1523,11 @@ private:
         if (current().kind != parser_token_kind::identifier)
             return fail_unsupported(span(current()), "anonymous enums are not implemented in the V3 identity slice");
 
+        {
+            const auto alias_conflict = check_alias_conflict(scope, token_text(current()));
+            if (!alias_conflict.ok())
+                return alias_conflict;
+        }
         const auto name_span = span(current());
         identity_ref identity = nullptr;
         auto result = semantic.resolve_declaration(scope, token_text(current()), identity_kind::type, identity);
@@ -1248,7 +1553,7 @@ private:
             const auto underlying_start = current().offset;
             std::uint32_t underlying_end = underlying_start;
             identity_ref semantic_type = nullptr;
-            result = parse_type_base(scope, semantic_type, underlying, underlying_end, current().offset);
+            result = parse_type_base(scope, semantic_type, underlying, underlying_end, current().offset, candidate.modifiers);
             if (!result.ok())
                 return result;
             if (semantic_type != nullptr || !integral_intrinsic(underlying))
@@ -1405,7 +1710,7 @@ private:
 
         identity_ref semantic_type = nullptr;
         intrinsic_type intrinsic = intrinsic_type::none;
-        auto result = parse_type_base(scope, semantic_type, intrinsic, type_end, declaration_start);
+        auto result = parse_type_base(scope, semantic_type, intrinsic, type_end, declaration_start, candidate.modifiers);
         if (!result.ok())
             return result;
 
@@ -1450,27 +1755,17 @@ private:
             break;
         }
 
-        // Declarator list: `name [arrays] [: width] [= init] (, ...)? ;`
+        // Declarator list: `name [arrays] [= init] (, ...)? ;`
         // The shared type/pointer modifiers are duplicated for every declarator
         // after the first so each member owns a contiguous modifier range
-        // excluding its siblings' array suffixes.
+        // excluding its siblings' array suffixes. Bit-fields are rejected
+        // explicitly: width is layout semantics, never dropped silently.
         const auto shared_end = candidate.modifiers.size();
         bool first_declarator = true;
         for (;;) {
-            // Anonymous bit-field `: N` carries no name; consume and continue.
             if (punctuation(parser_punctuation::colon)) {
-                result = parse_bit_field_width();
-                if (!result.ok())
-                    return result;
-                if (punctuation(parser_punctuation::comma)) {
-                    advance();
-                    first_declarator = false;
-                    continue;
-                }
-                if (!punctuation(parser_punctuation::semicolon))
-                    return fail_syntax(span(current()), "expected ',' or ';' after bit-field");
-                advance();
-                return {};
+                return fail_unsupported(span(current()),
+                    "bit-fields are not implemented: width is layout semantics");
             }
 
             if (current().kind != parser_token_kind::identifier)
@@ -1497,14 +1792,13 @@ private:
                 }
             }
 
-            result = parse_array_suffix(true);
+            result = parse_array_suffix(candidate.modifiers, true);
             if (!result.ok())
                 return result;
 
             if (punctuation(parser_punctuation::colon)) {
-                result = parse_bit_field_width();
-                if (!result.ok())
-                    return result;
+                return fail_unsupported(span(current()),
+                    "bit-fields are not implemented: width is layout semantics");
             }
 
             bool comma = false;
@@ -1573,7 +1867,8 @@ private:
         identity_ref& semantic_type,
         intrinsic_type& intrinsic,
         std::uint32_t& type_end,
-        std::uint32_t lookup_offset) {
+        std::uint32_t lookup_offset,
+        std::vector<source_type_modifier>& modifier_out) {
 
         semantic_type = nullptr;
         intrinsic = intrinsic_type::none;
@@ -1648,6 +1943,32 @@ private:
         else if (first == "long") intrinsic = intrinsic_type::signed_long;
         else {
             const auto name = semantic.find_string(first);
+            if (name) {
+                if (const auto* alias = find_visible_alias(scope, name)) {
+                    // A source-local alias resolves through to its target.
+                    // Target modifiers are copied into the caller's own type
+                    // range, preserving the dense member-modifier partition.
+                    semantic_type = alias->target_identity;
+                    intrinsic = alias->target_intrinsic;
+                    try {
+                        const auto& range = alias->target_modifiers;
+                        modifier_out.reserve(
+                            modifier_out.size() + range.count);
+                        for (std::uint32_t index = 0; index < range.count; ++index)
+                            modifier_out.push_back(
+                                candidate.alias_modifiers[range.begin + index]);
+                    }
+                    catch (const std::bad_alloc&) {
+                        return {status_code::not_available};
+                    }
+                    catch (const std::length_error&) {
+                        return {status_code::not_available};
+                    }
+                    type_end = current().offset + current().length;
+                    advance();
+                    return {};
+                }
+            }
             semantic_type = name ? lookup_visible_type(scope, name, lookup_offset) : nullptr;
             if (semantic_type == nullptr)
                 return fail(diagnostics::parser_unresolved_type, span(current()),
@@ -1693,6 +2014,7 @@ private:
     binding_index bindings;
     object_binding_index object_bindings;
     member_binding_index member_bindings;
+    std::vector<alias_entry> aliases;
     std::size_t cursor = 0;
 };
 

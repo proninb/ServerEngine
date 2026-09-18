@@ -929,8 +929,8 @@ bool test_parser_member_declarators() {
     source_snapshot snapshot;
     constexpr std::string_view text =
         "struct S { int plain; int with_init = 5; int first, arr[2], last;"
-        " int computed = make(1, 2); unsigned bits : 3; unsigned : 2;"
-        " const char* name = \"hi\"; }; int global = 42, other;";
+        " int computed = make(1, 2); unsigned count; const char* name = \"hi\"; };"
+        " int global = 42, other;";
     if (!publish_test_source(manager, "memory/declarators.hpp", text, snapshot))
         return false;
 
@@ -946,7 +946,7 @@ bool test_parser_member_declarators() {
         return false;
 
     constexpr std::string_view expected_names[] = {
-        "plain", "with_init", "first", "arr", "last", "computed", "bits", "name"};
+        "plain", "with_init", "first", "arr", "last", "computed", "count", "name"};
     for (std::size_t index = 0; index < 8; ++index) {
         if (context.string(facts.members()[index].name) != expected_names[index])
             return false;
@@ -954,14 +954,14 @@ bool test_parser_member_declarators() {
     const auto& with_init = facts.members()[1];
     const auto& arr = facts.members()[3];
     const auto& last = facts.members()[4];
-    const auto& bits = facts.members()[6];
+    const auto& count = facts.members()[6];
     const auto& name = facts.members()[7];
     if (with_init.type.modifiers.count != 0 || last.type.modifiers.count != 0)
         return false;
     if (arr.type.modifiers.count != 1 ||
         facts.modifiers()[arr.type.modifiers.begin].value != 2)
         return false;
-    if (bits.type.intrinsic != intrinsic_type::unsigned_int)
+    if (count.type.intrinsic != intrinsic_type::unsigned_int)
         return false;
     if (name.type.modifiers.count != 2 ||
         facts.modifiers()[name.type.modifiers.begin].kind != source_type_modifier_kind::const_qualified ||
@@ -972,12 +972,18 @@ bool test_parser_member_declarators() {
         facts.objects()[0].type.modifiers.count != 0)
         return false;
 
-    // Methods remain unsupported.
+    // Methods and bit-fields remain explicitly unsupported.
     source_snapshot bad_snapshot;
     if (!publish_test_source(manager, "memory/bad_method.hpp", "struct T { int f(); };", bad_snapshot))
         return false;
     parsed_source bad_parsed;
-    return !lex_and_parse(context, bad_snapshot, environment, operation_id{431}, diagnostics, bad_parsed);
+    if (lex_and_parse(context, bad_snapshot, environment, operation_id{431}, diagnostics, bad_parsed))
+        return false;
+    source_snapshot bits_snapshot;
+    if (!publish_test_source(manager, "memory/bad_bits.hpp", "struct U { unsigned x : 3; };", bits_snapshot))
+        return false;
+    parsed_source bits_parsed;
+    return !lex_and_parse(context, bits_snapshot, environment, operation_id{438}, diagnostics, bits_parsed);
 }
 
 bool test_parser_nested_namespace() {
@@ -1057,6 +1063,95 @@ bool test_parser_base_clause() {
         return false;
     parsed_source bad_parsed;
     return !lex_and_parse(context, bad_snapshot, environment, operation_id{434}, diagnostics, bad_parsed);
+}
+
+bool test_parser_alias_declaration() {
+    project_configuration configuration;
+    project_context context{std::move(configuration)};
+    source_manager manager;
+    source_snapshot snapshot;
+    constexpr std::string_view text =
+        "struct B { int tag; }; using Count = int; using Handle = const B*;"
+        " typedef int Id, Code; Count a; Handle h1, h2; Id i; Code c;";
+    if (!publish_test_source(manager, "memory/aliases.hpp", text, snapshot))
+        return false;
+
+    parsed_source parsed;
+    diagnostic_buffer diagnostics;
+    const source_environment environment;
+    if (!lex_and_parse(context, snapshot, environment, operation_id{435}, diagnostics, parsed) || diagnostics.has_errors())
+        return false;
+
+    const auto facts = parsed.facts();
+    if (facts.records().size() != 1 || facts.aliases().size() != 4 || facts.objects().size() != 5 ||
+        facts.declarations().size() != 10)
+        return false;
+
+    const auto& count = facts.aliases()[0];
+    const auto& handle = facts.aliases()[1];
+    const auto& id = facts.aliases()[2];
+    const auto& code = facts.aliases()[3];
+    if (count.target.identity != nullptr || count.target.intrinsic != intrinsic_type::signed_int ||
+        count.target.modifiers.count != 0)
+        return false;
+    if (handle.target.identity != facts.records()[0].identity ||
+        handle.target.modifiers.count != 2 ||
+        facts.alias_modifiers()[handle.target.modifiers.begin].kind != source_type_modifier_kind::const_qualified ||
+        facts.alias_modifiers()[handle.target.modifiers.begin + 1].kind != source_type_modifier_kind::pointer)
+        return false;
+    if (id.target.intrinsic != intrinsic_type::signed_int || code.target.intrinsic != intrinsic_type::signed_int)
+        return false;
+
+    // Use sites resolve through to the target with copied modifiers.
+    const auto& h1 = facts.objects()[1];
+    const auto& h2 = facts.objects()[2];
+    if (h1.type.identity != facts.records()[0].identity || h1.type.modifiers.count != 2 ||
+        h2.type.identity != facts.records()[0].identity || h2.type.modifiers.count != 2)
+        return false;
+    if (context.string(context.identity_metadata().name(facts.objects()[0].identity)) != "a" ||
+        context.string(context.identity_metadata().name(facts.objects()[3].identity)) != "i")
+        return false;
+
+    // Redefinition and use-before-definition are rejected.
+    source_snapshot dup_snapshot;
+    if (!publish_test_source(manager, "memory/bad_alias.hpp", "using U = int; using U = char;", dup_snapshot))
+        return false;
+    parsed_source dup_parsed;
+    if (lex_and_parse(context, dup_snapshot, environment, operation_id{436}, diagnostics, dup_parsed))
+        return false;
+    source_snapshot fwd_snapshot;
+    if (!publish_test_source(manager, "memory/fwd_alias.hpp", "U early; using U = int;", fwd_snapshot))
+        return false;
+    parsed_source fwd_parsed;
+    return !lex_and_parse(context, fwd_snapshot, environment, operation_id{437}, diagnostics, fwd_parsed);
+}
+
+bool test_inheritance_construction_gate() {
+    // Parser accepts inheritance into facts, but construction must refuse to
+    // publish a Graph that silently drops bases. Parser success != pipeline
+    // acceptance.
+    project_configuration configuration;
+    project_context context{std::move(configuration)};
+    source_manager manager;
+    source_snapshot snapshot;
+    if (!publish_test_source(manager, "memory/derived.hpp",
+            "struct A { int x; }; struct B : A { int y; };", snapshot))
+        return false;
+
+    parsed_source parsed;
+    diagnostic_buffer diagnostics;
+    const source_environment environment;
+    if (!lex_and_parse(context, snapshot, environment, operation_id{439}, diagnostics, parsed) || diagnostics.has_errors())
+        return false;
+    if (parsed.facts().records().size() != 2 || parsed.facts().records()[1].bases.count != 1)
+        return false;
+
+    source_contribution_cache cache;
+    auto update = cache.begin_rebuild();
+    if (update.replace(parsed.facts(), operation_id{440}, diagnostics).ok() || !diagnostics.has_errors())
+        return false;
+    const auto& records = diagnostics.records();
+    return !records.empty() && records.back().id == diagnostics::generation_build_failed.id;
 }
 
 bool test_parser_cross_source_visibility() {
@@ -7343,6 +7438,8 @@ constexpr std::array tests{
     test_case{"parser_member_declarators", &test_parser_member_declarators},
     test_case{"parser_nested_namespace", &test_parser_nested_namespace},
     test_case{"parser_base_clause", &test_parser_base_clause},
+    test_case{"parser_alias_declaration", &test_parser_alias_declaration},
+    test_case{"inheritance_construction_gate", &test_inheritance_construction_gate},
     test_case{"parser_cross_source_visibility", &test_parser_cross_source_visibility},
     test_case{"parser_positional_include_visibility", &test_parser_positional_include_visibility},
     test_case{"parser_unresolved_type", &test_parser_unresolved_type},

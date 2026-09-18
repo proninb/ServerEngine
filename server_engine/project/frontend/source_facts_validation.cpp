@@ -62,6 +62,8 @@ namespace {
         return "link";
     case source_fact_category::base_fact:
         return "base";
+    case source_fact_category::alias_fact:
+        return "alias";
     case source_fact_category::declaration_ref:
         return "declaration";
     }
@@ -236,7 +238,6 @@ status validate_source_facts(
     }
 
     const auto modifiers = facts.modifiers();
-    std::size_t expected_modifier_begin = 0;
 
     for (std::size_t index = 0; index < members.size(); ++index) {
         const auto& item = members[index];
@@ -280,17 +281,10 @@ status validate_source_facts(
             return fail(error, source_facts_error_code::intrinsic_type_code,
                 source_fact_category::member_fact, index, item.type.spelling);
         }
-        if (!valid_range(item.type.modifiers, modifiers.size()) ||
-            item.type.modifiers.begin != expected_modifier_begin) {
+        if (!valid_range(item.type.modifiers, modifiers.size())) {
             return fail(error, source_facts_error_code::modifier_partition,
                 source_fact_category::member_fact, index, item.type.spelling);
         }
-        expected_modifier_begin += item.type.modifiers.count;
-    }
-
-    if (expected_modifier_begin != modifiers.size()) {
-        return fail(error, source_facts_error_code::modifier_partition,
-            source_fact_category::packet, expected_modifier_begin);
     }
 
     for (std::size_t index = 0; index < modifiers.size(); ++index) {
@@ -418,6 +412,46 @@ status validate_source_facts(
         }
     }
 
+    // Member and object type modifiers share one dense array in declaration
+    // order (objects historically appended alongside members). The merged
+    // walk keeps the exact-partition guarantee across both arrays; ties
+    // (multi-declarators share one offset) resolve in array order.
+    {
+        std::size_t member_position = 0;
+        std::size_t object_position = 0;
+        std::size_t expected_begin = 0;
+        while (member_position < members.size() || object_position < objects.size()) {
+            bool take_member = false;
+            if (member_position < members.size() && object_position < objects.size()) {
+                take_member = members[member_position].declaration.offset <=
+                    objects[object_position].declaration.offset;
+            }
+            else {
+                take_member = member_position < members.size();
+            }
+            const auto& range = take_member
+                ? members[member_position].type.modifiers
+                : objects[object_position].type.modifiers;
+            const auto& declaration = take_member
+                ? members[member_position].declaration
+                : objects[object_position].declaration;
+            if (range.begin != expected_begin) {
+                return fail(error, source_facts_error_code::modifier_partition,
+                    take_member ? source_fact_category::member_fact : source_fact_category::object_fact,
+                    take_member ? member_position : object_position, declaration);
+            }
+            expected_begin += range.count;
+            if (take_member)
+                ++member_position;
+            else
+                ++object_position;
+        }
+        if (expected_begin != modifiers.size()) {
+            return fail(error, source_facts_error_code::modifier_partition,
+                source_fact_category::packet, expected_begin);
+        }
+    }
+
     const auto links = facts.links();
     std::uint32_t previous_link_offset = 0;
     for (std::size_t index = 0; index < links.size(); ++index) {
@@ -439,6 +473,59 @@ status validate_source_facts(
         }
     }
 
+    const auto aliases = facts.aliases();
+    const auto alias_modifiers = facts.alias_modifiers();
+    std::size_t expected_alias_modifier_begin = 0;
+    std::uint32_t previous_alias_offset = 0;
+    for (std::size_t index = 0; index < aliases.size(); ++index) {
+        const auto& item = aliases[index];
+        if (item.identity == nullptr) {
+            return fail(error, source_facts_error_code::alias_identity_missing,
+                source_fact_category::alias_fact, index, item.declaration);
+        }
+        if (item.identity.kind() != identity_kind::type) {
+            return fail(error, source_facts_error_code::alias_identity_kind,
+                source_fact_category::alias_fact, index, item.declaration);
+        }
+        if (item.declaration.length == 0 || !valid_span(item.declaration, source_size)) {
+            return fail(error, source_facts_error_code::alias_range,
+                source_fact_category::alias_fact, index, item.declaration);
+        }
+        if (index != 0 && item.declaration.offset < previous_alias_offset) {
+            return fail(error, source_facts_error_code::alias_order,
+                source_fact_category::alias_fact, index, item.declaration);
+        }
+        previous_alias_offset = item.declaration.offset;
+        const bool has_identity = item.target.identity != nullptr;
+        const bool has_intrinsic = item.target.intrinsic != intrinsic_type::none;
+        if (!has_identity && !has_intrinsic) {
+            return fail(error, source_facts_error_code::unresolved_type_base,
+                source_fact_category::alias_fact, index, item.declaration);
+        }
+        if (has_identity && has_intrinsic) {
+            return fail(error, source_facts_error_code::ambiguous_type_base,
+                source_fact_category::alias_fact, index, item.declaration);
+        }
+        if (has_identity && item.target.identity.kind() != identity_kind::type) {
+            return fail(error, source_facts_error_code::semantic_type_identity_kind,
+                source_fact_category::alias_fact, index, item.declaration);
+        }
+        if (has_intrinsic && !valid_intrinsic(item.target.intrinsic)) {
+            return fail(error, source_facts_error_code::intrinsic_type_code,
+                source_fact_category::alias_fact, index, item.declaration);
+        }
+        if (!valid_range(item.target.modifiers, alias_modifiers.size()) ||
+            item.target.modifiers.begin != expected_alias_modifier_begin) {
+            return fail(error, source_facts_error_code::alias_modifier_partition,
+                source_fact_category::alias_fact, index, item.declaration);
+        }
+        expected_alias_modifier_begin += item.target.modifiers.count;
+    }
+    if (expected_alias_modifier_begin != alias_modifiers.size()) {
+        return fail(error, source_facts_error_code::alias_modifier_partition,
+            source_fact_category::packet, expected_alias_modifier_begin);
+    }
+
     const auto declarations = facts.declarations();
     if (!declarations.empty()) {
         std::size_t next_namespace = 0;
@@ -446,6 +533,7 @@ status validate_source_facts(
         std::size_t next_enum = 0;
         std::size_t next_object = 0;
         std::size_t next_link = 0;
+        std::size_t next_alias = 0;
         std::uint32_t previous_offset = 0;
         for (std::size_t index = 0; index < declarations.size(); ++index) {
             const auto& item = declarations[index];
@@ -491,6 +579,13 @@ status validate_source_facts(
                 }
                 expected = links[next_link++].declaration;
                 break;
+            case source_declaration_kind::alias:
+                if (item.index != next_alias || next_alias >= aliases.size()) {
+                    return fail(error, source_facts_error_code::declaration_sequence_index,
+                        source_fact_category::declaration_ref, index, item.declaration);
+                }
+                expected = aliases[next_alias++].declaration;
+                break;
             }
             if (expected.offset != item.declaration.offset || expected.length != item.declaration.length) {
                 return fail(error, source_facts_error_code::declaration_sequence_range,
@@ -498,7 +593,7 @@ status validate_source_facts(
             }
         }
         if (next_namespace != namespaces.size() || next_record != records.size() || next_enum != enums.size() ||
-            next_object != objects.size() || next_link != links.size()) {
+            next_object != objects.size() || next_link != links.size() || next_alias != aliases.size()) {
             return fail(error, source_facts_error_code::declaration_sequence_index,
                 source_fact_category::packet, declarations.size());
         }

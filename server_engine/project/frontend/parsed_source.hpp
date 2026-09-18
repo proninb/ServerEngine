@@ -26,7 +26,7 @@ public:
     [[nodiscard]] source_facts facts() const noexcept {
         return source_facts{
             snapshot.source(), snapshot.text(), namespaces, records, members, modifiers,
-            enums, enum_values, declarations, objects, links, bases,
+            enums, enum_values, declarations, objects, links, bases, aliases, alias_modifiers,
         };
     }
 
@@ -47,6 +47,8 @@ private:
     std::vector<source_object_fact> objects;
     std::vector<source_link_fact> links;
     std::vector<source_base_fact> bases;
+    std::vector<source_alias_fact> aliases;
+    std::vector<source_type_modifier> alias_modifiers;
 };
 
 } // namespace cw::server
