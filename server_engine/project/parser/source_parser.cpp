@@ -644,6 +644,70 @@ private:
         return {};
     }
 
+    // Parses `: [virtual] [access] Base (, ...)` after the record name.
+    // Only single identifiers visible in scope resolve; qualified `A::B`
+    // names stay unsupported. Bases are recorded, not consumed: Generation
+    // Builder and layout do not use them yet (ABI stage).
+    [[nodiscard]] status parse_base_clause(
+        identity_ref scope,
+        source_record_kind kind,
+        std::uint32_t lookup_offset) {
+        for (;;) {
+            bool is_virtual = false;
+            auto access = kind == source_record_kind::class_type
+                ? source_member_access::private_access
+                : source_member_access::public_access;
+            bool progress = true;
+            while (progress) {
+                progress = false;
+                if (identifier("virtual")) {
+                    is_virtual = true;
+                    advance();
+                    progress = true;
+                }
+                else if (identifier("public")) {
+                    access = source_member_access::public_access;
+                    advance();
+                    progress = true;
+                }
+                else if (identifier("protected")) {
+                    access = source_member_access::protected_access;
+                    advance();
+                    progress = true;
+                }
+                else if (identifier("private")) {
+                    access = source_member_access::private_access;
+                    advance();
+                    progress = true;
+                }
+            }
+            if (current().kind != parser_token_kind::identifier)
+                return fail_syntax(span(current()), "expected base type name");
+            const auto base_span = span(current());
+            const auto base_name = semantic.find_string(token_text(current()));
+            identity_ref base = base_name ? lookup_visible_type(scope, base_name, lookup_offset) : nullptr;
+            if (base == nullptr) {
+                return fail(diagnostics::parser_unresolved_type, base_span,
+                    "base type name is not visible in the Source semantic environment", status_code::not_found);
+            }
+            advance();
+            if (punctuation(parser_punctuation::colon)) {
+                const auto* second = cursor + 1 < tokens.size() ? &tokens[cursor + 1] : nullptr;
+                if (second != nullptr && second->kind == parser_token_kind::punctuation &&
+                    second->punctuation == parser_punctuation::colon) {
+                    return fail_unsupported(span(current()), "qualified base type names are not implemented");
+                }
+                return fail_syntax(span(current()), "expected ',' or '{' after base type name");
+            }
+            candidate.bases.push_back(source_base_fact{base, access, base_span, is_virtual});
+            if (punctuation(parser_punctuation::comma)) {
+                advance();
+                continue;
+            }
+            return {};
+        }
+    }
+
     [[nodiscard]] status parse_array_suffix(bool member_context) {
         while (punctuation(parser_punctuation::left_bracket)) {
             advance();
@@ -816,12 +880,21 @@ private:
                 "local type binding conflicts with canonical project identity", result.code);
 
         const auto record_index = static_cast<std::uint32_t>(candidate.records.size());
-        candidate.records.push_back(source_record_fact{identity, {}, {}, source_record_declaration_kind::declaration, kind});
+        candidate.records.push_back(source_record_fact{identity, {}, {}, {}, source_record_declaration_kind::declaration, kind});
         const auto sequence_index = candidate.declarations.size();
         append_declaration(source_declaration_kind::record_type, record_index, {});
 
         advance();
+        const auto base_begin = candidate.bases.size();
+        if (punctuation(parser_punctuation::colon)) {
+            advance();
+            result = parse_base_clause(scope, kind, start);
+            if (!result.ok())
+                return result;
+        }
         if (punctuation(parser_punctuation::semicolon)) {
+            if (candidate.bases.size() != base_begin)
+                return fail_syntax(span(current()), "base clause requires a record definition");
             const auto end = current().offset + current().length;
             const auto declaration = source_span{start, end - start};
             candidate.records[record_index].declaration = declaration;
@@ -830,7 +903,7 @@ private:
             return {};
         }
         if (!punctuation(parser_punctuation::left_brace))
-            return fail_unsupported(span(current()), "base classes, attributes, and record declarator suffixes are not implemented");
+            return fail_unsupported(span(current()), "attributes and record declarator suffixes are not implemented");
 
         const auto member_begin = candidate.members.size();
         advance();
@@ -864,9 +937,14 @@ private:
         if (member_begin > (std::numeric_limits<std::uint32_t>::max)() ||
             member_count > (std::numeric_limits<std::uint32_t>::max)())
             return {status_code::not_available};
+        const auto base_count = candidate.bases.size() - base_begin;
+        if (base_begin > (std::numeric_limits<std::uint32_t>::max)() ||
+            base_count > (std::numeric_limits<std::uint32_t>::max)())
+            return {status_code::not_available};
         const auto declaration = source_span{start, end - start};
         auto& fact = candidate.records[record_index];
         fact.members = source_fact_range{static_cast<std::uint32_t>(member_begin), static_cast<std::uint32_t>(member_count)};
+        fact.bases = source_fact_range{static_cast<std::uint32_t>(base_begin), static_cast<std::uint32_t>(base_count)};
         fact.declaration = declaration;
         fact.declaration_kind = source_record_declaration_kind::definition;
         candidate.declarations[sequence_index].declaration = declaration;

@@ -389,7 +389,9 @@ status source_interface::initialize(
             if (!record.identity ||
                 record.identity.kind() != identity_kind::type ||
                 record.members.begin > facts.members().size() ||
-                record.members.count > facts.members().size() - record.members.begin) {
+                record.members.count > facts.members().size() - record.members.begin ||
+                record.bases.begin > facts.bases().size() ||
+                record.bases.count > facts.bases().size() - record.bases.begin) {
                 return {status_code::invalid_argument};
             }
 

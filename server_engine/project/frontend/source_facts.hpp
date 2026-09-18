@@ -109,6 +109,7 @@ enum class source_record_kind : std::uint8_t {
 struct source_record_fact final {
     identity_ref identity = nullptr;
     source_fact_range members{};
+    source_fact_range bases{};
     source_span declaration{};
     source_record_declaration_kind declaration_kind = source_record_declaration_kind::declaration;
     source_record_kind record_kind = source_record_kind::struct_type;
@@ -125,6 +126,16 @@ struct source_member_fact final {
     string_id name{};
     source_span declaration{};
     source_member_access access = source_member_access::public_access;
+};
+
+// One direct base-class specifier. Recorded by the Parser and validated, but
+// not yet consumed by Generation Builder/layout (ABI stage): contributions
+// intentionally exclude bases until layout consumes them.
+struct source_base_fact final {
+    identity_ref base = nullptr;
+    source_member_access access = source_member_access::public_access;
+    source_span declaration{};
+    bool is_virtual = false;
 };
 
 // Parser-interpreted integer value. bits are the raw value representation and
@@ -204,7 +215,7 @@ public:
         std::span<const source_record_fact> records,
         std::span<const source_member_fact> members,
         std::span<const source_type_modifier> modifiers) noexcept
-        : source_facts(source, source_text, namespaces, records, members, modifiers, {}, {}, {}, {}, {}) {}
+        : source_facts(source, source_text, namespaces, records, members, modifiers, {}, {}, {}, {}, {}, {}) {}
 
     constexpr source_facts(
         source_id source,
@@ -217,7 +228,7 @@ public:
         std::span<const source_enum_value_fact> enum_values,
         std::span<const source_declaration_ref> declarations) noexcept
         : source_facts(source, source_text, namespaces, records, members, modifiers, enums,
-              enum_values, declarations, {}, {}) {}
+              enum_values, declarations, {}, {}, {}) {}
 
     constexpr source_facts(
         source_id source,
@@ -230,7 +241,8 @@ public:
         std::span<const source_enum_value_fact> enum_values,
         std::span<const source_declaration_ref> declarations,
         std::span<const source_object_fact> objects,
-        std::span<const source_link_fact> links) noexcept
+        std::span<const source_link_fact> links,
+        std::span<const source_base_fact> bases = {}) noexcept
         : source_value(source),
           source_text_value(source_text),
           namespaces_value(namespaces),
@@ -241,7 +253,8 @@ public:
           enum_values_value(enum_values),
           declarations_value(declarations),
           objects_value(objects),
-          links_value(links) {}
+          links_value(links),
+          bases_value(bases) {}
 
     [[nodiscard]] constexpr source_id source() const noexcept { return source_value; }
     [[nodiscard]] constexpr std::string_view source_text() const noexcept { return source_text_value; }
@@ -254,6 +267,7 @@ public:
     [[nodiscard]] constexpr std::span<const source_declaration_ref> declarations() const noexcept { return declarations_value; }
     [[nodiscard]] constexpr std::span<const source_object_fact> objects() const noexcept { return objects_value; }
     [[nodiscard]] constexpr std::span<const source_link_fact> links() const noexcept { return links_value; }
+    [[nodiscard]] constexpr std::span<const source_base_fact> bases() const noexcept { return bases_value; }
 
     [[nodiscard]] constexpr std::string_view text(source_span range) const noexcept {
         if (range.offset > source_text_value.size() ||
@@ -275,6 +289,7 @@ private:
     std::span<const source_declaration_ref> declarations_value;
     std::span<const source_object_fact> objects_value;
     std::span<const source_link_fact> links_value;
+    std::span<const source_base_fact> bases_value;
 };
 
 static_assert(std::is_trivially_copyable_v<source_span>);
@@ -290,6 +305,7 @@ static_assert(std::is_trivially_copyable_v<source_declaration_ref>);
 static_assert(std::is_trivially_copyable_v<source_object_fact>);
 static_assert(std::is_trivially_copyable_v<source_object_endpoint_fact>);
 static_assert(std::is_trivially_copyable_v<source_link_fact>);
+static_assert(std::is_trivially_copyable_v<source_base_fact>);
 static_assert(sizeof(source_span) == 8);
 static_assert(sizeof(source_fact_range) == 8);
 

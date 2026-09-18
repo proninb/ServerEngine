@@ -60,6 +60,8 @@ namespace {
         return "object";
     case source_fact_category::link_fact:
         return "link";
+    case source_fact_category::base_fact:
+        return "base";
     case source_fact_category::declaration_ref:
         return "declaration";
     }
@@ -122,7 +124,9 @@ status validate_source_facts(
 
     const auto records = facts.records();
     const auto members = facts.members();
+    const auto bases = facts.bases();
     std::size_t expected_member_begin = 0;
+    std::size_t expected_base_begin = 0;
     std::uint32_t previous_record_offset = 0;
 
     for (std::size_t index = 0; index < records.size(); ++index) {
@@ -157,10 +161,22 @@ status validate_source_facts(
             return fail(error, source_facts_error_code::member_partition,
                 source_fact_category::record_fact, index, item.declaration);
         }
+        if (!valid_range(item.bases, bases.size())) {
+            return fail(error, source_facts_error_code::record_base_range,
+                source_fact_category::record_fact, index, item.declaration);
+        }
+        if (item.bases.begin != expected_base_begin) {
+            return fail(error, source_facts_error_code::base_partition,
+                source_fact_category::record_fact, index, item.declaration);
+        }
 
         if (item.declaration_kind == source_record_declaration_kind::declaration) {
             if (item.members.count != 0) {
                 return fail(error, source_facts_error_code::declaration_has_members,
+                    source_fact_category::record_fact, index, item.declaration);
+            }
+            if (item.bases.count != 0) {
+                return fail(error, source_facts_error_code::declaration_has_bases,
                     source_fact_category::record_fact, index, item.declaration);
             }
             continue;
@@ -172,6 +188,7 @@ status validate_source_facts(
         }
 
         expected_member_begin += item.members.count;
+        expected_base_begin += item.bases.count;
 
         const auto member_end = static_cast<std::size_t>(item.members.begin) + item.members.count;
         std::uint32_t previous_member_offset = 0;
@@ -192,6 +209,30 @@ status validate_source_facts(
     if (expected_member_begin != members.size()) {
         return fail(error, source_facts_error_code::member_partition,
             source_fact_category::packet, expected_member_begin);
+    }
+    if (expected_base_begin != bases.size()) {
+        return fail(error, source_facts_error_code::base_partition,
+            source_fact_category::packet, expected_base_begin);
+    }
+
+    for (std::size_t index = 0; index < bases.size(); ++index) {
+        const auto& item = bases[index];
+        if (item.base == nullptr) {
+            return fail(error, source_facts_error_code::base_identity_missing,
+                source_fact_category::base_fact, index, item.declaration);
+        }
+        if (item.base.kind() != identity_kind::type) {
+            return fail(error, source_facts_error_code::base_identity_kind,
+                source_fact_category::base_fact, index, item.declaration);
+        }
+        if (!valid_member_access(item.access)) {
+            return fail(error, source_facts_error_code::base_access,
+                source_fact_category::base_fact, index, item.declaration);
+        }
+        if (item.declaration.length == 0 || !valid_span(item.declaration, source_size)) {
+            return fail(error, source_facts_error_code::base_range,
+                source_fact_category::base_fact, index, item.declaration);
+        }
     }
 
     const auto modifiers = facts.modifiers();

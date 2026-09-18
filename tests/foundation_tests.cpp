@@ -291,6 +291,7 @@ bool test_source_facts_contract() {
         source_record_fact{
             b,
             source_fact_range{0, 0},
+            source_fact_range{0, 0},
             b_declaration,
             source_record_declaration_kind::declaration,
             source_record_kind::struct_type,
@@ -298,6 +299,7 @@ bool test_source_facts_contract() {
         source_record_fact{
             a,
             source_fact_range{0, 2},
+            source_fact_range{0, 0},
             a_declaration,
             source_record_declaration_kind::definition,
             source_record_kind::struct_type,
@@ -362,6 +364,7 @@ bool test_source_facts_validation() {
         source_record_fact{
             a,
             source_fact_range{0, 1},
+            source_fact_range{0, 0},
             record_range,
             source_record_declaration_kind::definition,
             source_record_kind::struct_type,
@@ -467,12 +470,14 @@ bool test_source_facts_order_contract() {
         source_record_fact{
             b,
             source_fact_range{0, 0},
+            source_fact_range{0, 0},
             span_of(text, "struct B;"),
             source_record_declaration_kind::declaration,
             source_record_kind::struct_type,
         },
         source_record_fact{
             a,
+            source_fact_range{0, 0},
             source_fact_range{0, 0},
             span_of(text, "struct A;"),
             source_record_declaration_kind::declaration,
@@ -1001,6 +1006,59 @@ bool test_parser_nested_namespace() {
     return metadata.parent(a) == context.identity_root() && metadata.parent(b) == a && metadata.parent(s) == b;
 }
 
+bool test_parser_base_clause() {
+    project_configuration configuration;
+    project_context context{std::move(configuration)};
+    source_manager manager;
+    source_snapshot snapshot;
+    constexpr std::string_view text =
+        "struct Base; struct Mixin { int tag; };"
+        " struct Derived : public Base, protected Mixin { int value; };"
+        " struct Virt : virtual Base { };"
+        " class Impl : Base { int hidden; };";
+    if (!publish_test_source(manager, "memory/bases.hpp", text, snapshot))
+        return false;
+
+    parsed_source parsed;
+    diagnostic_buffer diagnostics;
+    const source_environment environment;
+    if (!lex_and_parse(context, snapshot, environment, operation_id{433}, diagnostics, parsed) || diagnostics.has_errors())
+        return false;
+
+    const auto facts = parsed.facts();
+    if (facts.records().size() != 5 || facts.bases().size() != 4 || facts.declarations().size() != 5)
+        return false;
+
+    const auto& metadata = context.identity_metadata();
+    const auto base = facts.records()[0].identity;
+    const auto mixin = facts.records()[1].identity;
+    const auto derived = facts.records()[2].identity;
+    const auto virt = facts.records()[3].identity;
+    const auto impl = facts.records()[4].identity;
+    if (facts.records()[2].bases.count != 2 || facts.records()[3].bases.count != 1 ||
+        facts.records()[4].bases.count != 1 || facts.records()[0].bases.count != 0)
+        return false;
+
+    const auto& b0 = facts.bases()[0];
+    const auto& b1 = facts.bases()[1];
+    const auto& b2 = facts.bases()[2];
+    const auto& b3 = facts.bases()[3];
+    if (b0.base != base || b0.access != source_member_access::public_access || b0.is_virtual ||
+        b1.base != mixin || b1.access != source_member_access::protected_access || b1.is_virtual ||
+        b2.base != base || b2.access != source_member_access::public_access || !b2.is_virtual ||
+        b3.base != base || b3.access != source_member_access::private_access || b3.is_virtual)
+        return false;
+    if (metadata.parent(derived) != context.identity_root() || metadata.parent(virt) != context.identity_root())
+        return false;
+
+    // Base clause on a forward declaration is ill-formed.
+    source_snapshot bad_snapshot;
+    if (!publish_test_source(manager, "memory/bad_base.hpp", "struct Fwd : Base;", bad_snapshot))
+        return false;
+    parsed_source bad_parsed;
+    return !lex_and_parse(context, bad_snapshot, environment, operation_id{434}, diagnostics, bad_parsed);
+}
+
 bool test_parser_cross_source_visibility() {
     project_configuration configuration;
     project_context context{std::move(configuration)};
@@ -1477,7 +1535,7 @@ bool test_source_contribution_capture() {
             test_string(context, "value"), span_of(text, "int value;"), source_member_access::public_access},
     };
     const std::array records{
-        source_record_fact{a, {0, 1}, span_of(text, "struct A { int value; };"),
+        source_record_fact{a, {0, 1}, {}, span_of(text, "struct A { int value; };"),
             source_record_declaration_kind::definition, source_record_kind::struct_type},
     };
     const std::array enum_values{
@@ -1545,9 +1603,9 @@ bool test_generation_builder_g0() {
             source_member_access::public_access},
     };
     const std::array records{
-        source_record_fact{b, {0, 0}, span_of(text, "struct B;"),
+        source_record_fact{b, {0, 0}, {}, span_of(text, "struct B;"),
             source_record_declaration_kind::declaration, source_record_kind::struct_type},
-        source_record_fact{a, {0, 1}, span_of(text, "struct A { B* value; };"),
+        source_record_fact{a, {0, 1}, {}, span_of(text, "struct A { B* value; };"),
             source_record_declaration_kind::definition, source_record_kind::struct_type},
     };
     const std::array<source_enum_fact, 0> enums{};
@@ -1658,11 +1716,11 @@ bool test_generation_builder_redeclaration() {
     const std::array<source_enum_fact, 0> enums{};
     const std::array<source_enum_value_fact, 0> values{};
     const std::array records1{
-        source_record_fact{a, {0, 0}, source_span{0, static_cast<std::uint32_t>(text1.size())},
+        source_record_fact{a, {0, 0}, {}, source_span{0, static_cast<std::uint32_t>(text1.size())},
             source_record_declaration_kind::declaration, source_record_kind::struct_type},
     };
     const std::array records2{
-        source_record_fact{a, {0, 0}, source_span{0, static_cast<std::uint32_t>(text2.size())},
+        source_record_fact{a, {0, 0}, {}, source_span{0, static_cast<std::uint32_t>(text2.size())},
             source_record_declaration_kind::definition, source_record_kind::class_type},
     };
     const std::array declarations1{
@@ -1705,7 +1763,7 @@ bool test_generation_builder_definition_conflict() {
     const std::array<source_enum_fact, 0> enums{};
     const std::array<source_enum_value_fact, 0> values{};
     const std::array records{
-        source_record_fact{a, {0, 0}, source_span{0, static_cast<std::uint32_t>(text.size())},
+        source_record_fact{a, {0, 0}, {}, source_span{0, static_cast<std::uint32_t>(text.size())},
             source_record_declaration_kind::definition, source_record_kind::struct_type},
     };
     const std::array declarations{
@@ -1746,10 +1804,10 @@ bool test_generation_builder_incremental_modify() {
     const std::array<source_member_fact, 0> no_members{};
 
     const std::array a0_records{
-        source_record_fact{a, {}, {0, 1}, source_record_declaration_kind::definition, source_record_kind::struct_type},
+        source_record_fact{a, {}, {}, {0, 1}, source_record_declaration_kind::definition, source_record_kind::struct_type},
     };
     const std::array b0_records{
-        source_record_fact{b, {}, {0, 1}, source_record_declaration_kind::definition, source_record_kind::struct_type},
+        source_record_fact{b, {}, {}, {0, 1}, source_record_declaration_kind::definition, source_record_kind::struct_type},
     };
     const std::array declarations{
         source_declaration_ref{0, source_declaration_kind::record_type, {0, 1}},
@@ -1776,7 +1834,7 @@ bool test_generation_builder_incremental_modify() {
             test_string(context, "x"), {0, 6}, source_member_access::public_access},
     };
     const std::array a1_records{
-        source_record_fact{a, {0, 1}, {0, 6}, source_record_declaration_kind::definition, source_record_kind::struct_type},
+        source_record_fact{a, {0, 1}, {}, {0, 6}, source_record_declaration_kind::definition, source_record_kind::struct_type},
     };
     const std::array a1_declarations{
         source_declaration_ref{0, source_declaration_kind::record_type, {0, 6}},
@@ -1814,7 +1872,7 @@ bool test_generation_builder_incremental_remove_add() {
     const std::array<source_enum_fact, 0> enums{};
     const std::array<source_enum_value_fact, 0> values{};
     const std::array records{
-        source_record_fact{a, {}, {0, 1}, source_record_declaration_kind::definition, source_record_kind::struct_type},
+        source_record_fact{a, {}, {}, {0, 1}, source_record_declaration_kind::definition, source_record_kind::struct_type},
     };
     const std::array declarations{
         source_declaration_ref{0, source_declaration_kind::record_type, {0, 1}},
@@ -1873,7 +1931,7 @@ bool test_generation_builder_incremental_dangling_guard() {
     const std::array<source_member_fact, 0> no_members{};
     const std::array<source_type_modifier, 0> no_modifiers{};
     const std::array a_records{
-        source_record_fact{a, {}, {0, 1}, source_record_declaration_kind::definition, source_record_kind::struct_type},
+        source_record_fact{a, {}, {}, {0, 1}, source_record_declaration_kind::definition, source_record_kind::struct_type},
     };
     const std::array declarations{
         source_declaration_ref{0, source_declaration_kind::record_type, {0, 1}},
@@ -1889,7 +1947,7 @@ bool test_generation_builder_incremental_dangling_guard() {
             test_string(context, "a"), {0, 5}, source_member_access::public_access},
     };
     const std::array b_records{
-        source_record_fact{b, {0, 1}, {0, 5}, source_record_declaration_kind::definition, source_record_kind::struct_type},
+        source_record_fact{b, {0, 1}, {}, {0, 5}, source_record_declaration_kind::definition, source_record_kind::struct_type},
     };
     const std::array b_declarations{
         source_declaration_ref{0, source_declaration_kind::record_type, {0, 5}},
@@ -1932,10 +1990,10 @@ bool test_generation_builder_incremental_conflict_rollback() {
     const std::array<source_enum_fact, 0> enums{};
     const std::array<source_enum_value_fact, 0> values{};
     const std::array declaration_records{
-        source_record_fact{a, {}, {0, 9}, source_record_declaration_kind::declaration, source_record_kind::struct_type},
+        source_record_fact{a, {}, {}, {0, 9}, source_record_declaration_kind::declaration, source_record_kind::struct_type},
     };
     const std::array definition_records{
-        source_record_fact{a, {}, {0, 11}, source_record_declaration_kind::definition, source_record_kind::struct_type},
+        source_record_fact{a, {}, {}, {0, 11}, source_record_declaration_kind::definition, source_record_kind::struct_type},
     };
     const std::array declaration_order{
         source_declaration_ref{0, source_declaration_kind::record_type, {0, 9}},
@@ -6715,6 +6773,7 @@ bool test_source_frontend_cache_native_block_publication() {
         source_record_fact{
             type,
             source_fact_range{0, 0},
+            source_fact_range{0, 0},
             source_span{
                 0,
                 static_cast<std::uint32_t>(text.size())},
@@ -6857,6 +6916,7 @@ bool test_source_frontend_cache_sparse_native_block_publication() {
         source_record_fact{
             type_a,
             source_fact_range{0, 0},
+            source_fact_range{0, 0},
             source_span{
                 0,
                 static_cast<std::uint32_t>(
@@ -6869,6 +6929,7 @@ bool test_source_frontend_cache_sparse_native_block_publication() {
     const std::array records_b{
         source_record_fact{
             type_b,
+            source_fact_range{0, 0},
             source_fact_range{0, 0},
             source_span{
                 0,
@@ -6883,6 +6944,7 @@ bool test_source_frontend_cache_sparse_native_block_publication() {
         source_record_fact{
             type_a,
             source_fact_range{0, 0},
+            source_fact_range{0, 0},
             source_span{
                 0,
                 static_cast<std::uint32_t>(
@@ -6892,6 +6954,7 @@ bool test_source_frontend_cache_sparse_native_block_publication() {
         },
         source_record_fact{
             type_c,
+            source_fact_range{0, 0},
             source_fact_range{0, 0},
             source_span{
                 static_cast<std::uint32_t>(
@@ -7279,6 +7342,7 @@ constexpr std::array tests{
     test_case{"parser_enum_facts", &test_parser_enum_facts},
     test_case{"parser_member_declarators", &test_parser_member_declarators},
     test_case{"parser_nested_namespace", &test_parser_nested_namespace},
+    test_case{"parser_base_clause", &test_parser_base_clause},
     test_case{"parser_cross_source_visibility", &test_parser_cross_source_visibility},
     test_case{"parser_positional_include_visibility", &test_parser_positional_include_visibility},
     test_case{"parser_unresolved_type", &test_parser_unresolved_type},

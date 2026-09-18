@@ -63,6 +63,13 @@ enum class source_facts_error_code : std::uint8_t {
     declaration_sequence_index,
     declaration_sequence_order,
     declaration_sequence_range,
+    record_base_range,
+    declaration_has_bases,
+    base_partition,
+    base_identity_missing,
+    base_identity_kind,
+    base_access,
+    base_range,
 };
 
 enum class source_fact_category : std::uint8_t {
@@ -75,6 +82,7 @@ enum class source_fact_category : std::uint8_t {
     enum_value_fact,
     object_fact,
     link_fact,
+    base_fact,
     declaration_ref,
 };
 
@@ -199,6 +207,20 @@ struct source_facts_validation_error {
         return "declaration sequence is not in lexical source order";
     case source_facts_error_code::declaration_sequence_range:
         return "declaration sequence range does not match the referenced fact";
+    case source_facts_error_code::record_base_range:
+        return "record base range is outside the flat base array";
+    case source_facts_error_code::declaration_has_bases:
+        return "record declaration carries definition bases";
+    case source_facts_error_code::base_partition:
+        return "record definitions do not form an exact lexical partition of bases";
+    case source_facts_error_code::base_identity_missing:
+        return "base fact has no resolved identity";
+    case source_facts_error_code::base_identity_kind:
+        return "base fact identity is not a type identity";
+    case source_facts_error_code::base_access:
+        return "base fact has an unsupported access value";
+    case source_facts_error_code::base_range:
+        return "base declaration range is outside the Source snapshot";
     }
     return "source facts validation failed";
 }
