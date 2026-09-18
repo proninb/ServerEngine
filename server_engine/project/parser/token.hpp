@@ -16,6 +16,7 @@ enum class parser_token_kind : std::uint8_t {
     keyword_union,
     string_literal,
     punctuation,
+    character_literal,
 };
 
 enum class parser_punctuation : std::uint8_t {
@@ -37,6 +38,15 @@ enum class parser_punctuation : std::uint8_t {
     asterisk,
     left_parenthesis,
     right_parenthesis,
+    less,
+    greater,
+    bang,
+    percent,
+    caret,
+    pipe,
+    tilde,
+    question,
+    slash,
 };
 
 // offset/length address the Source snapshot. flags bit 0 marks the first

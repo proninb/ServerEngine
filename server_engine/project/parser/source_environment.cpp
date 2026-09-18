@@ -391,7 +391,9 @@ status source_interface::initialize(
                 record.members.begin > facts.members().size() ||
                 record.members.count > facts.members().size() - record.members.begin ||
                 record.bases.begin > facts.bases().size() ||
-                record.bases.count > facts.bases().size() - record.bases.begin) {
+                record.bases.count > facts.bases().size() - record.bases.begin ||
+                record.methods.begin > facts.methods().size() ||
+                record.methods.count > facts.methods().size() - record.methods.begin) {
                 return {status_code::invalid_argument};
             }
 

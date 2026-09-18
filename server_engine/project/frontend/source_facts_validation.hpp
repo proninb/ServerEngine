@@ -65,11 +65,18 @@ enum class source_facts_error_code : std::uint8_t {
     declaration_sequence_range,
     record_base_range,
     declaration_has_bases,
+    declaration_has_methods,
     base_partition,
     base_identity_missing,
     base_identity_kind,
     base_access,
     base_range,
+    method_name_empty,
+    method_range,
+    method_order,
+    method_access,
+    method_partition,
+    method_modifier_partition,
     alias_identity_missing,
     alias_identity_kind,
     alias_range,
@@ -89,6 +96,7 @@ enum class source_fact_category : std::uint8_t {
     link_fact,
     base_fact,
     alias_fact,
+    method_fact,
     declaration_ref,
 };
 
@@ -217,6 +225,8 @@ struct source_facts_validation_error {
         return "record base range is outside the flat base array";
     case source_facts_error_code::declaration_has_bases:
         return "record declaration carries definition bases";
+    case source_facts_error_code::declaration_has_methods:
+        return "record declaration carries definition methods";
     case source_facts_error_code::base_partition:
         return "record definitions do not form an exact lexical partition of bases";
     case source_facts_error_code::base_identity_missing:
@@ -227,6 +237,18 @@ struct source_facts_validation_error {
         return "base fact has an unsupported access value";
     case source_facts_error_code::base_range:
         return "base declaration range is outside the Source snapshot";
+    case source_facts_error_code::method_name_empty:
+        return "method fact has an empty source name";
+    case source_facts_error_code::method_range:
+        return "method declaration range is outside the Source snapshot";
+    case source_facts_error_code::method_order:
+        return "record methods are not in source declaration order";
+    case source_facts_error_code::method_access:
+        return "method fact has an unsupported access value";
+    case source_facts_error_code::method_partition:
+        return "record definitions do not form an exact lexical partition of methods";
+    case source_facts_error_code::method_modifier_partition:
+        return "method return type modifiers do not form an exact dense partition";
     case source_facts_error_code::alias_identity_missing:
         return "alias fact has no resolved identity";
     case source_facts_error_code::alias_identity_kind:

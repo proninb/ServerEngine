@@ -156,6 +156,22 @@ status lex_source(
                 ++index;
                 token.kind = parser_token_kind::string_literal;
             }
+            else if (character == '\'') {
+                // Character literal. Interpreted nowhere yet (initializers and
+                // bodies only skip it); digit separators (`1'000`) and raw
+                // strings stay unsupported and fail here loudly.
+                ++index;
+                while (index < bytes.size() && bytes[index] != '\'' && bytes[index] != '\n') {
+                    if (bytes[index] == '\\' && index + 1 < bytes.size())
+                        index += 2;
+                    else
+                        ++index;
+                }
+                if (index >= bytes.size() || bytes[index] != '\'')
+                    return fail(source, operation, diagnostics, start, index - start, "unterminated character literal");
+                ++index;
+                token.kind = parser_token_kind::character_literal;
+            }
             else {
                 token.kind = parser_token_kind::punctuation;
                 switch (character) {
@@ -174,6 +190,15 @@ status lex_source(
                 case '*': token.punctuation = parser_punctuation::asterisk; ++index; break;
                 case '(': token.punctuation = parser_punctuation::left_parenthesis; ++index; break;
                 case ')': token.punctuation = parser_punctuation::right_parenthesis; ++index; break;
+                case '<': token.punctuation = parser_punctuation::less; ++index; break;
+                case '>': token.punctuation = parser_punctuation::greater; ++index; break;
+                case '!': token.punctuation = parser_punctuation::bang; ++index; break;
+                case '%': token.punctuation = parser_punctuation::percent; ++index; break;
+                case '^': token.punctuation = parser_punctuation::caret; ++index; break;
+                case '|': token.punctuation = parser_punctuation::pipe; ++index; break;
+                case '~': token.punctuation = parser_punctuation::tilde; ++index; break;
+                case '?': token.punctuation = parser_punctuation::question; ++index; break;
+                case '/': token.punctuation = parser_punctuation::slash; ++index; break;
                 case '&':
                     ++index;
                     if (index < bytes.size() && bytes[index] == '&') {

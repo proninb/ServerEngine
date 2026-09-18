@@ -64,6 +64,8 @@ namespace {
         return "base";
     case source_fact_category::alias_fact:
         return "alias";
+    case source_fact_category::method_fact:
+        return "method";
     case source_fact_category::declaration_ref:
         return "declaration";
     }
@@ -127,8 +129,11 @@ status validate_source_facts(
     const auto records = facts.records();
     const auto members = facts.members();
     const auto bases = facts.bases();
+    const auto methods = facts.methods();
+    const auto method_modifiers = facts.method_modifiers();
     std::size_t expected_member_begin = 0;
     std::size_t expected_base_begin = 0;
+    std::size_t expected_method_begin = 0;
     std::uint32_t previous_record_offset = 0;
 
     for (std::size_t index = 0; index < records.size(); ++index) {
@@ -171,6 +176,14 @@ status validate_source_facts(
             return fail(error, source_facts_error_code::base_partition,
                 source_fact_category::record_fact, index, item.declaration);
         }
+        if (!valid_range(item.methods, methods.size())) {
+            return fail(error, source_facts_error_code::method_range,
+                source_fact_category::record_fact, index, item.declaration);
+        }
+        if (item.methods.begin != expected_method_begin) {
+            return fail(error, source_facts_error_code::method_partition,
+                source_fact_category::record_fact, index, item.declaration);
+        }
 
         if (item.declaration_kind == source_record_declaration_kind::declaration) {
             if (item.members.count != 0) {
@@ -179,6 +192,10 @@ status validate_source_facts(
             }
             if (item.bases.count != 0) {
                 return fail(error, source_facts_error_code::declaration_has_bases,
+                    source_fact_category::record_fact, index, item.declaration);
+            }
+            if (item.methods.count != 0) {
+                return fail(error, source_facts_error_code::declaration_has_methods,
                     source_fact_category::record_fact, index, item.declaration);
             }
             continue;
@@ -191,6 +208,7 @@ status validate_source_facts(
 
         expected_member_begin += item.members.count;
         expected_base_begin += item.bases.count;
+        expected_method_begin += item.methods.count;
 
         const auto member_end = static_cast<std::size_t>(item.members.begin) + item.members.count;
         std::uint32_t previous_member_offset = 0;
@@ -206,6 +224,14 @@ status validate_source_facts(
             }
             previous_member_offset = members[member_index].declaration.offset;
         }
+
+        const auto method_end = static_cast<std::size_t>(item.methods.begin) + item.methods.count;
+        for (std::size_t method_index = item.methods.begin; method_index < method_end; ++method_index) {
+            if (!contains(item.declaration, methods[method_index].declaration)) {
+                return fail(error, source_facts_error_code::method_range,
+                    source_fact_category::method_fact, method_index, methods[method_index].declaration);
+            }
+        }
     }
 
     if (expected_member_begin != members.size()) {
@@ -215,6 +241,62 @@ status validate_source_facts(
     if (expected_base_begin != bases.size()) {
         return fail(error, source_facts_error_code::base_partition,
             source_fact_category::packet, expected_base_begin);
+    }
+    if (expected_method_begin != methods.size()) {
+        return fail(error, source_facts_error_code::method_partition,
+            source_fact_category::packet, expected_method_begin);
+    }
+
+    std::size_t expected_method_modifier_begin = 0;
+    std::uint32_t previous_method_offset = 0;
+    for (std::size_t index = 0; index < methods.size(); ++index) {
+        const auto& item = methods[index];
+        if (!item.name) {
+            return fail(error, source_facts_error_code::method_name_empty,
+                source_fact_category::method_fact, index, item.declaration);
+        }
+        if (!valid_member_access(item.access)) {
+            return fail(error, source_facts_error_code::method_access,
+                source_fact_category::method_fact, index, item.declaration);
+        }
+        if (item.declaration.length == 0 || !valid_span(item.declaration, source_size)) {
+            return fail(error, source_facts_error_code::method_range,
+                source_fact_category::method_fact, index, item.declaration);
+        }
+        if (index != 0 && item.declaration.offset < previous_method_offset) {
+            return fail(error, source_facts_error_code::method_order,
+                source_fact_category::method_fact, index, item.declaration);
+        }
+        previous_method_offset = item.declaration.offset;
+        const bool has_identity = item.return_type.identity != nullptr;
+        const bool has_intrinsic = item.return_type.intrinsic != intrinsic_type::none;
+        const bool no_return = !has_identity && !has_intrinsic;
+        if (no_return && !item.is_constructor && !item.is_destructor) {
+            return fail(error, source_facts_error_code::unresolved_type_base,
+                source_fact_category::method_fact, index, item.declaration);
+        }
+        if (has_identity && has_intrinsic) {
+            return fail(error, source_facts_error_code::ambiguous_type_base,
+                source_fact_category::method_fact, index, item.declaration);
+        }
+        if (has_identity && item.return_type.identity.kind() != identity_kind::type) {
+            return fail(error, source_facts_error_code::semantic_type_identity_kind,
+                source_fact_category::method_fact, index, item.declaration);
+        }
+        if (has_intrinsic && !valid_intrinsic(item.return_type.intrinsic)) {
+            return fail(error, source_facts_error_code::intrinsic_type_code,
+                source_fact_category::method_fact, index, item.declaration);
+        }
+        if (!valid_range(item.return_type.modifiers, method_modifiers.size()) ||
+            item.return_type.modifiers.begin != expected_method_modifier_begin) {
+            return fail(error, source_facts_error_code::method_modifier_partition,
+                source_fact_category::method_fact, index, item.declaration);
+        }
+        expected_method_modifier_begin += item.return_type.modifiers.count;
+    }
+    if (expected_method_modifier_begin != method_modifiers.size()) {
+        return fail(error, source_facts_error_code::method_modifier_partition,
+            source_fact_category::packet, expected_method_modifier_begin);
     }
 
     for (std::size_t index = 0; index < bases.size(); ++index) {

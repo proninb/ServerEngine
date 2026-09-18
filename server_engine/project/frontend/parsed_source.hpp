@@ -27,6 +27,7 @@ public:
         return source_facts{
             snapshot.source(), snapshot.text(), namespaces, records, members, modifiers,
             enums, enum_values, declarations, objects, links, bases, aliases, alias_modifiers,
+            methods, method_modifiers,
         };
     }
 
@@ -49,6 +50,8 @@ private:
     std::vector<source_base_fact> bases;
     std::vector<source_alias_fact> aliases;
     std::vector<source_type_modifier> alias_modifiers;
+    std::vector<source_method_fact> methods;
+    std::vector<source_type_modifier> method_modifiers;
 };
 
 } // namespace cw::server
