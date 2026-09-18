@@ -54,15 +54,15 @@ struct generation_source_state final {
 
 #ifdef _WIN32
     // Small-file CreateFile/ReadFile/CloseHandle is latency-bound and benefits
-    // from modest oversubscription. Keep CPU phases at cpu_workers.
-    const auto extra =
-        (cpu_workers + 2) / 3;
-    const auto oversubscribed =
-        cpu_workers > (std::numeric_limits<std::size_t>::max)() - extra
-        ? cpu_workers
-        : cpu_workers + extra;
-
+    // from oversubscription. Keep CPU phases at cpu_workers.
+    // Measured acquire_execute on 10K sources with 8 CPU workers:
+    // 8 -> 78.8ms, 11 -> 64.4ms, 16 -> 52.1ms, 32 -> 46.7ms, 64 -> 47.8ms.
+    constexpr std::size_t io_multiplier = 4;
     constexpr std::size_t practical_cap = 64;
+    const auto oversubscribed =
+        cpu_workers > (std::numeric_limits<std::size_t>::max)() / io_multiplier
+        ? (std::numeric_limits<std::size_t>::max)()
+        : cpu_workers * io_multiplier;
     return (std::max)(
         cpu_workers,
         (std::min)(
@@ -642,16 +642,24 @@ status source_frontend_generation::build(
                     frontend_clock::now());
 
             const auto acquire_prepare_begin = frontend_clock::now();
-            for (std::size_t local = 0; local < wave_count; ++local) {
-                auto result = sources.prepare_acquire(states[wave_begin + local].source, jobs[local]);
-                if (!result.ok())
-                    return result;
-            }
+            // prepare_acquire is const and touches only per-index outputs,
+            // so jobs can be built concurrently on CPU workers.
+            auto prepare_result = workers.run(
+                wave_count, worker_limit, max_active, [&](std::size_t local) {
+                    states[wave_begin + local].work_status =
+                        sources.prepare_acquire(states[wave_begin + local].source, jobs[local]);
+                });
 
             summary.acquire_prepare_ns +=
                 frontend_elapsed_ns(
                     acquire_prepare_begin,
                     frontend_clock::now());
+            if (!prepare_result.ok())
+                return prepare_result;
+            for (std::size_t local = 0; local < wave_count; ++local) {
+                if (!states[wave_begin + local].work_status.ok())
+                    return states[wave_begin + local].work_status;
+            }
 
             const auto acquire_execute_begin = frontend_clock::now();
             auto parallel_result = workers.run(
