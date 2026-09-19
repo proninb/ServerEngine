@@ -127,6 +127,11 @@ struct source_member_fact final {
     string_id name{};
     source_span declaration{};
     source_member_access access = source_member_access::public_access;
+    // Initializer spelling (`= ...`, `(...)`, or `{...}`), empty when absent.
+    // Recorded, never evaluated: values are runtime semantics outside the
+    // metadata model. Default construction applies these spellings; a later
+    // stage interprets them.
+    source_span initializer{};
 };
 
 // One direct base-class specifier. Recorded by the Parser and validated, but
@@ -201,10 +206,12 @@ struct source_enum_fact final {
 
 // One named Project object. Object identity is semantic WHO; its type remains a
 // fully resolved Parser TypeRef and is materialized to Graph TypeRef by Builder.
+// Initializers follow the member contract: spelling recorded, never evaluated.
 struct source_object_fact final {
     identity_ref identity = nullptr;
     source_type_ref type{};
     source_span declaration{};
+    source_span initializer{};
 };
 
 struct source_object_endpoint_fact final {

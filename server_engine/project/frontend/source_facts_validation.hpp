@@ -31,6 +31,7 @@ enum class source_facts_error_code : std::uint8_t {
     member_name_empty,
     member_name_range,
     member_range,
+    member_initializer_range,
     member_order,
     member_name_outside_declaration,
     type_spelling_range,
@@ -57,6 +58,7 @@ enum class source_facts_error_code : std::uint8_t {
     object_identity_missing,
     object_identity_kind,
     object_range,
+    object_initializer_range,
     object_type,
     link_endpoint,
     link_range,
@@ -157,6 +159,8 @@ struct source_facts_validation_error {
         return "member name range is outside the Source snapshot";
     case source_facts_error_code::member_range:
         return "member declaration range is outside the Source snapshot";
+    case source_facts_error_code::member_initializer_range:
+        return "member initializer range is outside its declaration";
     case source_facts_error_code::member_order:
         return "record members are not in source declaration order";
     case source_facts_error_code::member_name_outside_declaration:
@@ -209,6 +213,8 @@ struct source_facts_validation_error {
         return "object fact identity is not an object identity";
     case source_facts_error_code::object_range:
         return "object declaration range is outside the Source snapshot";
+    case source_facts_error_code::object_initializer_range:
+        return "object initializer range is outside its declaration";
     case source_facts_error_code::object_type:
         return "object type must be one resolved unmodified named Project type";
     case source_facts_error_code::link_endpoint:

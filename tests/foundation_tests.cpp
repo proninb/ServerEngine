@@ -277,6 +277,7 @@ bool test_source_facts_contract() {
             test_string(context, "value"),
             value_declaration,
             source_member_access::public_access,
+            source_span{},
         },
         source_member_fact{
             source_type_ref::builtin(
@@ -284,6 +285,7 @@ bool test_source_facts_contract() {
             test_string(context, "count"),
             count_declaration,
             source_member_access::public_access,
+            source_span{},
         },
     };
 
@@ -362,6 +364,7 @@ bool test_source_facts_validation() {
             test_string(context, "value"),
             member_range,
             source_member_access::public_access,
+            source_span{},
         },
     };
     const std::array records{
@@ -1728,7 +1731,7 @@ bool test_source_contribution_capture() {
     const std::array members{
         source_member_fact{
             source_type_ref::builtin(intrinsic_type::signed_int, {}, span_of(text, "int")),
-            test_string(context, "value"), span_of(text, "int value;"), source_member_access::public_access},
+            test_string(context, "value"), span_of(text, "int value;"), source_member_access::public_access, {}}},
     };
     const std::array records{
         source_record_fact{a, {0, 1}, {}, {}, span_of(text, "struct A { int value; };"),
@@ -2027,7 +2030,7 @@ bool test_generation_builder_incremental_modify() {
     const std::array members{
         source_member_fact{
             source_type_ref::builtin(intrinsic_type::signed_int, {}, {0, 3}),
-            test_string(context, "x"), {0, 6}, source_member_access::public_access},
+            test_string(context, "x"), {0, 6}, source_member_access::public_access, {}}},
     };
     const std::array a1_records{
         source_record_fact{a, {0, 1}, {}, {}, {0, 6}, source_record_declaration_kind::definition, source_record_kind::struct_type},
@@ -2140,7 +2143,7 @@ bool test_generation_builder_incremental_dangling_guard() {
     const std::array b_members{
         source_member_fact{
             source_type_ref::semantic(a, {0, 1}, {0, 2}),
-            test_string(context, "a"), {0, 5}, source_member_access::public_access},
+            test_string(context, "a"), {0, 5}, source_member_access::public_access, {}}},
     };
     const std::array b_records{
         source_record_fact{b, {0, 1}, {}, {}, {0, 5}, source_record_declaration_kind::definition, source_record_kind::struct_type},

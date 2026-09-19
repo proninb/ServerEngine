@@ -1,0 +1,58 @@
+﻿{
+    "$schema":  "https://opencode.ai/config.json",
+    "model":  "local-fast/qwen-coder-fast",
+    "providers":  {
+                      "local":  {
+                                    "name":  "Local Qwen",
+                                    "package":  "@opencode/ai/providers/openai-compatible",
+                                    "settings":  {
+                                                     "baseURL":  "http://127.0.0.1:8085/v1"
+                                                 },
+                                    "models":  {
+                                                   "qwen-coder":  {
+                                                                      "modelID":  "C:\\Boris\\models\\Qwen3-Coder-30B-A3B-Instruct.Q4_K_M.gguf",
+                                                                      "name":  "Qwen3-Coder 30B Local",
+                                                                      "capabilities":  {
+                                                                                           "tools":  true,
+                                                                                           "input":  [
+                                                                                                         "text"
+                                                                                                     ],
+                                                                                           "output":  [
+                                                                                                          "text"
+                                                                                                      ]
+                                                                                       },
+                                                                      "limit":  {
+                                                                                    "context":  32768,
+                                                                                    "output":  4096
+                                                                                }
+                                                                  }
+                                               }
+                                },
+                      "local-fast":  {
+                                         "name":  "Local Qwen Fast",
+                                         "package":  "@opencode/ai/providers/openai-compatible",
+                                         "settings":  {
+                                                          "baseURL":  "http://127.0.0.1:8086/v1"
+                                                      },
+                                         "models":  {
+                                                        "qwen-coder-fast":  {
+                                                                                "modelID":  "qwen-coder-fast",
+                                                                                "name":  "Qwen2.5-Coder 14B Fast",
+                                                                                "capabilities":  {
+                                                                                                     "tools":  true,
+                                                                                                     "input":  [
+                                                                                                                   "text"
+                                                                                                               ],
+                                                                                                     "output":  [
+                                                                                                                    "text"
+                                                                                                                ]
+                                                                                                 },
+                                                                                "limit":  {
+                                                                                              "context":  32768,
+                                                                                              "output":  4096
+                                                                                          }
+                                                                            }
+                                                    }
+                                     }
+                  }
+}

@@ -558,6 +558,10 @@ private:
         std::string_view detail,
         status_code code) noexcept {
 
+        // Probe parses (most-vexing function-vs-data disambiguation) explore
+        // a failing reading and must not leak diagnostics for it.
+        if (quiet_probe)
+            return {code};
         try {
             diagnostics.emit(diagnostic_record{
                 descriptor.id,
@@ -591,13 +595,12 @@ private:
     // consuming nested (), {}, []. The terminator is left current.
     // Returns false on EOF or an unmatched closing bracket.
     //
-    // Explicit metadata-model contract: initializers are intentionally
-    // outside the model. They are skipped as lexical regions and never
-    // interpreted, so no value/expression semantics reach facts, the Graph,
-    // or runtime. If runtime ever needs values, this contract (not just the
-    // parser) must change: facts, contributions, and images would all gain
-    // initializer representation.
-    [[nodiscard]] bool skip_declarator_initializer(bool& comma) noexcept {
+    // Explicit metadata-model contract: initializers are recorded as source
+    // spelling only and never evaluated. Values are runtime semantics outside
+    // the model; default construction applies these spellings, and any stage
+    // that interprets them must extend facts, contributions, and images.
+    [[nodiscard]] bool skip_declarator_initializer(bool& comma, source_span& spelling) noexcept {
+        const auto begin = current().offset;
         std::size_t depth = 0;
         comma = false;
         for (;;) {
@@ -621,12 +624,15 @@ private:
                 case parser_punctuation::comma:
                     if (depth == 0) {
                         comma = true;
+                        spelling = source_span{begin, token.offset - begin};
                         return true;
                     }
                     break;
                 case parser_punctuation::semicolon:
-                    if (depth == 0)
+                    if (depth == 0) {
+                        spelling = source_span{begin, token.offset - begin};
                         return true;
+                    }
                     break;
                 default:
                     break;
@@ -1749,18 +1755,27 @@ private:
                 advance();
             }
 
-            // Free function: skip signature and body without recording.
+            // Free function: skip signature and body without recording. When the
+            // parenthesized list is not a parameter list (direct-initialized
+            // data like `S x(5)`), fall back to a data object. Cursor restore
+            // keeps the fallback exact; the probe stays quiet.
             if (is_operator || punctuation(parser_punctuation::left_parenthesis)) {
-                result = parse_parameter_list();
-                if (!result.ok())
-                    return result;
+                const auto object_paren_cursor = cursor;
+                const auto object_probe_quiet = quiet_probe;
+                quiet_probe = true;
                 bool skipped_const = false;
                 bool skipped_override = false;
                 bool skipped_pure = false;
-                result = parse_method_trailer(skipped_const, skipped_override, skipped_pure);
-                if (!result.ok())
-                    return result;
-                return {};
+                auto signature = parse_parameter_list();
+                if (signature.ok())
+                    signature = parse_method_trailer(skipped_const, skipped_override, skipped_pure);
+                quiet_probe = object_probe_quiet;
+                if (signature.ok())
+                    return {};
+                cursor = object_paren_cursor;
+                if (is_operator) {
+                    return fail_syntax(span(current()), "expected parameter list after operator spelling");
+                }
             }
 
             if (!type_spilled) {
@@ -1790,16 +1805,42 @@ private:
                 return result;
 
             bool object_comma = false;
+            source_span object_initializer{};
             if (punctuation(parser_punctuation::equal)) {
                 advance();
-                if (!skip_declarator_initializer(object_comma))
+                if (!skip_declarator_initializer(object_comma, object_initializer))
                     return fail_syntax(span(current()), "expected ',' or ';' after object initializer");
+            }
+            else if (punctuation(parser_punctuation::left_parenthesis)) {
+                const auto object_paren_begin = current().offset;
+                bool paren_empty = false;
+                result = skip_balanced_parens(paren_empty);
+                if (!result.ok())
+                    return result;
+                object_initializer = source_span{object_paren_begin, current().offset - object_paren_begin};
+                if (!punctuation(parser_punctuation::comma) &&
+                    !punctuation(parser_punctuation::semicolon)) {
+                    return fail_syntax(span(current()), "expected ',' or ';' after object initializer");
+                }
+                object_comma = punctuation(parser_punctuation::comma);
+            }
+            else if (punctuation(parser_punctuation::left_brace)) {
+                const auto object_brace_begin = current().offset;
+                result = skip_balanced_block();
+                if (!result.ok())
+                    return result;
+                object_initializer = source_span{object_brace_begin, current().offset - object_brace_begin};
+                if (!punctuation(parser_punctuation::comma) &&
+                    !punctuation(parser_punctuation::semicolon)) {
+                    return fail_syntax(span(current()), "expected ',' or ';' after object initializer");
+                }
+                object_comma = punctuation(parser_punctuation::comma);
             }
             else if (punctuation(parser_punctuation::comma)) {
                 object_comma = true;
             }
             else if (!punctuation(parser_punctuation::semicolon)) {
-                return fail_unsupported(span(current()), "functions and function-style declarators are not implemented");
+                return fail_unsupported(span(current()), "function-style declarators are not implemented");
             }
 
             const auto object_declaration_end = current().offset + current().length;
@@ -1823,6 +1864,7 @@ private:
                 object_identity,
                 type,
                 source_span{declaration_start, object_declaration_end - declaration_start},
+                object_initializer,
             });
             append_declaration(source_declaration_kind::object, object_index,
                 source_span{declaration_start, object_declaration_end - declaration_start});
@@ -2366,29 +2408,61 @@ private:
                 advance();
             }
 
-            // A function-style declarator records a method fact; anything
-            // else on this path is data. There is no fallback: misreading a
-            // function as data (or the reverse) would silently corrupt facts.
+            // A function-style declarator records a method fact. When the
+            // parenthesized list is not a parameter list (direct-initialized
+            // data like `S x(5)`), fall back to a data member with a recorded
+            // paren initializer. The C++ most-vexing rule is honored by trying
+            // the function reading first; cursor restore keeps the fallback
+            // exact because parameter parsing never mutates the candidate.
             if (punctuation(parser_punctuation::left_parenthesis)) {
-                if (method_name_exists(record, member_name) ||
-                    member_bindings.find(record, member_name)) {
-                    return fail(diagnostics::parser_semantic_resolution_failed, declarator_span,
-                        "method name conflicts with a visible member", status_code::semantic_conflict);
+                const auto paren_cursor = cursor;
+                const auto probe_quiet = quiet_probe;
+                quiet_probe = true;
+                bool signature_const = false;
+                bool signature_override = false;
+                bool signature_pure = false;
+                auto signature = parse_parameter_list();
+                if (signature.ok())
+                    signature = parse_method_trailer(signature_const, signature_override, signature_pure);
+                quiet_probe = probe_quiet;
+                if (signature.ok()) {
+                    if (method_name_exists(record, member_name) ||
+                        member_bindings.find(record, member_name)) {
+                        return fail(diagnostics::parser_semantic_resolution_failed, declarator_span,
+                            "method name conflicts with a visible member", status_code::semantic_conflict);
+                    }
+                    result = spill_type_mods(candidate.method_modifiers);
+                    if (!result.ok())
+                        return result;
+                    const auto return_count = candidate.method_modifiers.size() - shared_end;
+                    if (shared_end > (std::numeric_limits<std::uint32_t>::max)() ||
+                        return_count > (std::numeric_limits<std::uint32_t>::max)())
+                        return {status_code::not_available};
+                    const auto declaration_end = current().offset;
+                    if (declaration_end <= declaration_start)
+                        return fail_syntax(span(current()), "empty method declaration");
+                    candidate.methods.push_back(source_method_fact{
+                        member_name,
+                        source_type_ref{semantic_type, intrinsic,
+                            source_fact_range{
+                                static_cast<std::uint32_t>(shared_end),
+                                static_cast<std::uint32_t>(return_count),
+                            },
+                            {}},
+                        access,
+                        source_span{declaration_start, declaration_end - declaration_start},
+                        is_virtual,
+                        signature_override,
+                        signature_pure,
+                        is_static,
+                        signature_const,
+                        false,
+                        false,
+                    });
+                    method_names.push_back(method_name_entry{record, member_name});
+                    return {};
                 }
-                result = spill_type_mods(candidate.method_modifiers);
-                if (!result.ok())
-                    return result;
-                const auto return_count = candidate.method_modifiers.size() - shared_end;
-                if (shared_end > (std::numeric_limits<std::uint32_t>::max)() ||
-                    return_count > (std::numeric_limits<std::uint32_t>::max)())
-                    return {status_code::not_available};
-                return parse_method_tail(record, member_name, declaration_start, semantic_type,
-                    intrinsic,
-                    source_fact_range{
-                        static_cast<std::uint32_t>(shared_end),
-                        static_cast<std::uint32_t>(return_count),
-                    },
-                    access, is_virtual, is_static, false, false);
+                cursor = paren_cursor;
             }
 
             if (!type_spilled) {
@@ -2431,16 +2505,45 @@ private:
             }
 
             bool comma = false;
+            source_span initializer{};
             if (punctuation(parser_punctuation::equal)) {
                 advance();
-                if (!skip_declarator_initializer(comma))
+                if (!skip_declarator_initializer(comma, initializer))
                     return fail_syntax(span(current()), "expected ',' or ';' after member initializer");
+            }
+            else if (punctuation(parser_punctuation::left_parenthesis)) {
+                // Direct-initialized data (the function reading failed above):
+                // record the paren spelling, e.g. `S x(5)` keeps `(5)`.
+                const auto paren_begin = current().offset;
+                bool paren_empty = false;
+                result = skip_balanced_parens(paren_empty);
+                if (!result.ok())
+                    return result;
+                initializer = source_span{paren_begin, current().offset - paren_begin};
+                if (!punctuation(parser_punctuation::comma) &&
+                    !punctuation(parser_punctuation::semicolon)) {
+                    return fail_syntax(span(current()), "expected ',' or ';' after member initializer");
+                }
+                comma = punctuation(parser_punctuation::comma);
+            }
+            else if (punctuation(parser_punctuation::left_brace)) {
+                // Brace-initialized data, including empty `{}` (value-init).
+                const auto brace_begin = current().offset;
+                result = skip_balanced_block();
+                if (!result.ok())
+                    return result;
+                initializer = source_span{brace_begin, current().offset - brace_begin};
+                if (!punctuation(parser_punctuation::comma) &&
+                    !punctuation(parser_punctuation::semicolon)) {
+                    return fail_syntax(span(current()), "expected ',' or ';' after member initializer");
+                }
+                comma = punctuation(parser_punctuation::comma);
             }
             else if (punctuation(parser_punctuation::comma)) {
                 comma = true;
             }
             else if (!punctuation(parser_punctuation::semicolon)) {
-                return fail_unsupported(span(current()), "methods, constructors, and function-style declarators are not implemented");
+                return fail_unsupported(span(current()), "function-style declarators are not implemented");
             }
 
             const auto declaration_end = current().offset + current().length;
@@ -2464,6 +2567,7 @@ private:
                 member_name,
                 source_span{declaration_start, declaration_end - declaration_start},
                 access,
+                initializer,
             });
 
             if (!comma) {
@@ -2649,6 +2753,7 @@ private:
         string_id name{};
     };
     std::vector<method_name_entry> method_names;
+    bool quiet_probe = false;
     std::size_t cursor = 0;
 };
 

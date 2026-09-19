@@ -336,6 +336,11 @@ status validate_source_facts(
             return fail(error, source_facts_error_code::member_range,
                 source_fact_category::member_fact, index, item.declaration);
         }
+        if (item.initializer.length != 0 &&
+            (!valid_span(item.initializer, source_size) || !contains(item.declaration, item.initializer))) {
+            return fail(error, source_facts_error_code::member_initializer_range,
+                source_fact_category::member_fact, index, item.initializer);
+        }
         if (item.type.spelling.length == 0 || !valid_span(item.type.spelling, source_size)) {
             return fail(error, source_facts_error_code::type_spelling_range,
                 source_fact_category::member_fact, index, item.type.spelling);
@@ -472,6 +477,11 @@ status validate_source_facts(
         if (item.declaration.length == 0 || !valid_span(item.declaration, source_size)) {
             return fail(error, source_facts_error_code::object_range,
                 source_fact_category::object_fact, index, item.declaration);
+        }
+        if (item.initializer.length != 0 &&
+            (!valid_span(item.initializer, source_size) || !contains(item.declaration, item.initializer))) {
+            return fail(error, source_facts_error_code::object_initializer_range,
+                source_fact_category::object_fact, index, item.initializer);
         }
         if (index != 0 && item.declaration.offset < previous_object_offset) {
             return fail(error, source_facts_error_code::declaration_sequence_order,
