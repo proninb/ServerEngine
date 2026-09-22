@@ -1,6 +1,7 @@
 #include "source_parser.hpp"
 
 #include "../frontend/source_facts_validation.hpp"
+#include "../frontend/aggregate_initializer.hpp"
 #include "../../diagnostics/diagnostic_descriptor.hpp"
 
 #include <charconv>
@@ -558,10 +559,6 @@ private:
         std::string_view detail,
         status_code code) noexcept {
 
-        // Probe parses (most-vexing function-vs-data disambiguation) explore
-        // a failing reading and must not leak diagnostics for it.
-        if (quiet_probe)
-            return {code};
         try {
             diagnostics.emit(diagnostic_record{
                 descriptor.id,
@@ -596,50 +593,200 @@ private:
     // Returns false on EOF or an unmatched closing bracket.
     //
     // Explicit metadata-model contract: initializers are recorded as source
-    // spelling only and never evaluated. Values are runtime semantics outside
-    // the model; default construction applies these spellings, and any stage
-    // that interprets them must extend facts, contributions, and images.
-    [[nodiscard]] bool skip_declarator_initializer(bool& comma, source_span& spelling) noexcept {
+    // spelling only and never evaluated. Values are outside the compiled
+    // metadata model. Runtime interpretation requires a future extension of
+    // contributions and persistence; recording is not execution support.
+    // Scan a nonempty lexical expression, checking all delimiter kinds.
+    // The caller owns the top-level terminator; expressions are not evaluated.
+    [[nodiscard]] bool scan_expression(source_span& spelling,
+        parser_punctuation terminator = parser_punctuation::semicolon) {
         const auto begin = current().offset;
-        std::size_t depth = 0;
-        comma = false;
+        std::vector<parser_punctuation> closes;
+        bool consumed = false;
         for (;;) {
             const auto& token = current();
             if (token.kind == parser_token_kind::eof)
                 return false;
             if (token.kind == parser_token_kind::punctuation) {
-                switch (token.punctuation) {
-                case parser_punctuation::left_brace:
-                case parser_punctuation::left_bracket:
+                const auto kind = token.punctuation;
+                if (closes.empty() && (kind == terminator || kind == parser_punctuation::comma)) {
+                    spelling = {begin, token.offset - begin};
+                    return consumed;
+                }
+                switch (kind) {
                 case parser_punctuation::left_parenthesis:
-                    ++depth;
-                    break;
+                    closes.push_back(parser_punctuation::right_parenthesis); break;
+                case parser_punctuation::left_brace:
+                    closes.push_back(parser_punctuation::right_brace); break;
+                case parser_punctuation::left_bracket:
+                    closes.push_back(parser_punctuation::right_bracket); break;
+                case parser_punctuation::right_parenthesis:
                 case parser_punctuation::right_brace:
                 case parser_punctuation::right_bracket:
-                case parser_punctuation::right_parenthesis:
-                    if (depth == 0)
-                        return false;
-                    --depth;
-                    break;
-                case parser_punctuation::comma:
-                    if (depth == 0) {
-                        comma = true;
-                        spelling = source_span{begin, token.offset - begin};
-                        return true;
-                    }
-                    break;
+                    if (closes.empty() || closes.back() != kind) return false;
+                    closes.pop_back(); break;
                 case parser_punctuation::semicolon:
-                    if (depth == 0) {
-                        spelling = source_span{begin, token.offset - begin};
-                        return true;
-                    }
+                    if (closes.empty()) return false;
                     break;
-                default:
-                    break;
+                default: break;
                 }
             }
+            consumed = true;
             advance();
         }
+    }
+
+    [[nodiscard]] bool skip_declarator_initializer(bool& comma, source_span& spelling) {
+        if (!scan_expression(spelling)) return false;
+        comma = punctuation(parser_punctuation::comma);
+        return true;
+    }
+
+    static std::string_view trim_construction(std::string_view value) noexcept {
+        while (!value.empty() && (value.front() == ' ' || value.front() == '\t' || value.front() == '\r' || value.front() == '\n')) value.remove_prefix(1);
+        while (!value.empty() && (value.back() == ' ' || value.back() == '\t' || value.back() == '\r' || value.back() == '\n')) value.remove_suffix(1);
+        return value;
+    }
+
+    construction_value construction_expression(source_span expression,
+        const source_record_fact& record, const source_member_fact& target) {
+        auto spelling = trim_construction(text.substr(expression.offset, expression.length));
+        if (spelling.starts_with('=')) spelling = trim_construction(spelling.substr(1));
+        bool reference = false;
+        for (std::size_t i = 0; i < target.type.modifiers.count; ++i) {
+            const auto kind = candidate.modifiers[target.type.modifiers.begin + i].kind;
+            reference |= kind == source_type_modifier_kind::lvalue_reference || kind == source_type_modifier_kind::rvalue_reference;
+        }
+        if (!reference && spelling.starts_with('{')) {
+            aggregate_initializer initializer;
+            if (!parse_aggregate_initializer(spelling, initializer)) return {0, 0, 0, construction_kind::unsupported};
+            std::string canonical;
+            encode_aggregate_initializer(initializer, canonical);
+            string_id id;
+            if (!semantic.intern_string(canonical, id).ok()) throw std::bad_alloc{};
+            return {0, 0, id.value(), construction_kind::aggregate};
+        }
+        while (spelling.size() >= 2 &&
+            ((spelling.front() == '(' && spelling.back() == ')') ||
+             (spelling.front() == '{' && spelling.back() == '}')))
+            spelling = trim_construction(spelling.substr(1, spelling.size() - 2));
+        if (spelling.empty()) return {};
+        if (reference) {
+            if (spelling.starts_with("this.")) spelling.remove_prefix(5);
+            const auto name = semantic.find_string(spelling);
+            for (std::uint32_t i = 0; i < record.members.count; ++i)
+                if (candidate.members[record.members.begin + i].name == name)
+                    return {0, 0, i + 1, construction_kind::member_binding};
+            return {0, 0, 0, construction_kind::unsupported};
+        }
+        if (spelling == "false" || spelling == "nullptr") return {};
+        if (spelling == "true") return construction_value::constant(construction_kind::unsigned_integer, 1);
+        if (spelling.front() == '+') spelling.remove_prefix(1);
+        if (spelling.find_first_of(".eE") != std::string_view::npos) {
+            double value = 0;
+            const auto parsed = std::from_chars(spelling.data(), spelling.data() + spelling.size(), value);
+            if (parsed.ec == std::errc{} && parsed.ptr == spelling.data() + spelling.size())
+                return construction_value::constant(construction_kind::real, std::bit_cast<std::uint64_t>(value));
+        } else if (spelling.starts_with('-')) {
+            std::int64_t value = 0;
+            const auto parsed = std::from_chars(spelling.data(), spelling.data() + spelling.size(), value);
+            if (parsed.ec == std::errc{} && parsed.ptr == spelling.data() + spelling.size())
+                return construction_value::constant(construction_kind::signed_integer, std::bit_cast<std::uint64_t>(value));
+        } else {
+            std::uint64_t value = 0;
+            const auto parsed = std::from_chars(spelling.data(), spelling.data() + spelling.size(), value);
+            if (parsed.ec == std::errc{} && parsed.ptr == spelling.data() + spelling.size())
+                return construction_value::constant(construction_kind::unsigned_integer, value);
+        }
+        return {0, 0, 0, construction_kind::unsupported};
+    }
+
+    status normalize_construction(const source_record_fact& record) {
+        for (std::uint32_t i = 0; i < record.members.count; ++i) {
+            auto& member = candidate.members[record.members.begin + i];
+            member.construction = construction_expression(member.initializer, record, member);
+        }
+        std::vector<bool> assigned(record.members.count);
+        for (const auto& operation : constructor_operations) {
+            if (operation.owner != record.identity) continue;
+            std::uint32_t i = 0;
+            for (; i < record.members.count; ++i)
+                if (candidate.members[record.members.begin + i].name == operation.target) break;
+            if (i == record.members.count)
+                return fail_syntax(operation.expression, "constructor target is not a field of this record");
+            auto& member = candidate.members[record.members.begin + i];
+            const auto value = construction_expression(operation.expression, record, member);
+            if (value.kind == construction_kind::unsupported)
+                return fail_unsupported(operation.expression, "constructor supports scalar constants and local reference bindings only");
+            if (assigned[i] && member.construction.kind == construction_kind::member_binding && member.construction != value)
+                return fail_syntax(operation.expression, "conflicting constructor reference bindings");
+            member.construction = value;
+            assigned[i] = true;
+        }
+        std::erase_if(constructor_operations, [&](const auto& operation) { return operation.owner == record.identity; });
+        return {};
+    }
+
+    status parse_constructor_trailer(identity_ref owner) {
+        if (identifier("noexcept")) advance();
+        if (punctuation(parser_punctuation::semicolon)) { advance(); return {}; }
+        if (punctuation(parser_punctuation::equal)) {
+            advance();
+            if (!identifier("default")) return fail_unsupported(span(current()), "managed constructors support '= default' only");
+            advance();
+            if (!punctuation(parser_punctuation::semicolon)) return fail_syntax(span(current()), "expected ';'");
+            advance(); return {};
+        }
+        if (punctuation(parser_punctuation::colon)) {
+            advance();
+            for (;;) {
+                if (current().kind != parser_token_kind::identifier) return fail_syntax(span(current()), "expected constructor field name");
+                string_id name;
+                auto result = semantic.intern_string(token_text(current()), name);
+                if (!result.ok()) return result;
+                advance();
+                const auto close = punctuation(parser_punctuation::left_parenthesis) ? parser_punctuation::right_parenthesis : parser_punctuation::right_brace;
+                if (!punctuation(parser_punctuation::left_parenthesis) && !punctuation(parser_punctuation::left_brace))
+                    return fail_syntax(span(current()), "expected field initializer");
+                const auto opening = current().offset;
+                advance();
+                source_span expression{current().offset, 0};
+                if (close == parser_punctuation::right_brace) {
+                    while (!punctuation(close)) {
+                        source_span item;
+                        if (!scan_expression(item, close)) return fail_syntax(span(current()), "invalid constructor initializer list");
+                        if (!punctuation(parser_punctuation::comma)) break;
+                        advance();
+                    }
+                    if (!punctuation(close)) return fail_syntax(span(current()), "expected '}' in constructor initializer");
+                    expression = {opening, current().offset + current().length - opening};
+                } else {
+                    if (!punctuation(close) && !scan_expression(expression, close)) return fail_syntax(span(current()), "invalid constructor initializer");
+                    if (!punctuation(close)) return fail_unsupported(span(current()), "use braces for aggregate initializer lists");
+                }
+                advance();
+                constructor_operations.push_back({owner, name, expression});
+                if (!punctuation(parser_punctuation::comma)) break;
+                advance();
+            }
+        }
+        if (!punctuation(parser_punctuation::left_brace)) return fail_syntax(span(current()), "expected constructor body");
+        advance();
+        while (!punctuation(parser_punctuation::right_brace)) {
+            if (current().kind != parser_token_kind::identifier) return fail_unsupported(span(current()), "constructor body supports field assignments only");
+            string_id name;
+            auto result = semantic.intern_string(token_text(current()), name);
+            if (!result.ok()) return result;
+            advance();
+            if (!punctuation(parser_punctuation::equal)) return fail_unsupported(span(current()), "constructor body supports field assignments only");
+            advance();
+            source_span expression;
+            if (!scan_expression(expression) || !punctuation(parser_punctuation::semicolon)) return fail_syntax(span(current()), "invalid constructor assignment");
+            advance();
+            constructor_operations.push_back({owner, name, expression});
+        }
+        advance();
+        return {};
     }
 
     [[nodiscard]] status parse_using(identity_ref scope) {
@@ -1064,32 +1211,9 @@ private:
                 return result;
             if (punctuation(parser_punctuation::equal)) {
                 advance();
-                std::size_t depth = 0;
-                for (;;) {
-                    const auto& token = current();
-                    if (token.kind == parser_token_kind::eof)
-                        return fail_syntax(span(token), "unterminated default argument");
-                    if (token.kind == parser_token_kind::punctuation) {
-                        const auto kind = token.punctuation;
-                        if (kind == parser_punctuation::left_parenthesis ||
-                            kind == parser_punctuation::left_brace ||
-                            kind == parser_punctuation::left_bracket) {
-                            ++depth;
-                        }
-                        else if ((kind == parser_punctuation::comma ||
-                                  kind == parser_punctuation::right_parenthesis) &&
-                                 depth == 0) {
-                            break;
-                        }
-                        else if (kind == parser_punctuation::right_brace ||
-                            kind == parser_punctuation::right_bracket) {
-                            if (depth == 0)
-                                return fail_syntax(span(token), "unbalanced default argument");
-                            --depth;
-                        }
-                    }
-                    advance();
-                }
+                source_span argument;
+                if (!scan_expression(argument, parser_punctuation::right_parenthesis))
+                    return fail_syntax(span(current()), "empty or unbalanced default argument");
             }
             if (punctuation(parser_punctuation::comma)) {
                 advance();
@@ -1616,6 +1740,8 @@ private:
         fact.declaration = declaration;
         fact.declaration_kind = source_record_declaration_kind::definition;
         candidate.declarations[sequence_index].declaration = declaration;
+        result = normalize_construction(fact);
+        if (!result.ok()) return result;
         for (std::uint32_t index = 0; index < fact.members.count; ++index) {
             const auto& member = candidate.members[fact.members.begin + index];
             result = member_bindings.insert(
@@ -1755,27 +1881,24 @@ private:
                 advance();
             }
 
-            // Free function: skip signature and body without recording. When the
-            // parenthesized list is not a parameter list (direct-initialized
-            // data like `S x(5)`), fall back to a data object. Cursor restore
-            // keeps the fallback exact; the probe stays quiet.
-            if (is_operator || punctuation(parser_punctuation::left_parenthesis)) {
-                const auto object_paren_cursor = cursor;
-                const auto object_probe_quiet = quiet_probe;
-                quiet_probe = true;
-                bool skipped_const = false;
-                bool skipped_override = false;
-                bool skipped_pure = false;
-                auto signature = parse_parameter_list();
-                if (signature.ok())
-                    signature = parse_method_trailer(skipped_const, skipped_override, skipped_pure);
-                quiet_probe = object_probe_quiet;
-                if (signature.ok())
-                    return {};
-                cursor = object_paren_cursor;
-                if (is_operator) {
-                    return fail_syntax(span(current()), "expected parameter list after operator spelling");
-                }
+            // Literal-led object direct initialization is unambiguous in
+            // this subset. Other parenthesized declarations must parse as
+            // functions; failed type resolution must never become data.
+            bool literal_initializer = false;
+            if (punctuation(parser_punctuation::left_parenthesis) && cursor + 1 < tokens.size()) {
+                const auto& next = tokens[cursor + 1];
+                literal_initializer = next.kind == parser_token_kind::integer_literal ||
+                    next.kind == parser_token_kind::string_literal ||
+                    next.kind == parser_token_kind::character_literal ||
+                    (next.kind == parser_token_kind::punctuation &&
+                        (next.punctuation == parser_punctuation::plus ||
+                         next.punctuation == parser_punctuation::minus));
+            }
+            if (is_operator || (punctuation(parser_punctuation::left_parenthesis) && !literal_initializer)) {
+                result = parse_parameter_list();
+                if (!result.ok()) return result;
+                bool skipped_const = false, skipped_override = false, skipped_pure = false;
+                return parse_method_trailer(skipped_const, skipped_override, skipped_pure);
             }
 
             if (!type_spilled) {
@@ -1807,34 +1930,16 @@ private:
             bool object_comma = false;
             source_span object_initializer{};
             if (punctuation(parser_punctuation::equal)) {
+                const auto initializer_begin = current().offset;
                 advance();
                 if (!skip_declarator_initializer(object_comma, object_initializer))
                     return fail_syntax(span(current()), "expected ',' or ';' after object initializer");
+                object_initializer = {initializer_begin, current().offset - initializer_begin};
             }
-            else if (punctuation(parser_punctuation::left_parenthesis)) {
-                const auto object_paren_begin = current().offset;
-                bool paren_empty = false;
-                result = skip_balanced_parens(paren_empty);
-                if (!result.ok())
-                    return result;
-                object_initializer = source_span{object_paren_begin, current().offset - object_paren_begin};
-                if (!punctuation(parser_punctuation::comma) &&
-                    !punctuation(parser_punctuation::semicolon)) {
-                    return fail_syntax(span(current()), "expected ',' or ';' after object initializer");
-                }
-                object_comma = punctuation(parser_punctuation::comma);
-            }
-            else if (punctuation(parser_punctuation::left_brace)) {
-                const auto object_brace_begin = current().offset;
-                result = skip_balanced_block();
-                if (!result.ok())
-                    return result;
-                object_initializer = source_span{object_brace_begin, current().offset - object_brace_begin};
-                if (!punctuation(parser_punctuation::comma) &&
-                    !punctuation(parser_punctuation::semicolon)) {
-                    return fail_syntax(span(current()), "expected ',' or ';' after object initializer");
-                }
-                object_comma = punctuation(parser_punctuation::comma);
+            else if (punctuation(parser_punctuation::left_parenthesis) ||
+                     punctuation(parser_punctuation::left_brace)) {
+                if (!skip_declarator_initializer(object_comma, object_initializer))
+                    return fail_syntax(span(current()), "unbalanced object initializer");
             }
             else if (punctuation(parser_punctuation::comma)) {
                 object_comma = true;
@@ -1860,11 +1965,16 @@ private:
                 ? source_type_ref::semantic(semantic_type, object_modifier_range, spelling)
                 : source_type_ref::builtin(intrinsic, object_modifier_range, spelling);
             const auto object_index = static_cast<std::uint32_t>(candidate.objects.size());
+            auto initial_text = trim_construction(text.substr(object_initializer.offset, object_initializer.length));
+            if (initial_text.starts_with('=')) initial_text = trim_construction(initial_text.substr(1));
+            if (initial_text.starts_with('{') && initial_text.ends_with('}'))
+                initial_text = trim_construction(initial_text.substr(1, initial_text.size() - 2));
             candidate.objects.push_back(source_object_fact{
                 object_identity,
                 type,
                 source_span{declaration_start, object_declaration_end - declaration_start},
                 object_initializer,
+                initial_text.empty() ? 0u : 1u,
             });
             append_declaration(source_declaration_kind::object, object_index,
                 source_span{declaration_start, object_declaration_end - declaration_start});
@@ -2179,13 +2289,15 @@ private:
         bool is_static,
         bool is_constructor,
         bool is_destructor) {
+        if (is_constructor && (cursor + 1 >= tokens.size() || tokens[cursor + 1].punctuation != parser_punctuation::right_parenthesis))
+            return fail_unsupported(span(current()), "managed constructors must have no parameters");
         auto result = parse_parameter_list();
         if (!result.ok())
             return result;
         bool is_const = false;
         bool is_override = false;
         bool is_pure = false;
-        result = parse_method_trailer(is_const, is_override, is_pure);
+        result = is_constructor ? parse_constructor_trailer(record) : parse_method_trailer(is_const, is_override, is_pure);
         if (!result.ok())
             return result;
         const auto declaration_end = current().offset;
@@ -2408,61 +2520,23 @@ private:
                 advance();
             }
 
-            // A function-style declarator records a method fact. When the
-            // parenthesized list is not a parameter list (direct-initialized
-            // data like `S x(5)`), fall back to a data member with a recorded
-            // paren initializer. The C++ most-vexing rule is honored by trying
-            // the function reading first; cursor restore keeps the fallback
-            // exact because parameter parsing never mutates the candidate.
+            // In-class parenthesized declarators are methods. Non-static
+            // data member initializers must use '=' or braces.
             if (punctuation(parser_punctuation::left_parenthesis)) {
-                const auto paren_cursor = cursor;
-                const auto probe_quiet = quiet_probe;
-                quiet_probe = true;
-                bool signature_const = false;
-                bool signature_override = false;
-                bool signature_pure = false;
-                auto signature = parse_parameter_list();
-                if (signature.ok())
-                    signature = parse_method_trailer(signature_const, signature_override, signature_pure);
-                quiet_probe = probe_quiet;
-                if (signature.ok()) {
-                    if (method_name_exists(record, member_name) ||
-                        member_bindings.find(record, member_name)) {
-                        return fail(diagnostics::parser_semantic_resolution_failed, declarator_span,
-                            "method name conflicts with a visible member", status_code::semantic_conflict);
-                    }
-                    result = spill_type_mods(candidate.method_modifiers);
-                    if (!result.ok())
-                        return result;
-                    const auto return_count = candidate.method_modifiers.size() - shared_end;
-                    if (shared_end > (std::numeric_limits<std::uint32_t>::max)() ||
-                        return_count > (std::numeric_limits<std::uint32_t>::max)())
-                        return {status_code::not_available};
-                    const auto declaration_end = current().offset;
-                    if (declaration_end <= declaration_start)
-                        return fail_syntax(span(current()), "empty method declaration");
-                    candidate.methods.push_back(source_method_fact{
-                        member_name,
-                        source_type_ref{semantic_type, intrinsic,
-                            source_fact_range{
-                                static_cast<std::uint32_t>(shared_end),
-                                static_cast<std::uint32_t>(return_count),
-                            },
-                            {}},
-                        access,
-                        source_span{declaration_start, declaration_end - declaration_start},
-                        is_virtual,
-                        signature_override,
-                        signature_pure,
-                        is_static,
-                        signature_const,
-                        false,
-                        false,
-                    });
-                    method_names.push_back(method_name_entry{record, member_name});
-                    return {};
+                if (method_name_exists(record, member_name) ||
+                    member_bindings.find(record, member_name)) {
+                    return fail(diagnostics::parser_semantic_resolution_failed, declarator_span,
+                        "method name conflicts with a visible member", status_code::semantic_conflict);
                 }
-                cursor = paren_cursor;
+                result = spill_type_mods(candidate.method_modifiers);
+                if (!result.ok()) return result;
+                const auto count = shared_end - modifier_begin;
+                if (modifier_begin > (std::numeric_limits<std::uint32_t>::max)() ||
+                    count > (std::numeric_limits<std::uint32_t>::max)())
+                    return {status_code::not_available};
+                return parse_method_tail(record, member_name, declaration_start, semantic_type,
+                    intrinsic, {static_cast<std::uint32_t>(modifier_begin), static_cast<std::uint32_t>(count)},
+                    access, is_virtual, is_static, false, false);
             }
 
             if (!type_spilled) {
@@ -2507,37 +2581,15 @@ private:
             bool comma = false;
             source_span initializer{};
             if (punctuation(parser_punctuation::equal)) {
+                const auto initializer_begin = current().offset;
                 advance();
                 if (!skip_declarator_initializer(comma, initializer))
                     return fail_syntax(span(current()), "expected ',' or ';' after member initializer");
-            }
-            else if (punctuation(parser_punctuation::left_parenthesis)) {
-                // Direct-initialized data (the function reading failed above):
-                // record the paren spelling, e.g. `S x(5)` keeps `(5)`.
-                const auto paren_begin = current().offset;
-                bool paren_empty = false;
-                result = skip_balanced_parens(paren_empty);
-                if (!result.ok())
-                    return result;
-                initializer = source_span{paren_begin, current().offset - paren_begin};
-                if (!punctuation(parser_punctuation::comma) &&
-                    !punctuation(parser_punctuation::semicolon)) {
-                    return fail_syntax(span(current()), "expected ',' or ';' after member initializer");
-                }
-                comma = punctuation(parser_punctuation::comma);
+                initializer = {initializer_begin, current().offset - initializer_begin};
             }
             else if (punctuation(parser_punctuation::left_brace)) {
-                // Brace-initialized data, including empty `{}` (value-init).
-                const auto brace_begin = current().offset;
-                result = skip_balanced_block();
-                if (!result.ok())
-                    return result;
-                initializer = source_span{brace_begin, current().offset - brace_begin};
-                if (!punctuation(parser_punctuation::comma) &&
-                    !punctuation(parser_punctuation::semicolon)) {
-                    return fail_syntax(span(current()), "expected ',' or ';' after member initializer");
-                }
-                comma = punctuation(parser_punctuation::comma);
+                if (!skip_declarator_initializer(comma, initializer))
+                    return fail_syntax(span(current()), "unbalanced member initializer");
             }
             else if (punctuation(parser_punctuation::comma)) {
                 comma = true;
@@ -2753,7 +2805,12 @@ private:
         string_id name{};
     };
     std::vector<method_name_entry> method_names;
-    bool quiet_probe = false;
+    struct constructor_operation {
+        identity_ref owner;
+        string_id target;
+        source_span expression;
+    };
+    std::vector<constructor_operation> constructor_operations;
     std::size_t cursor = 0;
 };
 

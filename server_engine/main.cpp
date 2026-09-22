@@ -1,6 +1,7 @@
 #include "config/server_configuration_loader.hpp"
 #include "diagnostics/diagnostic_registry.hpp"
 #include "project/project_manager.hpp"
+#include "project/runtime/managed_runtime.hpp"
 
 #include <filesystem>
 #include <iostream>
@@ -57,6 +58,18 @@ int main(int argc, char** argv) {
     std::cout << "Types: " << graph.type_count() << '\n';
     std::cout << "Objects: " << graph.object_count() << '\n';
     std::cout << "Links: " << graph.link_count() << '\n';
+
+    if (argc > 2 && std::string_view{argv[2]} == "--managed") {
+        managed_runtime runtime;
+        std::string error;
+        if (!runtime.construct(access.get(), error).ok()) {
+            std::cerr << "Managed initialization failed: " << error << '\n';
+            return 5;
+        }
+        std::cout << "Managed objects: " << runtime.objects().size()
+            << ", fields: " << runtime.fields().size()
+            << ", storage bytes: " << runtime.storage_size() << '\n';
+    }
 
     access.reset();
     if (!projects.unload().ok())

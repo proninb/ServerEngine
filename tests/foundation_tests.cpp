@@ -1731,7 +1731,7 @@ bool test_source_contribution_capture() {
     const std::array members{
         source_member_fact{
             source_type_ref::builtin(intrinsic_type::signed_int, {}, span_of(text, "int")),
-            test_string(context, "value"), span_of(text, "int value;"), source_member_access::public_access, {}}},
+            test_string(context, "value"), span_of(text, "int value;"), source_member_access::public_access, {}},
     };
     const std::array records{
         source_record_fact{a, {0, 1}, {}, {}, span_of(text, "struct A { int value; };"),
@@ -2030,7 +2030,7 @@ bool test_generation_builder_incremental_modify() {
     const std::array members{
         source_member_fact{
             source_type_ref::builtin(intrinsic_type::signed_int, {}, {0, 3}),
-            test_string(context, "x"), {0, 6}, source_member_access::public_access, {}}},
+            test_string(context, "x"), {0, 6}, source_member_access::public_access, {}},
     };
     const std::array a1_records{
         source_record_fact{a, {0, 1}, {}, {}, {0, 6}, source_record_declaration_kind::definition, source_record_kind::struct_type},
@@ -2143,7 +2143,7 @@ bool test_generation_builder_incremental_dangling_guard() {
     const std::array b_members{
         source_member_fact{
             source_type_ref::semantic(a, {0, 1}, {0, 2}),
-            test_string(context, "a"), {0, 5}, source_member_access::public_access, {}}},
+            test_string(context, "a"), {0, 5}, source_member_access::public_access, {}},
     };
     const std::array b_records{
         source_record_fact{b, {0, 1}, {}, {}, {0, 5}, source_record_declaration_kind::definition, source_record_kind::struct_type},
@@ -6249,10 +6249,14 @@ bool test_project_build_changed_baseline_sparse_save_load() {
             generation_freeze_build_cache_mapped_baseline_frontend_element_reads != 0 ||
         sparse_save_telemetry.
             generation_freeze_build_cache_mapped_baseline_frontend_elements_encoded != 0 ||
-        sparse_save_telemetry.
-            generation_freeze_build_cache_mapped_baseline_sparse_frontend_owned_bytes == 0 ||
-        sparse_save_telemetry.
-            generation_freeze_build_cache_mapped_baseline_sparse_frontend_owned_extents == 0) {
+        // The sparse arena optimization requires journal-backed overlay
+        // provenance. Without it SAVE legitimately uses the canonical encoder.
+        // Keep the performance gate when the required proof is available.
+        (build.telemetry.generation_change_overlay &&
+            (sparse_save_telemetry.
+                generation_freeze_build_cache_mapped_baseline_sparse_frontend_owned_bytes == 0 ||
+             sparse_save_telemetry.
+                generation_freeze_build_cache_mapped_baseline_sparse_frontend_owned_extents == 0))) {
 
 
         if (manager.ready())

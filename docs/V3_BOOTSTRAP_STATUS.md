@@ -1,5 +1,13 @@
 # V3 Bootstrap Status
 
+## Status scope
+
+The checklist below records historical bootstrap gates. Current capabilities are
+summarized in README.md and the SE-V3-10 persistence/lifecycle documents. Method
+facts and initializer spellings remain Parser-only. Normalized scalar defaults and
+reference bindings now persist through contributions and images; managed runtime
+construction and field-link propagation are available (see README).
+
 ## Implemented
 
 - [x] Standalone repository layout
@@ -32,7 +40,7 @@
 - [x] Generation Builder full build
 - [x] sparse incremental current-Graph update
 - [x] end-to-end Project build orchestration
-- [ ] compiled Graph persistence
+- [x] compiled Graph persistence
 - [ ] Runtime publication
 - [ ] SHM materialization
 - [ ] TCP/query service

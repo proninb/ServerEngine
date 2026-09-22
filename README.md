@@ -96,13 +96,82 @@ SE-V3-06R replaces the minimal 06B frontend mechanics with production-oriented S
 
 The Server owns one current Graph only. There is no Graph generation counter, retained Graph history, or MVCC version-control layer. Full and incremental builds prepare all fallible work before a short no-fail publication boundary.
 
-## Next implementation sequence
+## Current capability boundary and next implementation sequence
 
-1. Implement ABI/Implementation State: type/member layout, object storage layout, and resolved binding plans.
-2. Implement Runtime materialization: runtime region, native object construction, and native C++ reference binding.
-3. Add Source change tracking as an acceleration layer feeding dirty `source_id` values into the proven incremental API.
-4. Add compiled persistence only after the live Graph/Implementation boundary is frozen.
-5. Add SHM publication and external TCP/query control.
+Persistent baselines, compiled images, build-cache images, source change tracking,
+and sparse builds from mapped baselines are implemented. `project_manager` exposes
+LOAD, BUILD, REBUILD, SAVE, and UNLOAD; construction starts from UNLOADED. The CLI
+currently runs REBUILD, prints metadata, and unloads; it is not a TCP service.
+
+Managed initialization is available through `project/runtime/managed_runtime.hpp`
+and `server_engine server.json --managed`. Fields default to zero. Decimal integer,
+boolean and real constants and local reference bindings are normalized into Graph
+construction facts, persisted in compiled image v3 / build-cache v6. Older baselines
+require REBUILD. Source spellings and ordinary method bodies remain transient.
+
+Run the included example with `server_engine examples/managed/server.json --managed`.
+
+```cpp
+struct Device {
+    int& IN;
+    int OUT = 5;
+    Device() : IN(OUT) {} // alternatively: Device() { IN = OUT; }
+};
+Device A;
+Device B{};
+B.IN = A.OUT;
+```
+
+This is managed syntax: reference assignments in a no-argument constructor bind
+fields; scalar assignments set initial values. The engine does not execute native
+C++ constructors. `= default` and empty constructors use field defaults. Repeated
+identical bindings are accepted; conflicting constructor bindings are rejected.
+An external reference link overrides the local default binding. Reference links
+alias storage; value links copy in dependency order at construction and after writes
+through the runtime API. Cycles, type mismatches, unbound references and out-of-range
+constants fail construction without changing the previous runtime.
+
+Nested by-value records support recursive managed initialization:
+
+```cpp
+struct A { int a = 12; int other = 6; };
+struct B {
+    A a;
+    B() : a{0} {} // a.a = 0; a.other keeps its default 6
+};
+struct Pair { A left; A right; };
+struct C { Pair pair{{1, 2}, {3}}; };
+```
+
+Braced lists supply direct members in declaration order; omitted members keep their
+managed defaults. Empty `{}` applies those defaults. Use explicit nested braces for
+nested members; brace elision and designated initializers are unsupported. Lists
+contain decimal integer/real constants, booleans, null pointers or nested lists.
+They are normalized into interned canonical text stored in the compiled string
+table, so runtime initialization does not depend on source files.
+
+The runtime read/write overloads accept a root `object_endpoint` and a span of
+zero-based `member_index` values. For `b.a.a`, resolve `b.a` through the project,
+then pass a path containing index 0. Existing Graph link syntax still addresses
+top-level fields; whole-record links and references to records are unsupported.
+Local scalar reference bindings inside nested records work independently per object.
+Recursive value containment and nesting deeper than 64 records fail construction.
+
+The runtime owns its storage and plan after Project unload. Endpoint handles belong
+to that plan; reacquire them when constructing from another project generation.
+Scalar fields, nested records and scalar lvalue references are supported, plus zero scalar pointers.
+Arrays, unions, inheritance, constructor arguments, nonempty object
+initializers, expressions/calls and native method execution are outside this runtime
+slice. Access managed values through the API, never by casting storage to a C++ class.
+
+Initializers are checked for nonempty expressions and matching `()`, `[]`, `{}`;
+expressions are not evaluated or fully type-checked. Member initializers use `=` or
+braces. Parenthesized object initialization currently supports literal-led forms
+(including signed numeric literals); other parenthesized declarations must parse
+as functions. Unsupported expression-led forms should use braces.
+
+Next: extend managed layouts to arrays and nested Graph endpoints, then add SHM publication
+and external TCP/query control.
 
 ## Provenance
 

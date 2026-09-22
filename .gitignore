@@ -9,3 +9,18 @@ cmake_install.cmake
 *.VC.opendb
 .serverengine/
 build-*/
+
+# CMake/Visual Studio output from in-source builds.
+/ALL_BUILD.vcxproj*
+/RUN_TESTS.vcxproj*
+/ZERO_CHECK.vcxproj*
+/server_engine*.vcxproj*
+/ServerEngine.slnx
+/CTestTestfile.cmake
+/*.dir/
+/Debug/
+/Release/
+/RelWithDebInfo/
+/MinSizeRel/
+/Testing/
+/x64/

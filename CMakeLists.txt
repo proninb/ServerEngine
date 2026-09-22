@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Threads REQUIRED)
 
 add_library(server_engine_core STATIC
+    server_engine/project/runtime/managed_runtime.cpp
     server_engine/diagnostics/diagnostic_buffer.cpp
     server_engine/json/json_parser.cpp
     server_engine/config/server_configuration_loader.cpp
@@ -99,6 +100,12 @@ else()
 endif()
 
 enable_testing()
+add_executable(server_engine_managed_runtime_tests tests/managed_runtime_tests.cpp)
+target_link_libraries(server_engine_managed_runtime_tests PRIVATE server_engine_core Threads::Threads)
+add_test(NAME managed_runtime COMMAND server_engine_managed_runtime_tests)
+add_executable(server_engine_parser_regression_tests tests/parser_regression_tests.cpp)
+target_link_libraries(server_engine_parser_regression_tests PRIVATE server_engine_core Threads::Threads)
+add_test(NAME parser_regressions COMMAND server_engine_parser_regression_tests)
 add_test(NAME server_configuration COMMAND server_engine_tests server_configuration)
 add_test(NAME project_configuration COMMAND server_engine_tests project_configuration)
 add_test(NAME project_identity_resolution COMMAND server_engine_tests project_identity_resolution)

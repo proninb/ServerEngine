@@ -382,6 +382,7 @@ bool source_contribution_cache::equivalent(const source_facts& facts) const noex
             cached.type.intrinsic != current.type.intrinsic ||
             cached.type.modifiers.count != current.type.modifiers.count ||
             cached.access != current.access ||
+            cached.construction != current.construction ||
             cached.name != current.name) {
             return false;
         }
@@ -406,6 +407,7 @@ bool source_contribution_cache::equivalent(const source_facts& facts) const noex
         const auto& current = facts.objects()[index];
         if (cached.identity != current.identity ||
             cached.type.identity != current.type.identity ||
+            cached.construction_flags != current.construction_flags ||
             cached.type.intrinsic != current.type.intrinsic ||
             cached.type.modifiers.count != current.type.modifiers.count ||
             cached.type.modifiers.begin < source_state->modifiers.begin ||
@@ -664,6 +666,7 @@ status source_contribution_cache_update::replace(
             }
             value.name = item.name;
             value.access = item.access;
+            value.construction = item.construction;
             candidate.members.push_back(value);
         }
 
@@ -676,6 +679,7 @@ status source_contribution_cache_update::replace(
 
         for (const auto& item : facts.objects()) {
             source_contribution_object value;
+            value.construction_flags = item.construction_flags;
             value.identity = item.identity;
             value.type.identity = item.type.identity;
             value.type.intrinsic = item.type.intrinsic;
@@ -1099,6 +1103,7 @@ status source_contribution_sparse_update::replace(
             }
             value.name = item.name;
             value.access = item.access;
+            value.construction = item.construction;
             candidate.members.push_back(value);
         }
 
@@ -1111,6 +1116,7 @@ status source_contribution_sparse_update::replace(
 
         for (const auto& item : facts.objects()) {
             source_contribution_object value;
+            value.construction_flags = item.construction_flags;
             value.identity = item.identity;
             value.type.identity = item.type.identity;
             value.type.intrinsic = item.type.intrinsic;

@@ -4,6 +4,7 @@
 #include "../../source_id.hpp"
 #include "../../string_id.hpp"
 #include "../identity/identity_node.hpp"
+#include "construction_value.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -128,10 +129,10 @@ struct source_member_fact final {
     source_span declaration{};
     source_member_access access = source_member_access::public_access;
     // Initializer spelling (`= ...`, `(...)`, or `{...}`), empty when absent.
-    // Recorded, never evaluated: values are runtime semantics outside the
-    // metadata model. Default construction applies these spellings; a later
-    // stage interprets them.
+    // Spelling is transient. The normalized construction value below is retained
+    // by contributions and compiled images, independently of source lifetime.
     source_span initializer{};
+    construction_value construction{};
 };
 
 // One direct base-class specifier. Recorded by the Parser and validated, but
@@ -206,12 +207,14 @@ struct source_enum_fact final {
 
 // One named Project object. Object identity is semantic WHO; its type remains a
 // fully resolved Parser TypeRef and is materialized to Graph TypeRef by Builder.
-// Initializers follow the member contract: spelling recorded, never evaluated.
+// Object argument expressions are retained as a capability flag; managed
+// construction currently accepts default/empty object initialization only.
 struct source_object_fact final {
     identity_ref identity = nullptr;
     source_type_ref type{};
     source_span declaration{};
     source_span initializer{};
+    std::uint32_t construction_flags = 0; // Bit 0: non-default object initializer.
 };
 
 struct source_object_endpoint_fact final {

@@ -30,6 +30,7 @@ private:
     friend class generation_builder;
     friend class compiled_image_view;
     friend class build_cache_image_view;
+    friend class managed_graph_reader;
 };
 
 static_assert(sizeof(link_handle) == 4);

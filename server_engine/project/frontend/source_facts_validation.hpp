@@ -84,6 +84,7 @@ enum class source_facts_error_code : std::uint8_t {
     alias_range,
     alias_order,
     alias_modifier_partition,
+    construction_value_invalid,
 };
 
 enum class source_fact_category : std::uint8_t {
@@ -265,6 +266,8 @@ struct source_facts_validation_error {
         return "alias facts are not in source declaration order";
     case source_facts_error_code::alias_modifier_partition:
         return "alias type modifiers do not form an exact dense partition";
+    case source_facts_error_code::construction_value_invalid:
+        return "invalid managed construction value or binding operand";
     }
     return "source facts validation failed";
 }

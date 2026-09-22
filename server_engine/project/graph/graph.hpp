@@ -62,9 +62,10 @@ struct member_record final {
     TypeRef type{};
     source_member_access access = source_member_access::public_access;
     std::uint8_t reserved[3]{};
+    construction_value construction{};
 };
 
-static_assert(sizeof(member_record) == 12);
+static_assert(sizeof(member_record) == 28);
 
 struct enum_value_record final {
     std::uint64_t bits = 0;

@@ -250,6 +250,15 @@ Current Graph
 
 Implementation State contains deterministic ABI-derived facts only. Runtime owns live addresses and native references. Graph remains semantic-only.
 
+Method facts and initializer source spans are transient Parser output. Normalized
+field constants and local binding operands persist through SourceContribution and
+Graph (compiled image v3, build-cache v6). Braced initializer trees use canonical
+interned text in the compiled string table. Managed Runtime derives recursive record layouts,
+allocates owned storage, applies defaults, resolves reference aliases and propagates
+value links. It does not invoke native C++ constructors or expose native class
+addresses. Construction is transactional; unsupported capabilities fail explicitly.
+
+
 ## 17. Frozen rules
 
 1. One loaded Project and one current Graph.

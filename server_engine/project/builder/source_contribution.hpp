@@ -35,6 +35,7 @@ struct source_contribution_member final {
     string_id name{};
     source_member_access access = source_member_access::public_access;
     std::uint8_t reserved[3]{};
+    construction_value construction{};
 };
 
 struct source_contribution_enum_value final {
@@ -45,6 +46,7 @@ struct source_contribution_enum_value final {
 struct source_contribution_object final {
     identity_ref identity = nullptr;
     source_contribution_type_ref type{};
+    std::uint32_t construction_flags = 0;
 };
 
 struct source_contribution_link final {

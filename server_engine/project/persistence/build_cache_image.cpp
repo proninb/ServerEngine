@@ -98,10 +98,10 @@ constexpr std::uint32_t frontend_object_slot_record_size = 16;
 constexpr std::uint32_t frontend_member_slot_record_size = 12;
 constexpr std::uint32_t contribution_state_record_size = 56;
 constexpr std::uint32_t contribution_type_record_size = 16;
-constexpr std::uint32_t contribution_member_record_size = 24;
+constexpr std::uint32_t contribution_member_record_size = 40;
 constexpr std::uint32_t contribution_modifier_record_size = 16;
 constexpr std::uint32_t contribution_enum_value_record_size = 16;
-constexpr std::uint32_t contribution_object_record_size = 20;
+constexpr std::uint32_t contribution_object_record_size = 24;
 constexpr std::uint32_t contribution_link_record_size = 16;
 constexpr std::uint32_t construction_state_record_size = 40;
 constexpr std::uint32_t type_ref_record_size = 4;
@@ -3308,6 +3308,8 @@ status build_cache_image_view::contribution_member(
         static_cast<intrinsic_type>(raw_intrinsic);
     output.name = string_from_raw(read_u32(record + 16));
     output.access = static_cast<source_member_access>(raw_access);
+    output.construction = read_construction(record + 24);
+    if (!valid_construction(output.construction)) return {status_code::artifact_corrupt};
 
     return output.name
         ? status{}
@@ -3388,6 +3390,8 @@ status build_cache_image_view::contribution_object(
     output.identity = identity_from_raw(read_u32(record));
     output.type.identity = identity_from_raw(read_u32(record + 4));
     output.type.modifiers = read_range(record + 8);
+    output.construction_flags = read_u32(record + 20);
+    if (output.construction_flags > 1) return {status_code::artifact_corrupt};
     output.type.intrinsic =
         static_cast<intrinsic_type>(raw_intrinsic);
 
@@ -4047,6 +4051,15 @@ status build_cache_image_view::verify_contents(
                 : enum_values.count;
         if (!valid_range(value.definition_items, limit))
             return {status_code::artifact_corrupt};
+        if (value.kind == source_contribution_type_kind::record) {
+            for (std::uint32_t local = 0; local < value.definition_items.count; ++local) {
+                source_contribution_member member;
+                if (!contribution_member(value.definition_items.begin + local, member).ok() ||
+                    (member.construction.kind == construction_kind::member_binding &&
+                     member.construction.operand > value.definition_items.count))
+                    return {status_code::artifact_corrupt};
+            }
+        }
     }
 
     for (std::size_t index = 0; index < members.count; ++index) {
@@ -4831,6 +4844,9 @@ status build_cache_image_view::verify_against_impl(
             compiled.string(value.name).empty()) {
             return {status_code::artifact_corrupt};
         }
+        if (value.construction.kind == construction_kind::aggregate &&
+            compiled.string(value.construction.expression()).empty())
+            return {status_code::artifact_corrupt};
 
         if (value.type.identity) {
             if (!compiled.identity_valid(value.type.identity) ||
@@ -4919,9 +4935,12 @@ status build_cache_image_view::verify_against_impl(
         if (!ref)
             continue;
 
-        type_handle decoded;
-        if (!compiled.named(ref, decoded) ||
-            decoded.value() != index) {
+        // Historical canonical references survive removal of a named type.
+        // Validate their identity slot without requiring a live definition.
+        compiled_image_canonical_type_record decoded;
+        if (!compiled.canonical_type(ref, decoded).ok() ||
+            decoded.kind != canonical_type_kind::named ||
+            decoded.child_or_handle != index) {
             return {status_code::artifact_corrupt};
         }
     }
@@ -8738,6 +8757,8 @@ status encode_build_cache_image(
         [&](std::byte* target,
             const source_contribution_member& value) noexcept {
 
+            write_construction(target + 24, value.construction);
+
             write_u32(
                 target,
                 value.type.identity.value());
@@ -8845,6 +8866,7 @@ status encode_build_cache_image(
     const auto write_contribution_object =
         [&](std::byte* target,
             const source_contribution_object& value) noexcept {
+            write_u32(target + 20, value.construction_flags);
 
             write_u32(
                 target,

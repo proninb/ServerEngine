@@ -28,6 +28,7 @@ private:
     friend class string_table;
     friend class compiled_image_view;
     friend class build_cache_image_view;
+    friend struct construction_value;
 };
 
 static_assert(sizeof(string_id) == 4);

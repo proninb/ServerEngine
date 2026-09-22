@@ -75,7 +75,7 @@ struct run_result final {
                 static_cast<std::uint32_t>(index), 1};
             output.records.push_back(source_record_fact{
                 identity,
-                {},
+                {}, {}, {},
                 declaration,
                 source_record_declaration_kind::definition,
                 source_record_kind::struct_type});
@@ -122,7 +122,7 @@ struct run_result final {
                 source_member_access::public_access});
             output.records.push_back(source_record_fact{
                 identity,
-                source_fact_range{static_cast<std::uint32_t>(index), 1},
+                source_fact_range{static_cast<std::uint32_t>(index), 1}, {}, {},
                 declaration,
                 source_record_declaration_kind::definition,
                 source_record_kind::struct_type});
@@ -178,7 +178,7 @@ struct run_result final {
                 source_member_access::public_access});
             output.records.push_back(source_record_fact{
                 identities[index],
-                source_fact_range{static_cast<std::uint32_t>(index), 1},
+                source_fact_range{static_cast<std::uint32_t>(index), 1}, {}, {},
                 declaration,
                 source_record_declaration_kind::definition,
                 source_record_kind::struct_type});
@@ -307,7 +307,7 @@ struct incremental_fixture final {
                 return false;
             output.identities.push_back(identity);
             output.records.push_back(source_record_fact{
-                identity, {}, {0, 1}, source_record_declaration_kind::definition,
+                identity, {}, {}, {}, {0, 1}, source_record_declaration_kind::definition,
                 source_record_kind::struct_type});
         }
         output.sources.reserve(count);
@@ -406,7 +406,7 @@ void print_incremental(std::size_t total, std::string_view scenario, const incre
             member_name, {0, 5}, source_member_access::public_access},
     };
     const std::array records{
-        source_record_fact{target_identity, {0, 1}, {0, 5},
+        source_record_fact{target_identity, {0, 1}, {}, {}, {0, 5},
             source_record_declaration_kind::definition, source_record_kind::struct_type},
     };
     const source_facts modified{

@@ -18,7 +18,7 @@ namespace cw::server {
 
 class project_context;
 
-inline constexpr std::uint32_t compiled_image_format_version = 1;
+inline constexpr std::uint32_t compiled_image_format_version = 3;
 inline constexpr std::size_t compiled_image_header_size = 256;
 inline constexpr std::size_t compiled_image_directory_count = 16;
 inline constexpr std::size_t compiled_image_directory_entry_size = 32;
@@ -76,6 +76,7 @@ struct compiled_image_member_record final {
     string_id name{};
     TypeRef type{};
     source_member_access access = source_member_access::public_access;
+    construction_value construction{};
 };
 
 struct compiled_image_enum_value_record final {
@@ -111,7 +112,7 @@ struct compiled_image_canonical_type_record final {
 };
 
 static_assert(sizeof(compiled_image_type_record) == 12);
-static_assert(sizeof(compiled_image_member_record) == 12);
+static_assert(sizeof(compiled_image_member_record) == 28);
 static_assert(sizeof(compiled_image_enum_value_record) == 16);
 static_assert(sizeof(compiled_image_object_record) == 8);
 static_assert(sizeof(compiled_image_link_record) == 16);

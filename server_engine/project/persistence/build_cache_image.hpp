@@ -22,7 +22,7 @@ class project_context;
 class source_manager;
 class source_manager_image_view;
 
-inline constexpr std::uint32_t build_cache_image_format_version = 4;
+inline constexpr std::uint32_t build_cache_image_format_version = 6;
 inline constexpr std::size_t build_cache_image_header_size = 256;
 inline constexpr std::size_t build_cache_image_directory_count = 25;
 inline constexpr std::size_t build_cache_image_directory_entry_size = 32;

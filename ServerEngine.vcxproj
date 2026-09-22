@@ -38,6 +38,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="server_engine\main.cpp" />
+    <ClCompile Include="server_engine\project\runtime\managed_runtime.cpp" />
     <ClCompile Include="server_engine\diagnostics\diagnostic_buffer.cpp" />
     <ClCompile Include="server_engine\json\json_parser.cpp" />
     <ClCompile Include="server_engine\config\server_configuration_loader.cpp" />
@@ -47,6 +48,8 @@
     <ClCompile Include="server_engine\project\project_build_orchestrator.cpp" />
     <ClCompile Include="server_engine\project\project_manager.cpp" />
     <ClCompile Include="server_engine\project\persistence\baseline_store.cpp" />
+    <ClCompile Include="server_engine\project\persistence\hard_link_policy.cpp" />
+    <ClCompile Include="server_engine\project\persistence\change_state_image.cpp" />
     <ClCompile Include="server_engine\project\persistence\source_manager_image.cpp" />
     <ClCompile Include="server_engine\project\persistence\compiled_image.cpp" />
     <ClCompile Include="server_engine\project\persistence\build_cache_image.cpp" />
@@ -58,6 +61,7 @@
     <ClCompile Include="server_engine\project\frontend\source_frontend_generation.cpp" />
     <ClCompile Include="server_engine\project\frontend\source_frontend_incremental.cpp" />
     <ClCompile Include="server_engine\project\frontend\source_frontend_cache.cpp" />
+    <ClCompile Include="server_engine\project\frontend\source_frontend_block_store.cpp" />
     <ClCompile Include="server_engine\project\builder\source_contribution.cpp" />
     <ClCompile Include="server_engine\project\builder\generation_builder.cpp" />
     <ClCompile Include="server_engine\project\graph\graph.cpp" />

@@ -686,6 +686,7 @@ private:
     friend class project_build_orchestrator;
     friend class project_manager;
     friend class source_frontend_generation;
+    friend class managed_graph_reader;
 };
 
 // Storage-neutral Source Manager subset exposed to READY readers.
@@ -835,6 +836,7 @@ private:
 
     friend class project_manager;
     friend class project_access;
+    friend class managed_runtime;
 };
 
 } // namespace cw::server

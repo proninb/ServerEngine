@@ -213,6 +213,11 @@ status validate_source_facts(
         const auto member_end = static_cast<std::size_t>(item.members.begin) + item.members.count;
         std::uint32_t previous_member_offset = 0;
         for (std::size_t member_index = item.members.begin; member_index < member_end; ++member_index) {
+            const auto value = members[member_index].construction;
+            if (!valid_construction(value) ||
+                (value.kind == construction_kind::member_binding && value.operand > item.members.count))
+                return fail(error, source_facts_error_code::construction_value_invalid,
+                    source_fact_category::member_fact, member_index, members[member_index].declaration);
             if (!contains(item.declaration, members[member_index].declaration)) {
                 return fail(error, source_facts_error_code::member_range,
                     source_fact_category::member_fact, member_index, members[member_index].declaration);
@@ -466,6 +471,9 @@ status validate_source_facts(
     std::uint32_t previous_object_offset = 0;
     for (std::size_t index = 0; index < objects.size(); ++index) {
         const auto& item = objects[index];
+        if (item.construction_flags > 1)
+            return fail(error, source_facts_error_code::construction_value_invalid,
+                source_fact_category::object_fact, index, item.declaration);
         if (item.identity == nullptr) {
             return fail(error, source_facts_error_code::object_identity_missing,
                 source_fact_category::object_fact, index, item.declaration);

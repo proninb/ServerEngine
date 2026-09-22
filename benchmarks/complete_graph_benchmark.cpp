@@ -49,7 +49,7 @@ struct full_fixture final {
         source_type_ref::builtin(intrinsic_type::signed_int, {}, {0, 1}),
         fixture.out_name, {0, 1}, source_member_access::public_access};
     fixture.records[0] = source_record_fact{
-        fixture.type_identity, {0, 2}, {0, 1},
+        fixture.type_identity, {0, 2}, {}, {}, {0, 1},
         source_record_declaration_kind::definition, source_record_kind::struct_type};
 
     try {
@@ -154,7 +154,7 @@ struct sparse_fixture final {
             alt_name, {0, 1}, source_member_access::public_access},
     };
     fixture.records[0] = source_record_fact{
-        fixture.type_identity, {0, 3}, {0, 1},
+        fixture.type_identity, {0, 3}, {}, {}, {0, 1},
         source_record_declaration_kind::definition, source_record_kind::struct_type};
 
     try {

@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "server": { "endpoints": [], "console": true },
+  "logging": { "level": "info", "console": true },
+  "telemetry": { "metrics": true },
+  "project": { "path": "project.json" }
+}

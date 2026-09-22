@@ -192,7 +192,7 @@ graph::graph(
             const auto result = static_cast<const compiled_image_view*>(context)->member_at_slot(index, value);
             if (!result.ok())
                 return result;
-            output = member_record{value.name, value.type, value.access};
+            output = member_record{value.name, value.type, value.access, {}, value.construction};
             return status{};
         });
     enum_value_records.bind_baseline(

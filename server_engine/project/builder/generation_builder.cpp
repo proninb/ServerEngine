@@ -1566,7 +1566,7 @@ status generation_builder::prepare_incremental_graph(
                             }
 
                             prepared_update.members.push_back(member_record{
-                                member.name, current, member.access});
+                                member.name, current, member.access, {}, member.construction});
 
                             if (member.type.identity != nullptr) {
                                 std::uint32_t target_handle_value = 0;
@@ -1741,7 +1741,7 @@ status generation_builder::prepare_incremental_graph(
                     return result;
                 }
                 const bool was_live = entry->live();
-                *entry = object_entry{object_type, 0x80000000u};
+                *entry = object_entry{object_type, 0x80000000u | object.construction_flags};
                 if (!was_live)
                     ++prepared_update.live_object_count;
             }
@@ -2417,7 +2417,7 @@ status generation_builder::prepare_graph(
             }
             object_type_refs[index] = current;
             prepared_graph.objects[index].type = current;
-            prepared_graph.objects[index].flags = 0x80000000u;
+            prepared_graph.objects[index].flags = 0x80000000u | object.construction_flags;
         }
         const auto type_ref_end = clock_type::now();
         telemetry_value.type_ref_materialization_ns = elapsed_ns(type_ref_begin, type_ref_end);
@@ -2473,6 +2473,7 @@ status generation_builder::prepare_graph(
                         materialized.name = contribution_member.name;
                         materialized.type = member_type_refs[member_index];
                         materialized.access = contribution_member.access;
+                        materialized.construction = contribution_member.construction;
                         prepared_graph.members.push_back(materialized);
                         if (contribution_member.type.identity != nullptr) {
                             const auto target_handle = member_base_handles[member_index];

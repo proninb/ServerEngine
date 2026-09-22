@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "name": "Managed initialization and links",
+  "project": [{ "path": "model.hpp", "role": "type" }],
+  "configuration": { "abi": { "target": "windows-x64", "pack": 8 } }
+}

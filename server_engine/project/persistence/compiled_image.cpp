@@ -44,7 +44,7 @@ constexpr std::uint32_t string_core_size = 16;
 constexpr std::uint32_t index_record_size = 8;
 constexpr std::uint32_t identity_core_size = 12;
 constexpr std::uint32_t type_record_size = 12;
-constexpr std::uint32_t member_record_size = 12;
+constexpr std::uint32_t member_record_size = 28;
 constexpr std::uint32_t enum_value_record_size = 16;
 constexpr std::uint32_t object_record_size = 8;
 constexpr std::uint32_t link_record_size = 16;
@@ -1258,6 +1258,8 @@ status compiled_image_view::member(
     output.name = string_id{raw_name};
     output.type = type_ref_from_raw(raw_type);
     output.access = static_cast<source_member_access>(access);
+    output.construction = read_construction(record + 12);
+    if (!valid_construction(output.construction)) return {status_code::artifact_corrupt};
     return {};
 }
 
@@ -1312,6 +1314,8 @@ status compiled_image_view::member_at_slot(
     output.name = string_id{raw_name};
     output.type = type_ref_from_raw(raw_type);
     output.access = static_cast<source_member_access>(access);
+    output.construction = read_construction(record + 12);
+    if (!valid_construction(output.construction)) return {status_code::artifact_corrupt};
     return {};
 }
 
@@ -1963,6 +1967,14 @@ status compiled_image_view::verify_contents() const noexcept {
 
             if (begin > limit || count > limit - begin)
                 return {status_code::artifact_corrupt};
+            if (value.kind == graph_type_kind::record) {
+                const auto* members = section(compiled_image_section::members).data;
+                for (std::uint64_t local = 0; local < count; ++local) {
+                    const auto construction = read_construction(members + (begin + local) * member_record_size + 12);
+                    if (construction.kind == construction_kind::member_binding && construction.operand > count)
+                        return {status_code::artifact_corrupt};
+                }
+            }
         }
 
         if (value.live()) {
@@ -2017,9 +2029,12 @@ status compiled_image_view::verify_contents() const noexcept {
             type == 0 ||
             type >= canonical_type_slot_count() ||
             !valid_member_access(access) ||
-            !zero_bytes(record + 9, 3)) {
+            !zero_bytes(record + 9, 3) || !valid_construction(read_construction(record + 12))) {
             return {status_code::artifact_corrupt};
         }
+        const auto construction = read_construction(record + 12);
+        if (construction.kind == construction_kind::aggregate && string(construction.expression()).empty())
+            return {status_code::artifact_corrupt};
     }
 
     const auto& enum_values = section(compiled_image_section::enum_values);
@@ -4636,6 +4651,8 @@ status encode_compiled_image(
     const auto write_member =
         [&](std::byte* record,
             const member_record& value) noexcept {
+
+            write_construction(record + 12, value.construction);
 
             write_u32(
                 record,
